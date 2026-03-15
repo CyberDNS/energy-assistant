@@ -26,3 +26,7 @@ secrets.yaml
 secrets.yaml.bak
 *.key
 *.pem
+
+# Energy Assistant — local device configuration (user/device-specific, not for git)
+config.yaml
+config.yaml.bak

@@ -4,23 +4,26 @@ Quick sanity check for the tibber_iobroker plugin against a real ioBroker instan
 Run with:
     python scripts/try_tibber.py
 
-Credentials are loaded from secrets.yaml in the project root (gitignored).
-Copy secrets.yaml.example → secrets.yaml and fill in your values.
+Device configuration is loaded from config.yaml in the project root (gitignored).
+Copy config.yaml.example → config.yaml and fill in your values.
 """
 
 import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import yaml
+
 from energy_manager.plugins._iobroker.client import IoBrokerClient
 from energy_manager.plugins.tibber_iobroker.tariff import TibberIoBrokerTariff
-from energy_manager.secrets import SecretsManager
 
-_secrets = SecretsManager(Path(__file__).parent.parent / "secrets.yaml")
+_ROOT = Path(__file__).parent.parent
+with open(_ROOT / "config.yaml") as _f:
+    _cfg = yaml.safe_load(_f)
 
-HOST = _secrets.get("iobroker_host")
-PORT = int(_secrets.get("iobroker_port"))
-HOME_ID = _secrets.get("tibber_home_id")
+HOST = _cfg["iobroker"]["host"]
+PORT = int(_cfg["iobroker"]["port"])
+HOME_ID = _cfg["tibber_iobroker"]["home_id"]
 
 
 async def main() -> None:
