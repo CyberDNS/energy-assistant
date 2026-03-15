@@ -59,6 +59,28 @@ class DeviceCommand(BaseModel):
     value: Any = None
 
 
+class StorageConstraints(BaseModel):
+    """
+    Optimization capability declaration for a controllable storage device.
+
+    A device plugin populates this and places it in ``OptimizationContext``
+    so the optimizer discovers all controllable batteries generically, without
+    being coupled to any specific device type or plugin.
+
+    Populated by the device plugin from config (capacity, power limits) and
+    combined with live SoC bounds from ``DeviceState.extra`` by the optimizer.
+    """
+
+    device_id: str
+    capacity_kwh: float
+    max_charge_kw: float
+    max_discharge_kw: float
+    charge_efficiency: float = 0.95
+    discharge_efficiency: float = 0.95
+    min_soc_pct: float = 10.0
+    max_soc_pct: float = 100.0
+
+
 # ---------------------------------------------------------------------------
 # Measurements (persisted history)
 # ---------------------------------------------------------------------------

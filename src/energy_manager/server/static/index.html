@@ -1,0 +1,759 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Energy Assistant</title>
+  <style>
+    /* ── Reset & base ─────────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:           #111111;
+      --card-bg:      #1c1c1e;
+      --card-border:  rgba(255,255,255,0.08);
+      --header-bg:    #18181a;
+      --primary:      #03a9f4;
+      --green:        #4caf50;
+      --orange:       #ff9800;
+      --red:          #f44336;
+      --yellow:       #fdd835;
+      --cyan:         #00bcd4;
+      --text-primary: #e1e1e1;
+      --text-sec:     rgba(225,225,225,0.55);
+      --divider:      rgba(255,255,255,0.08);
+      --radius:       12px;
+      --radius-sm:    8px;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text-primary);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 14px;
+      min-height: 100vh;
+    }
+
+    /* ── Header ───────────────────────────────────────────────────────────── */
+    .header {
+      background: var(--header-bg);
+      border-bottom: 1px solid var(--divider);
+      padding: 0 20px;
+      height: 56px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+    .header-title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 18px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+    .header-title svg { color: var(--yellow); }
+    .header-meta {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--text-sec);
+    }
+    .dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--text-sec);
+    }
+    .dot.live { background: var(--green); box-shadow: 0 0 6px var(--green); }
+
+    /* ── Main grid ────────────────────────────────────────────────────────── */
+    .main {
+      padding: 20px;
+      max-width: 1200px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 16px;
+    }
+    .full-width { grid-column: 1 / -1; }
+
+    /* ── Card ─────────────────────────────────────────────────────────────── */
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+    .card-header {
+      padding: 14px 16px 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--divider);
+    }
+    .card-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-sec);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .card-body { padding: 16px; }
+
+    /* ── Badge ─────────────────────────────────────────────────────────────── */
+    .badge {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 3px 8px;
+      border-radius: 20px;
+      letter-spacing: 0.04em;
+    }
+    .badge-blue   { background: rgba(3,169,244,0.18);  color: var(--primary); }
+    .badge-green  { background: rgba(76,175,80,0.18);  color: var(--green); }
+    .badge-orange { background: rgba(255,152,0,0.18);  color: var(--orange); }
+    .badge-red    { background: rgba(244,67,54,0.18);  color: var(--red); }
+    .badge-gray   { background: rgba(255,255,255,0.08); color: var(--text-sec); }
+    .badge-yellow { background: rgba(253,216,53,0.18); color: var(--yellow); }
+
+    /* ── Big number ────────────────────────────────────────────────────────── */
+    .big-num {
+      font-size: 36px;
+      font-weight: 300;
+      line-height: 1;
+      letter-spacing: -0.02em;
+    }
+    .big-unit {
+      font-size: 14px;
+      color: var(--text-sec);
+      margin-left: 2px;
+    }
+
+    /* ── SoC bar ──────────────────────────────────────────────────────────── */
+    .soc-bar-wrap {
+      margin: 14px 0 8px;
+      background: rgba(255,255,255,0.07);
+      border-radius: 4px;
+      height: 8px;
+      overflow: hidden;
+    }
+    .soc-bar-fill {
+      height: 100%;
+      border-radius: 4px;
+      transition: width 0.6s ease;
+    }
+    .soc-bar-fill.high   { background: linear-gradient(90deg, var(--green), #81c784); }
+    .soc-bar-fill.medium { background: linear-gradient(90deg, var(--orange), #ffb74d); }
+    .soc-bar-fill.low    { background: linear-gradient(90deg, var(--red), #ef9a9a); }
+    .soc-label {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+      color: var(--text-sec);
+      margin-bottom: 2px;
+    }
+    .soc-pct {
+      font-size: 18px;
+      font-weight: 600;
+      margin-top: 4px;
+    }
+
+    /* ── Power row ────────────────────────────────────────────────────────── */
+    .power-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px solid var(--divider);
+    }
+    .power-item { text-align: center; flex: 1; }
+    .power-icon { font-size: 20px; margin-bottom: 2px; }
+    .power-val  { font-size: 16px; font-weight: 600; }
+    .power-lbl  { font-size: 11px; color: var(--text-sec); }
+    .power-divider {
+      width: 1px;
+      height: 40px;
+      background: var(--divider);
+    }
+
+    /* ── Mode card ────────────────────────────────────────────────────────── */
+    .mode-name {
+      font-size: 22px;
+      font-weight: 600;
+      margin-bottom: 4px;
+      text-transform: capitalize;
+    }
+    .mode-target {
+      font-size: 32px;
+      font-weight: 300;
+      letter-spacing: -0.02em;
+    }
+    .mode-meta {
+      font-size: 12px;
+      color: var(--text-sec);
+      margin-top: 4px;
+    }
+
+    /* ── Home power card ──────────────────────────────────────────────────── */
+    .power-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    .power-cell {
+      background: rgba(255,255,255,0.04);
+      border-radius: var(--radius-sm);
+      padding: 12px;
+    }
+    .power-cell-label {
+      font-size: 11px;
+      color: var(--text-sec);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 4px;
+    }
+    .power-cell-val {
+      font-size: 22px;
+      font-weight: 600;
+    }
+    .color-pv      { color: var(--yellow); }
+    .color-house   { color: var(--primary); }
+    .color-overflow{ color: var(--green); }
+    .color-cars    { color: var(--cyan); }
+
+    /* ── Schedule ──────────────────────────────────────────────────────────── */
+    .schedule-container {
+      overflow-x: auto;
+      padding-bottom: 4px;
+    }
+    .schedule-chart {
+      display: flex;
+      align-items: flex-end;
+      gap: 4px;
+      min-width: 600px;
+      height: 100px;
+      padding: 0 2px;
+    }
+    .slot {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 2px;
+      cursor: default;
+      position: relative;
+    }
+    .slot.active .slot-bar-wrap {
+      outline: 2px solid var(--primary);
+      outline-offset: 1px;
+      border-radius: 3px;
+    }
+    .slot-bar-wrap {
+      width: 100%;
+      height: 72px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: stretch;
+      position: relative;
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    .slot-midline {
+      position: absolute;
+      top: 50%;
+      left: 0; right: 0;
+      height: 1px;
+      background: var(--divider);
+    }
+    .slot-bar {
+      position: absolute;
+      left: 0; right: 0;
+      border-radius: 2px;
+    }
+    .slot-bar.charge    { background: var(--primary); bottom: 50%; }
+    .slot-bar.discharge { background: var(--orange);  top: 50%; }
+    .slot-bar.idle      { background: transparent; }
+    .slot-hour {
+      font-size: 10px;
+      color: var(--text-sec);
+      white-space: nowrap;
+    }
+    .slot.active .slot-hour { color: var(--primary); font-weight: 700; }
+    .slot-val {
+      font-size: 9px;
+      color: var(--text-sec);
+      white-space: nowrap;
+    }
+
+    .no-plan {
+      text-align: center;
+      color: var(--text-sec);
+      padding: 32px 16px;
+      font-size: 13px;
+    }
+
+    /* ── Connecting overlay ────────────────────────────────────────────────── */
+    #connecting {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.7);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 999;
+      font-size: 16px;
+      color: var(--text-sec);
+      gap: 12px;
+    }
+    .spinner {
+      width: 20px; height: 20px;
+      border: 2px solid var(--divider);
+      border-top-color: var(--primary);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Utilities ─────────────────────────────────────────────────────────── */
+    .dash { color: var(--text-sec); }
+    .mt8  { margin-top: 8px; }
+  </style>
+</head>
+<body>
+
+<div id="connecting"><div class="spinner"></div> Connecting…</div>
+
+<header class="header">
+  <div class="header-title">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+      <path d="M7 2v11h3v9l7-12h-4l4-8z"/>
+    </svg>
+    Energy Assistant
+  </div>
+  <div class="header-meta">
+    <div class="dot" id="live-dot"></div>
+    <span id="last-update">—</span>
+  </div>
+</header>
+
+<main class="main">
+
+  <!-- Controller card -->
+  <div class="card" id="card-controller">
+    <div class="card-header">
+      <div class="card-title">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/>
+        </svg>
+        Controller
+      </div>
+      <span class="badge badge-gray" id="mode-badge">—</span>
+    </div>
+    <div class="card-body">
+      <div class="mode-name" id="mode-name">Starting…</div>
+      <div>
+        <span class="mode-target" id="target-w">—</span>
+        <span class="big-unit">W</span>
+      </div>
+      <div class="mode-meta" id="mode-meta">Waiting for first tick</div>
+    </div>
+  </div>
+
+  <!-- Home Power card -->
+  <div class="card" id="card-home">
+    <div class="card-header">
+      <div class="card-title">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/>
+        </svg>
+        Home Power
+      </div>
+    </div>
+    <div class="card-body">
+      <div class="power-grid">
+        <div class="power-cell">
+          <div class="power-cell-label">☀️ Solar PV</div>
+          <div class="power-cell-val color-pv" id="pv-w">—</div>
+          <div style="font-size:11px;color:var(--text-sec)">W</div>
+        </div>
+        <div class="power-cell">
+          <div class="power-cell-label">🏠 Household</div>
+          <div class="power-cell-val color-house" id="house-w">—</div>
+          <div style="font-size:11px;color:var(--text-sec)">W</div>
+        </div>
+        <div class="power-cell">
+          <div class="power-cell-label">⬆️ Grid Export</div>
+          <div class="power-cell-val color-overflow" id="overflow-w">—</div>
+          <div style="font-size:11px;color:var(--text-sec)">W</div>
+        </div>
+        <div class="power-cell">
+          <div class="power-cell-label">🚗 Cars</div>
+          <div class="power-cell-val color-cars" id="cars-w">—</div>
+          <div style="font-size:11px;color:var(--text-sec)">W</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Grid meter card (SMA Energy Manager) -->
+  <div class="card" id="card-grid" style="display:none">
+    <div class="card-header">
+      <div class="card-title">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z"/>
+        </svg>
+        Grid Meter
+      </div>
+      <span class="badge badge-gray">SMA EM + Tibber + MT175</span>
+    </div>
+    <div class="card-body">
+      <div class="power-grid" id="grid-body">
+        <div class="power-cell">
+          <div class="power-cell-label">⬇️ Import</div>
+          <div class="power-cell-val" style="color:var(--red)" id="grid-import-w">—</div>
+          <div style="font-size:11px;color:var(--text-sec)">W</div>
+        </div>
+        <div class="power-cell">
+          <div class="power-cell-label">⬆️ Export</div>
+          <div class="power-cell-val color-overflow" id="grid-export-w">—</div>
+          <div style="font-size:11px;color:var(--text-sec)">W</div>
+        </div>
+        <div class="power-cell">
+          <div class="power-cell-label">⚡ Net (SMA EM)</div>
+          <div class="power-cell-val" id="grid-net-w">—</div>
+          <div style="font-size:11px;color:var(--text-sec)">W</div>
+        </div>
+        <div class="power-cell">
+          <div class="power-cell-label">⚡ Net (Tibber)</div>
+          <div class="power-cell-val" id="grid-tibber-w">—</div>
+          <div style="font-size:11px;color:var(--text-sec)">W</div>
+        </div>
+        <div class="power-cell">
+          <div class="power-cell-label">⚡ Net (MT175)</div>
+          <div class="power-cell-val" id="grid-mt175-w">—</div>
+          <div style="font-size:11px;color:var(--text-sec)">W</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Zendure battery card -->
+  <div class="card" id="card-zendure">
+    <div class="card-header">
+      <div class="card-title">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M15.67 4H14V2h-4v2H8.33C7.6 4 7 4.6 7 5.33v15.33C7 21.4 7.6 22 8.33 22h7.33c.74 0 1.34-.6 1.34-1.33V5.33C17 4.6 16.4 4 15.67 4z"/>
+        </svg>
+        Zendure Hub
+      </div>
+      <span class="badge badge-blue">Controllable</span>
+    </div>
+    <div class="card-body">
+      <div id="zendure-body">
+        <div class="dash">—</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SMA battery card -->
+  <div class="card" id="card-sma">
+    <div class="card-header">
+      <div class="card-title">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M15.67 4H14V2h-4v2H8.33C7.6 4 7 4.6 7 5.33v15.33C7 21.4 7.6 22 8.33 22h7.33c.74 0 1.34-.6 1.34-1.33V5.33C17 4.6 16.4 4 15.67 4z"/>
+        </svg>
+        SMA Battery
+      </div>
+      <span class="badge badge-gray">Read-only</span>
+    </div>
+    <div class="card-body">
+      <div id="sma-body">
+        <div class="dash">—</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 24h Schedule card -->
+  <div class="card full-width">
+    <div class="card-header">
+      <div class="card-title">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M19 3h-1V1h-2v2H8V1H6v2H5c-1.11 0-1.99.9-1.99 2L3 19c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V8h14v11zM7 10h5v5H7z"/>
+        </svg>
+        24-hour Schedule
+      </div>
+      <span class="badge badge-gray" id="schedule-meta">No plan</span>
+    </div>
+    <div class="card-body">
+      <div id="schedule-container">
+        <div class="no-plan">Waiting for first MILP solve…</div>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<script>
+// ── Helpers ───────────────────────────────────────────────────────────────
+
+function fmt(w, decimals = 0) {
+  if (w === null || w === undefined) return '—';
+  return Math.round(Math.abs(w)).toLocaleString();
+}
+
+function fmtSigned(w) {
+  if (w === null || w === undefined) return '—';
+  const abs = Math.round(Math.abs(w)).toLocaleString();
+  if (w < -5)  return `−${abs}`;
+  if (w >  5)  return `+${abs}`;
+  return '0';
+}
+
+function modeColor(mode) {
+  if (!mode) return 'badge-gray';
+  const m = mode.toLowerCase();
+  if (m.includes('maintenance')) return 'badge-red';
+  if (m.includes('discharge'))   return 'badge-orange';
+  if (m.includes('charge'))      return 'badge-blue';
+  if (m.includes('max'))         return 'badge-gray';
+  if (m.includes('no action'))   return 'badge-gray';
+  return 'badge-gray';
+}
+
+function targetColor(w) {
+  if (w < -5)  return 'var(--primary)';
+  if (w >  5)  return 'var(--orange)';
+  return 'var(--text-sec)';
+}
+
+function socClass(pct) {
+  if (pct === null || pct === undefined) return 'high';
+  if (pct >= 50) return 'high';
+  if (pct >= 20) return 'medium';
+  return 'low';
+}
+
+function powerDirection(w) {
+  if (w < -5)  return { icon: '⬇', label: 'Charging',    color: 'var(--primary)' };
+  if (w >  5)  return { icon: '⬆', label: 'Discharging', color: 'var(--orange)' };
+  return { icon: '⏸', label: 'Idle', color: 'var(--text-sec)' };
+}
+
+function localHour(isoStr) {
+  const d = new Date(isoStr);
+  return d.getHours().toString().padStart(2, '0');
+}
+
+// ── Battery card HTML ────────────────────────────────────────────────────
+
+function batteryHTML(b) {
+  if (!b) return '<div class="dash">No data</div>';
+  const soc = b.soc_pct !== null && b.soc_pct !== undefined
+    ? `${Math.round(b.soc_pct)}%` : '—';
+  const socWidth = b.soc_pct !== null && b.soc_pct !== undefined
+    ? `${Math.min(100, Math.max(0, b.soc_pct))}%` : '0%';
+  const cls = socClass(b.soc_pct);
+  const dir = b.power_w !== null ? powerDirection(b.power_w) : null;
+
+  return `
+    <div class="soc-label">
+      <span>State of charge</span>
+      <span class="soc-pct">${soc}</span>
+    </div>
+    <div class="soc-bar-wrap">
+      <div class="soc-bar-fill ${cls}" style="width:${socWidth}"></div>
+    </div>
+    <div class="power-row">
+      <div class="power-item">
+        <div class="power-icon">${dir ? dir.icon : '—'}</div>
+        <div class="power-val" style="color:${dir ? dir.color : 'var(--text-sec)'}">
+          ${b.power_w !== null ? fmt(b.power_w) : '—'}
+        </div>
+        <div class="power-lbl">${dir ? dir.label : 'Unknown'}</div>
+      </div>
+      <div class="power-divider"></div>
+      <div class="power-item">
+        <div class="power-lbl" style="margin-top:4px">Power</div>
+        <div class="power-val" style="color:${dir ? dir.color : 'var(--text-sec)'}">
+          ${b.power_w !== null ? fmt(b.power_w) : '—'} <span style="font-size:11px;color:var(--text-sec)">W</span>
+        </div>
+        <div class="power-lbl">${dir ? dir.label : '—'}</div>
+      </div>
+    </div>`;
+}
+
+// ── Schedule chart HTML ──────────────────────────────────────────────────
+
+function scheduleHTML(slots) {
+  if (!slots || slots.length === 0) {
+    return '<div class="no-plan">Waiting for first MILP solve…</div>';
+  }
+
+  // Max power scale — use the largest absolute value, minimum 300W
+  const maxW = Math.max(300, ...slots.map(s => Math.abs(s.planned_w)));
+
+  let bars = slots.map(s => {
+    const pct = Math.round(Math.abs(s.planned_w) / maxW * 100 * 0.9); // 90% = half height
+    let barClass, barStyle;
+    if (s.planned_w < -10) {
+      barClass = 'charge';
+      barStyle = `height:${pct}%`;
+    } else if (s.planned_w > 10) {
+      barClass = 'discharge';
+      barStyle = `height:${pct}%`;
+    } else {
+      barClass = 'idle';
+      barStyle = 'height:1px;top:50%';
+    }
+    const activeClass = s.active ? 'active' : '';
+    const hour = localHour(s.hour_iso);
+    const valLabel = Math.abs(s.planned_w) > 10
+      ? `${Math.round(Math.abs(s.planned_w) / 100) / 10}k`
+      : '';
+
+    return `
+      <div class="slot ${activeClass}" title="${hour}:00  ${fmtSigned(s.planned_w)} W">
+        <div class="slot-bar-wrap">
+          <div class="slot-midline"></div>
+          <div class="slot-bar ${barClass}" style="${barStyle}"></div>
+        </div>
+        <div class="slot-hour">${hour}</div>
+      </div>`;
+  }).join('');
+
+  return `<div class="schedule-container"><div class="schedule-chart">${bars}</div></div>
+    <div style="display:flex;gap:16px;margin-top:10px;font-size:11px;color:var(--text-sec)">
+      <span><span style="color:var(--primary)">■</span> Charge</span>
+      <span><span style="color:var(--orange)">■</span> Discharge</span>
+      <span><span style="color:var(--divider)">■</span> Idle</span>
+    </div>`;
+}
+
+// ── Update UI ────────────────────────────────────────────────────────────
+
+function updateUI(data) {
+  // Header
+  const ts = new Date(data.timestamp);
+  document.getElementById('last-update').textContent =
+    ts.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const dot = document.getElementById('live-dot');
+  dot.classList.add('live');
+
+  // Controller
+  const modeBadge = document.getElementById('mode-badge');
+  modeBadge.textContent = data.mode || '—';
+  modeBadge.className = 'badge ' + modeColor(data.mode);
+
+  const modeName = document.getElementById('mode-name');
+  modeName.textContent = data.mode
+    ? data.mode.charAt(0).toUpperCase() + data.mode.slice(1)
+    : 'Unknown';
+
+  const targetEl = document.getElementById('target-w');
+  targetEl.textContent = fmtSigned(data.target_w);
+  targetEl.style.color = targetColor(data.target_w);
+
+  const modeMeta = document.getElementById('mode-meta');
+  if (data.maintenance_mode) {
+    modeMeta.innerHTML = '<span style="color:var(--red)">⚠ Maintenance mode active</span>';
+  } else {
+    modeMeta.textContent = data.target_w < -5
+      ? 'Charging from grid / PV'
+      : data.target_w > 5
+      ? 'Discharging to home'
+      : 'Idle';
+  }
+
+  // Home power
+  if (data.home_power) {
+    const hp = data.home_power;
+    document.getElementById('pv-w').textContent       = fmt(hp.pv_w);
+    document.getElementById('house-w').textContent    = fmt(hp.household_w);
+    document.getElementById('overflow-w').textContent = fmt(hp.overflow_w);
+    document.getElementById('cars-w').textContent     = fmt(hp.cars_w);
+  }
+
+  // Grid meter (SMA EM + Tibber)
+  const gridCard = document.getElementById('card-grid');
+  if (data.grid) {
+    gridCard.style.display = '';
+    document.getElementById('grid-import-w').textContent = fmt(data.grid.import_w);
+    document.getElementById('grid-export-w').textContent = fmt(data.grid.export_w);
+    const netEl = document.getElementById('grid-net-w');
+    netEl.textContent = fmt(data.grid.net_w);
+    netEl.style.color = (data.grid.net_w ?? 0) > 5 ? 'var(--red)' : (data.grid.net_w ?? 0) < -5 ? 'var(--green)' : 'var(--text-sec)';
+    const tibberEl = document.getElementById('grid-tibber-w');
+    if (data.grid.tibber_net_w !== null && data.grid.tibber_net_w !== undefined) {
+      tibberEl.textContent = fmt(data.grid.tibber_net_w);
+      tibberEl.style.color = data.grid.tibber_net_w > 5 ? 'var(--red)' : data.grid.tibber_net_w < -5 ? 'var(--green)' : 'var(--text-sec)';
+    } else {
+      tibberEl.textContent = '—';
+      tibberEl.style.color = '';
+    }
+    const mt175El = document.getElementById('grid-mt175-w');
+    if (data.grid.mt175_net_w !== null && data.grid.mt175_net_w !== undefined) {
+      mt175El.textContent = fmt(data.grid.mt175_net_w);
+      mt175El.style.color = data.grid.mt175_net_w > 5 ? 'var(--red)' : data.grid.mt175_net_w < -5 ? 'var(--green)' : 'var(--text-sec)';
+    } else {
+      mt175El.textContent = '—';
+      mt175El.style.color = '';
+    }
+  } else {
+    gridCard.style.display = 'none';
+  }
+
+  // Batteries
+  const zendure = data.batteries.find(b => b.device_id === 'zendure');
+  const sma     = data.batteries.find(b => b.device_id === 'sma_battery');
+  document.getElementById('zendure-body').innerHTML = batteryHTML(zendure);
+  document.getElementById('sma-body').innerHTML     = batteryHTML(sma);
+
+  // Schedule
+  const schedMeta = document.getElementById('schedule-meta');
+  if (data.schedule && data.schedule.length > 0) {
+    schedMeta.textContent = `${data.schedule.length} slots`;
+    schedMeta.className = 'badge badge-blue';
+  } else {
+    schedMeta.textContent = 'No plan';
+    schedMeta.className = 'badge badge-gray';
+  }
+  document.getElementById('schedule-container').innerHTML = scheduleHTML(data.schedule);
+}
+
+// ── SSE connection ────────────────────────────────────────────────────────
+
+function connect() {
+  const es = new EventSource('/events');
+
+  es.onopen = () => {
+    document.getElementById('connecting').style.display = 'none';
+  };
+
+  es.onmessage = (e) => {
+    try {
+      const data = JSON.parse(e.data);
+      updateUI(data);
+    } catch (err) {
+      console.error('Parse error', err);
+    }
+  };
+
+  es.onerror = () => {
+    document.getElementById('connecting').style.display = 'flex';
+    document.getElementById('live-dot').classList.remove('live');
+    // EventSource auto-reconnects; show overlay while disconnected
+  };
+}
+
+connect();
+</script>
+</body>
+</html>

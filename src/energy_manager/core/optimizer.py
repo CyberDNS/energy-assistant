@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING, Protocol
 
-from .models import DeviceState, EnergyPlan, ForecastPoint, ForecastQuantity
+from .models import DeviceState, EnergyPlan, ForecastPoint, ForecastQuantity, StorageConstraints
 
 if TYPE_CHECKING:
     from .constraint import Constraint
@@ -42,6 +42,9 @@ class OptimizationContext:
     """
 
     device_states: dict[str, DeviceState]
+    # Devices that declare themselves controllable populate this list so the
+    # optimizer can schedule them without knowing their concrete plugin type.
+    storage_constraints: list[StorageConstraints] = field(default_factory=list)
     tariffs: dict[str, "TariffModel"] = field(default_factory=dict)
     forecasts: dict[ForecastQuantity, list[ForecastPoint]] = field(default_factory=dict)
     constraints: list["Constraint"] = field(default_factory=list)

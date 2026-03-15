@@ -1,0 +1,63 @@
+# config.yaml.example — committed template, safe to share
+# Copy this file to config.yaml and fill in your own values.
+# config.yaml is gitignored — every developer/deployment has their own copy.
+#
+# Real secrets (API tokens, passwords) go in secrets.yaml — NOT here.
+
+iobroker:
+  host: "192.168.x.x"
+  port: 8087
+
+tibber_iobroker:
+  # Find your home ID under: tibberlink.0.Homes.*
+  home_id: "<your-tibber-home-id>"
+
+pvforecast_iobroker:
+  plant_id: "pv"
+  timezone: "Europe/Berlin"
+
+zendure_iobroker:
+  # Find hub_id and device_serial: python scripts/probe_iobroker.py zendure
+  hub_id: "<hub-id>"
+  device_serial: "<device-serial>"
+  # Capacity = number of AB2000 packs x 2 kWh. Confirm via packNum OID.
+  capacity_kwh: 8.0
+  max_charge_kw: 1.2
+  max_discharge_kw: 1.2
+  # Charge power (W) applied when SoC drops below 5% (maintenance mode).
+  maintenance_charge_w: 300
+
+sma_modbus_iobroker:
+  # SMA battery read via Modbus adapter (instance 0).
+  # This battery is NOT controllable — the SMA inverter manages it automatically.
+  # OID defaults follow the SMA Modbus register map; override if your model differs.
+  # oid_power_w: "modbus.0.inputRegisters.30775_PowerAC"  # signed; negative=charging
+  # oid_soc: "modbus.0.inputRegisters.30845_BAT_SoC"
+  # oid_max_charge_w: "modbus.0.holdingRegisters.40189_WMaxCha"
+  # oid_max_discharge_w: "modbus.0.holdingRegisters.40191_WMaxDsch"
+
+milp:
+  # Constant household background load when no load forecast is available.
+  baseline_load_kw: 0.3
+  # Grid feed-in tariff (EUR/kWh). Set to 0.0 if you don't sell back to the grid.
+  feed_in_eur_per_kwh: 0.082
+  # Planning horizon in hours.
+  horizon_hours: 24
+
+home_power_iobroker:
+  # Real-time home energy sensors from Home Assistant via ioBroker hass adapter.
+  # Override only if your HA entity IDs differ from the defaults.
+  # oid_household_w: "hass.0.entities.sensor.power_consumption_household.state"
+  # oid_overflow_w: "hass.0.entities.sensor.power_production_overflow_pv_only_household.state"
+  # oid_cars_w: "hass.0.entities.sensor.power_consumption_cars.state"
+  # oid_pv_w: "hass.0.entities.sensor.power_production_pv.state"
+
+controller:
+  # How often the control setpoint is sent to the Zendure battery (seconds).
+  control_interval_s: 15
+  # How often the MILP plan is re-solved (seconds). 3600 = once per hour.
+  plan_interval_s: 3600
+  # Set to true to compute setpoints without sending commands (safe for testing).
+  dry_run: false
+  # Planning horizon in hours (must match milp.horizon_hours).
+  horizon_hours: 24

@@ -117,10 +117,12 @@ class IoBrokerClient:
         Return the current value of an ioBroker state.
 
         Calls ``GET /get/<object_id>`` and returns the ``val`` field.
-        Returns ``None`` if the object does not exist or has no value.
+        Returns ``None`` if the object does not exist, has no value, or the
+        server returns a non-2xx response (e.g. 500 for unknown OIDs).
         """
         response = await self._http.get(f"/get/{object_id}")
-        response.raise_for_status()
+        if not response.is_success:
+            return None
         data = response.json()
         return data.get("val")
 
