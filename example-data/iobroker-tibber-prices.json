@@ -1,0 +1,770 @@
+[
+    {
+        "total": 0.3826,
+        "energy": 0.145,
+        "tax": 0.2376,
+        "startsAt": "2026-03-15T00:00:00.000+01:00",
+        "currency": "EUR",
+        "level": "EXPENSIVE"
+    },
+    {
+        "total": 0.3814,
+        "energy": 0.1439,
+        "tax": 0.2375,
+        "startsAt": "2026-03-15T00:15:00.000+01:00",
+        "currency": "EUR",
+        "level": "EXPENSIVE"
+    },
+    {
+        "total": 0.3719,
+        "energy": 0.136,
+        "tax": 0.2359,
+        "startsAt": "2026-03-15T00:30:00.000+01:00",
+        "currency": "EUR",
+        "level": "EXPENSIVE"
+    },
+    {
+        "total": 0.3581,
+        "energy": 0.1244,
+        "tax": 0.2337,
+        "startsAt": "2026-03-15T00:45:00.000+01:00",
+        "currency": "EUR",
+        "level": "EXPENSIVE"
+    },
+    {
+        "total": 0.3774,
+        "energy": 0.1406,
+        "tax": 0.2368,
+        "startsAt": "2026-03-15T01:00:00.000+01:00",
+        "currency": "EUR",
+        "level": "EXPENSIVE"
+    },
+    {
+        "total": 0.3713,
+        "energy": 0.1355,
+        "tax": 0.2358,
+        "startsAt": "2026-03-15T01:15:00.000+01:00",
+        "currency": "EUR",
+        "level": "EXPENSIVE"
+    },
+    {
+        "total": 0.3681,
+        "energy": 0.1328,
+        "tax": 0.2353,
+        "startsAt": "2026-03-15T01:30:00.000+01:00",
+        "currency": "EUR",
+        "level": "EXPENSIVE"
+    },
+    {
+        "total": 0.36,
+        "energy": 0.126,
+        "tax": 0.234,
+        "startsAt": "2026-03-15T01:45:00.000+01:00",
+        "currency": "EUR",
+        "level": "EXPENSIVE"
+    },
+    {
+        "total": 0.3688,
+        "energy": 0.1334,
+        "tax": 0.2354,
+        "startsAt": "2026-03-15T02:00:00.000+01:00",
+        "currency": "EUR",
+        "level": "EXPENSIVE"
+    },
+    {
+        "total": 0.3613,
+        "energy": 0.1271,
+        "tax": 0.2342,
+        "startsAt": "2026-03-15T02:15:00.000+01:00",
+        "currency": "EUR",
+        "level": "EXPENSIVE"
+    },
+    {
+        "total": 0.3531,
+        "energy": 0.1202,
+        "tax": 0.2329,
+        "startsAt": "2026-03-15T02:30:00.000+01:00",
+        "currency": "EUR",
+        "level": "EXPENSIVE"
+    },
+    {
+        "total": 0.3519,
+        "energy": 0.1192,
+        "tax": 0.2327,
+        "startsAt": "2026-03-15T02:45:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.3526,
+        "energy": 0.1198,
+        "tax": 0.2328,
+        "startsAt": "2026-03-15T03:00:00.000+01:00",
+        "currency": "EUR",
+        "level": "EXPENSIVE"
+    },
+    {
+        "total": 0.3538,
+        "energy": 0.1208,
+        "tax": 0.233,
+        "startsAt": "2026-03-15T03:15:00.000+01:00",
+        "currency": "EUR",
+        "level": "EXPENSIVE"
+    },
+    {
+        "total": 0.3597,
+        "energy": 0.1257,
+        "tax": 0.234,
+        "startsAt": "2026-03-15T03:30:00.000+01:00",
+        "currency": "EUR",
+        "level": "EXPENSIVE"
+    },
+    {
+        "total": 0.3622,
+        "energy": 0.1278,
+        "tax": 0.2344,
+        "startsAt": "2026-03-15T03:45:00.000+01:00",
+        "currency": "EUR",
+        "level": "EXPENSIVE"
+    },
+    {
+        "total": 0.3529,
+        "energy": 0.12,
+        "tax": 0.2329,
+        "startsAt": "2026-03-15T04:00:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.3541,
+        "energy": 0.121,
+        "tax": 0.2331,
+        "startsAt": "2026-03-15T04:15:00.000+01:00",
+        "currency": "EUR",
+        "level": "EXPENSIVE"
+    },
+    {
+        "total": 0.356,
+        "energy": 0.1227,
+        "tax": 0.2333,
+        "startsAt": "2026-03-15T04:30:00.000+01:00",
+        "currency": "EUR",
+        "level": "EXPENSIVE"
+    },
+    {
+        "total": 0.3588,
+        "energy": 0.125,
+        "tax": 0.2338,
+        "startsAt": "2026-03-15T04:45:00.000+01:00",
+        "currency": "EUR",
+        "level": "EXPENSIVE"
+    },
+    {
+        "total": 0.3537,
+        "energy": 0.1207,
+        "tax": 0.233,
+        "startsAt": "2026-03-15T05:00:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.354,
+        "energy": 0.121,
+        "tax": 0.233,
+        "startsAt": "2026-03-15T05:15:00.000+01:00",
+        "currency": "EUR",
+        "level": "EXPENSIVE"
+    },
+    {
+        "total": 0.3598,
+        "energy": 0.1258,
+        "tax": 0.234,
+        "startsAt": "2026-03-15T05:30:00.000+01:00",
+        "currency": "EUR",
+        "level": "EXPENSIVE"
+    },
+    {
+        "total": 0.3636,
+        "energy": 0.129,
+        "tax": 0.2346,
+        "startsAt": "2026-03-15T05:45:00.000+01:00",
+        "currency": "EUR",
+        "level": "EXPENSIVE"
+    },
+    {
+        "total": 0.3545,
+        "energy": 0.1214,
+        "tax": 0.2331,
+        "startsAt": "2026-03-15T06:00:00.000+01:00",
+        "currency": "EUR",
+        "level": "EXPENSIVE"
+    },
+    {
+        "total": 0.3614,
+        "energy": 0.1272,
+        "tax": 0.2342,
+        "startsAt": "2026-03-15T06:15:00.000+01:00",
+        "currency": "EUR",
+        "level": "EXPENSIVE"
+    },
+    {
+        "total": 0.3615,
+        "energy": 0.1272,
+        "tax": 0.2343,
+        "startsAt": "2026-03-15T06:30:00.000+01:00",
+        "currency": "EUR",
+        "level": "EXPENSIVE"
+    },
+    {
+        "total": 0.3549,
+        "energy": 0.1217,
+        "tax": 0.2332,
+        "startsAt": "2026-03-15T06:45:00.000+01:00",
+        "currency": "EUR",
+        "level": "EXPENSIVE"
+    },
+    {
+        "total": 0.3653,
+        "energy": 0.1304,
+        "tax": 0.2349,
+        "startsAt": "2026-03-15T07:00:00.000+01:00",
+        "currency": "EUR",
+        "level": "EXPENSIVE"
+    },
+    {
+        "total": 0.3517,
+        "energy": 0.119,
+        "tax": 0.2327,
+        "startsAt": "2026-03-15T07:15:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.3498,
+        "energy": 0.1174,
+        "tax": 0.2324,
+        "startsAt": "2026-03-15T07:30:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.3374,
+        "energy": 0.107,
+        "tax": 0.2304,
+        "startsAt": "2026-03-15T07:45:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.3719,
+        "energy": 0.136,
+        "tax": 0.2359,
+        "startsAt": "2026-03-15T08:00:00.000+01:00",
+        "currency": "EUR",
+        "level": "EXPENSIVE"
+    },
+    {
+        "total": 0.3462,
+        "energy": 0.1144,
+        "tax": 0.2318,
+        "startsAt": "2026-03-15T08:15:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.3291,
+        "energy": 0.1,
+        "tax": 0.2291,
+        "startsAt": "2026-03-15T08:30:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.3124,
+        "energy": 0.086,
+        "tax": 0.2264,
+        "startsAt": "2026-03-15T08:45:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.3359,
+        "energy": 0.1058,
+        "tax": 0.2301,
+        "startsAt": "2026-03-15T09:00:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.3264,
+        "energy": 0.0977,
+        "tax": 0.2287,
+        "startsAt": "2026-03-15T09:15:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.3163,
+        "energy": 0.0893,
+        "tax": 0.227,
+        "startsAt": "2026-03-15T09:30:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.3128,
+        "energy": 0.0863,
+        "tax": 0.2265,
+        "startsAt": "2026-03-15T09:45:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.3242,
+        "energy": 0.0959,
+        "tax": 0.2283,
+        "startsAt": "2026-03-15T10:00:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.3175,
+        "energy": 0.0903,
+        "tax": 0.2272,
+        "startsAt": "2026-03-15T10:15:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.3124,
+        "energy": 0.086,
+        "tax": 0.2264,
+        "startsAt": "2026-03-15T10:30:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.3018,
+        "energy": 0.0771,
+        "tax": 0.2247,
+        "startsAt": "2026-03-15T10:45:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.3155,
+        "energy": 0.0886,
+        "tax": 0.2269,
+        "startsAt": "2026-03-15T11:00:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.3094,
+        "energy": 0.0835,
+        "tax": 0.2259,
+        "startsAt": "2026-03-15T11:15:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.2894,
+        "energy": 0.0667,
+        "tax": 0.2227,
+        "startsAt": "2026-03-15T11:30:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.2697,
+        "energy": 0.0501,
+        "tax": 0.2196,
+        "startsAt": "2026-03-15T11:45:00.000+01:00",
+        "currency": "EUR",
+        "level": "CHEAP"
+    },
+    {
+        "total": 0.3005,
+        "energy": 0.076,
+        "tax": 0.2245,
+        "startsAt": "2026-03-15T12:00:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.2795,
+        "energy": 0.0583,
+        "tax": 0.2212,
+        "startsAt": "2026-03-15T12:15:00.000+01:00",
+        "currency": "EUR",
+        "level": "CHEAP"
+    },
+    {
+        "total": 0.2624,
+        "energy": 0.044,
+        "tax": 0.2184,
+        "startsAt": "2026-03-15T12:30:00.000+01:00",
+        "currency": "EUR",
+        "level": "CHEAP"
+    },
+    {
+        "total": 0.25,
+        "energy": 0.0336,
+        "tax": 0.2164,
+        "startsAt": "2026-03-15T12:45:00.000+01:00",
+        "currency": "EUR",
+        "level": "CHEAP"
+    },
+    {
+        "total": 0.265,
+        "energy": 0.0461,
+        "tax": 0.2189,
+        "startsAt": "2026-03-15T13:00:00.000+01:00",
+        "currency": "EUR",
+        "level": "CHEAP"
+    },
+    {
+        "total": 0.2579,
+        "energy": 0.0402,
+        "tax": 0.2177,
+        "startsAt": "2026-03-15T13:15:00.000+01:00",
+        "currency": "EUR",
+        "level": "CHEAP"
+    },
+    {
+        "total": 0.2474,
+        "energy": 0.0313,
+        "tax": 0.2161,
+        "startsAt": "2026-03-15T13:30:00.000+01:00",
+        "currency": "EUR",
+        "level": "CHEAP"
+    },
+    {
+        "total": 0.2436,
+        "energy": 0.0282,
+        "tax": 0.2154,
+        "startsAt": "2026-03-15T13:45:00.000+01:00",
+        "currency": "EUR",
+        "level": "CHEAP"
+    },
+    {
+        "total": 0.2407,
+        "energy": 0.0257,
+        "tax": 0.215,
+        "startsAt": "2026-03-15T14:00:00.000+01:00",
+        "currency": "EUR",
+        "level": "CHEAP"
+    },
+    {
+        "total": 0.2472,
+        "energy": 0.0312,
+        "tax": 0.216,
+        "startsAt": "2026-03-15T14:15:00.000+01:00",
+        "currency": "EUR",
+        "level": "CHEAP"
+    },
+    {
+        "total": 0.2576,
+        "energy": 0.04,
+        "tax": 0.2176,
+        "startsAt": "2026-03-15T14:30:00.000+01:00",
+        "currency": "EUR",
+        "level": "CHEAP"
+    },
+    {
+        "total": 0.2718,
+        "energy": 0.0519,
+        "tax": 0.2199,
+        "startsAt": "2026-03-15T14:45:00.000+01:00",
+        "currency": "EUR",
+        "level": "CHEAP"
+    },
+    {
+        "total": 0.2687,
+        "energy": 0.0493,
+        "tax": 0.2194,
+        "startsAt": "2026-03-15T15:00:00.000+01:00",
+        "currency": "EUR",
+        "level": "CHEAP"
+    },
+    {
+        "total": 0.2726,
+        "energy": 0.0526,
+        "tax": 0.22,
+        "startsAt": "2026-03-15T15:15:00.000+01:00",
+        "currency": "EUR",
+        "level": "CHEAP"
+    },
+    {
+        "total": 0.2892,
+        "energy": 0.0665,
+        "tax": 0.2227,
+        "startsAt": "2026-03-15T15:30:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.31,
+        "energy": 0.084,
+        "tax": 0.226,
+        "startsAt": "2026-03-15T15:45:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.2749,
+        "energy": 0.0545,
+        "tax": 0.2204,
+        "startsAt": "2026-03-15T16:00:00.000+01:00",
+        "currency": "EUR",
+        "level": "CHEAP"
+    },
+    {
+        "total": 0.3094,
+        "energy": 0.0835,
+        "tax": 0.2259,
+        "startsAt": "2026-03-15T16:15:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.3264,
+        "energy": 0.0978,
+        "tax": 0.2286,
+        "startsAt": "2026-03-15T16:30:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.3543,
+        "energy": 0.1212,
+        "tax": 0.2331,
+        "startsAt": "2026-03-15T16:45:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.3303,
+        "energy": 0.101,
+        "tax": 0.2293,
+        "startsAt": "2026-03-15T17:00:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.3545,
+        "energy": 0.1213,
+        "tax": 0.2332,
+        "startsAt": "2026-03-15T17:15:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.3726,
+        "energy": 0.1366,
+        "tax": 0.236,
+        "startsAt": "2026-03-15T17:30:00.000+01:00",
+        "currency": "EUR",
+        "level": "EXPENSIVE"
+    },
+    {
+        "total": 0.3918,
+        "energy": 0.1527,
+        "tax": 0.2391,
+        "startsAt": "2026-03-15T17:45:00.000+01:00",
+        "currency": "EUR",
+        "level": "EXPENSIVE"
+    },
+    {
+        "total": 0.3789,
+        "energy": 0.1419,
+        "tax": 0.237,
+        "startsAt": "2026-03-15T18:00:00.000+01:00",
+        "currency": "EUR",
+        "level": "EXPENSIVE"
+    },
+    {
+        "total": 0.3832,
+        "energy": 0.1455,
+        "tax": 0.2377,
+        "startsAt": "2026-03-15T18:15:00.000+01:00",
+        "currency": "EUR",
+        "level": "EXPENSIVE"
+    },
+    {
+        "total": 0.3934,
+        "energy": 0.1541,
+        "tax": 0.2393,
+        "startsAt": "2026-03-15T18:30:00.000+01:00",
+        "currency": "EUR",
+        "level": "EXPENSIVE"
+    },
+    {
+        "total": 0.3946,
+        "energy": 0.155,
+        "tax": 0.2396,
+        "startsAt": "2026-03-15T18:45:00.000+01:00",
+        "currency": "EUR",
+        "level": "EXPENSIVE"
+    },
+    {
+        "total": 0.3893,
+        "energy": 0.1506,
+        "tax": 0.2387,
+        "startsAt": "2026-03-15T19:00:00.000+01:00",
+        "currency": "EUR",
+        "level": "EXPENSIVE"
+    },
+    {
+        "total": 0.3719,
+        "energy": 0.136,
+        "tax": 0.2359,
+        "startsAt": "2026-03-15T19:15:00.000+01:00",
+        "currency": "EUR",
+        "level": "EXPENSIVE"
+    },
+    {
+        "total": 0.3572,
+        "energy": 0.1237,
+        "tax": 0.2335,
+        "startsAt": "2026-03-15T19:30:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.3496,
+        "energy": 0.1172,
+        "tax": 0.2324,
+        "startsAt": "2026-03-15T19:45:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.3522,
+        "energy": 0.1195,
+        "tax": 0.2327,
+        "startsAt": "2026-03-15T20:00:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.3454,
+        "energy": 0.1138,
+        "tax": 0.2316,
+        "startsAt": "2026-03-15T20:15:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.3414,
+        "energy": 0.1103,
+        "tax": 0.2311,
+        "startsAt": "2026-03-15T20:30:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.3176,
+        "energy": 0.0904,
+        "tax": 0.2272,
+        "startsAt": "2026-03-15T20:45:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.3389,
+        "energy": 0.1082,
+        "tax": 0.2307,
+        "startsAt": "2026-03-15T21:00:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.3173,
+        "energy": 0.0901,
+        "tax": 0.2272,
+        "startsAt": "2026-03-15T21:15:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.3192,
+        "energy": 0.0917,
+        "tax": 0.2275,
+        "startsAt": "2026-03-15T21:30:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.3023,
+        "energy": 0.0775,
+        "tax": 0.2248,
+        "startsAt": "2026-03-15T21:45:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.3172,
+        "energy": 0.09,
+        "tax": 0.2272,
+        "startsAt": "2026-03-15T22:00:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.3168,
+        "energy": 0.0897,
+        "tax": 0.2271,
+        "startsAt": "2026-03-15T22:15:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.3057,
+        "energy": 0.0803,
+        "tax": 0.2254,
+        "startsAt": "2026-03-15T22:30:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.295,
+        "energy": 0.0714,
+        "tax": 0.2236,
+        "startsAt": "2026-03-15T22:45:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.3098,
+        "energy": 0.0838,
+        "tax": 0.226,
+        "startsAt": "2026-03-15T23:00:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.2914,
+        "energy": 0.0684,
+        "tax": 0.223,
+        "startsAt": "2026-03-15T23:15:00.000+01:00",
+        "currency": "EUR",
+        "level": "NORMAL"
+    },
+    {
+        "total": 0.2848,
+        "energy": 0.0628,
+        "tax": 0.222,
+        "startsAt": "2026-03-15T23:30:00.000+01:00",
+        "currency": "EUR",
+        "level": "CHEAP"
+    },
+    {
+        "total": 0.259,
+        "energy": 0.0411,
+        "tax": 0.2179,
+        "startsAt": "2026-03-15T23:45:00.000+01:00",
+        "currency": "EUR",
+        "level": "CHEAP"
+    }
+]
