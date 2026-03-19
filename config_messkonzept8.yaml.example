@@ -1,0 +1,152 @@
+# config.yaml — Messkonzept 8 example
+#
+# Messkonzept 8 (Wärmepumpentarif) is a German/Austrian/Luxembourg metering
+# setup for households with a heat pump on a separate utility tariff:
+#
+#   Z1  Main grid meter   — bidirectional; measures TOTAL import + export
+#   Z2  Household meter   — measures household sub-circuit import only
+#   HP  Heat pump (derived) = Z1.import − Z2.import
+#
+# The heat pump circuit gets the cheaper "Wärmepumpentarif" (a fixed off-peak
+# rate granted by the utility for separately-metered heat pumps).
+# The household circuit gets the Tibber dynamic tariff.
+# The grid connection has an export tariff for feeding PV into the grid.
+#
+# To use this example:
+#   1. Copy to config.yaml (already gitignored)
+#   2. Create secrets.yaml with the required secret keys (see below)
+#   3. Replace placeholder OIDs and IDs with your real values
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Backends — connection parameters for the data sources
+# ---------------------------------------------------------------------------
+
+backends:
+  iobroker:
+    host: "192.168.x.x"      # ioBroker host on your local network
+    port: 8087
+    # api_token: !secret iobroker_api_token   # uncomment if token auth is enabled
+
+  # homeassistant:
+  #   url: "https://your-ha-instance.example.com"
+  #   token: !secret ha_token
+
+# ---------------------------------------------------------------------------
+# Tariffs — pricing models referenced by name from devices
+# ---------------------------------------------------------------------------
+
+tariffs:
+
+  # Feed-in tariff: fixed remuneration for PV energy exported to the grid.
+  # Declared on the main grid meter so the optimizer can account for revenue.
+  export_tariff:
+    type: flat_rate
+    price_eur_per_kwh: 0.082        # adjust to your actual feed-in rate
+
+  # Household tariff: Tibber dynamic spot pricing billed to the household
+  # sub-circuit (Z2). Prices are read from the ioBroker tibberlink adapter.
+  household_tariff:
+    type: tibber_iobroker
+    home_id: !secret tibber_home_id  # find under tibberlink.0.Homes.* in ioBroker
+
+  # Heat pump tariff: fixed "Wärmepumpentarif" granted by the utility.
+  # Lower than the household tariff — that's the value of Messkonzept 8.
+  heatpump_tariff:
+    type: flat_rate
+    price_eur_per_kwh: 0.150        # adjust to your actual Wärmepumpe rate
+
+# ---------------------------------------------------------------------------
+# Devices — every meter and load in the energy system
+# ---------------------------------------------------------------------------
+
+devices:
+
+  # Z1 — Main grid meter at the grid connection point.
+  #
+  # Reads import (powerImport) and export (powerExport) separately so the
+  # optimizer has access to gross import via extra["import_w"].
+  # The heat pump differential uses extra["import_w"] to avoid sign errors
+  # when PV is exporting (net power would be negative in that case).
+  main_grid_meter:
+    role: meter
+    source:
+      type: generic_iobroker
+      # Tibber live measurement — replace <home-id> with your Tibber Home ID
+      power_import: "tibberlink.0.Homes.<home-id>.LiveMeasurement.powerImport"
+      power_export: "tibberlink.0.Homes.<home-id>.LiveMeasurement.powerExport"
+    tariff: export_tariff
+
+  # Z2 — Household sub-circuit meter.
+  #
+  # Measures only the household load (NOT the heat pump circuit).
+  # In a typical Messkonzept 8 setup this is a dedicated sub-meter.
+  # Replace the OID with the one for your physical household meter.
+  household_meter:
+    role: meter
+    source:
+      type: generic_iobroker
+      # Example: a SMA Energy Manager or a Shelly EM on the household circuit
+      power: "<your-household-sub-circuit-oid>"
+      # Alternatively, if your meter exposes import only (always ≥ 0):
+      # power: "sma-em.0.<serial>.wirkleistung_bezug"
+    tariff: household_tariff
+
+  # HP — Heat pump consumption (Messkonzept 8 derived value).
+  #
+  # Power is NOT directly metered.  It is derived as:
+  #   heatpump_power = Z1.import − Z2.import
+  #
+  # We use minuend_field: "extra.import_w" to access the GROSS import from
+  # the main grid meter rather than the net value (power_w = import − export).
+  # This gives the correct result even when PV is actively exporting.
+  #
+  # min_w: 0.0 clamps the result to ≥ 0 to handle small transient errors
+  # where Z2 reads slightly higher than Z1 due to polling time differences.
+  heatpump:
+    role: consumer
+    source:
+      type: differential
+      minuend: main_grid_meter
+      minuend_field: "extra.import_w"   # use gross import, not net
+      subtrahend: household_meter
+      subtrahend_field: "power_w"
+      min_w: 0.0
+    tariff: heatpump_tariff
+
+# ---------------------------------------------------------------------------
+# Topology — physical wiring of meters as a tree
+#
+# The main grid meter (Z1) is the root.  The household meter (Z2) and the
+# derived heat pump load are its direct children.
+# ---------------------------------------------------------------------------
+
+topology:
+  main_grid_meter:
+    children:
+      - household_meter
+      - heatpump
+
+# ---------------------------------------------------------------------------
+# Assets — managed objects with targets (EVs, heat stores)  [future]
+# ---------------------------------------------------------------------------
+
+assets: {}
+
+# ---------------------------------------------------------------------------
+# Optimizer
+# ---------------------------------------------------------------------------
+
+optimizer:
+  algorithm: milp
+  horizon_hours: 24
+  baseline_load_kw: 0.3           # assumed household background load (no forecast)
+  feed_in_eur_per_kwh: 0.082      # must match export_tariff above
+
+# ---------------------------------------------------------------------------
+# secrets.yaml keys required by this config:
+#
+#   tibber_home_id:  <your Tibber Home ID from tibberlink.0.Homes.*>
+#   iobroker_api_token:  <optional — only if token auth is enabled>
+#   ha_token:  <optional — only if Home Assistant is configured>
+# ---------------------------------------------------------------------------
