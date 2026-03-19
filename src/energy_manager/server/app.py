@@ -30,6 +30,7 @@ from energy_manager.server.models import (
     BatteryCard,
     GridCard,
     HomePowerCard,
+    IntegrationCard,
     ScheduleSlot,
     StateResponse,
 )
@@ -109,6 +110,16 @@ def _build_response(state_ref: Any) -> StateResponse:
         home_power=home_power,
         grid=grid,
         schedule=schedule,
+        integrations=[
+            IntegrationCard(
+                name=s.name,
+                power_w=s.power_w,
+                power_import_w=s.power_import_w,
+                power_export_w=s.power_export_w,
+            )
+            for s in (state_ref.registry.all_states().values()
+                       if getattr(state_ref, "registry", None) else [])
+        ],
     )
 
 

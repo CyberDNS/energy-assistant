@@ -57,6 +57,8 @@ from energy_manager.plugins.zendure_iobroker.device import ZendureIoBrokerDevice
 from energy_manager.plugins._homeassistant.client import HAClient
 from energy_manager.plugins.mt175_ha.device import MT175HADevice
 from energy_manager.secrets import SecretsManager
+from energy_manager.core.integration_loader import load_integrations
+from energy_manager.core.control_protocol import ControlContext
 from energy_manager.server.app import create_app
 
 logging.basicConfig(
@@ -161,6 +163,7 @@ class ControllerState:
         self.last_sma_em_state: DeviceState | None = None
         self.last_tibber_live_state: DeviceState | None = None
         self.last_mt175_state: DeviceState | None = None
+        self.registry = None  # set to IntegrationRegistry after construction
         self.last_mode: str = "starting"
         self.last_target_w: float = 0.0
 
@@ -335,6 +338,16 @@ async def control_step(
     state_ref.last_home_power_state = hp
     state_ref.last_mode = mode
     state_ref.last_target_w = target_w
+
+    # Refresh config-driven integrations and execute strategies
+    if state_ref.registry is not None:
+        await state_ref.registry.refresh_all()
+        context = ControlContext(
+            surplus_w=float(overflow_w),
+            pv_power_w=float(pv_w),
+            home_power_w=float(household_w),
+        )
+        await state_ref.registry.execute_strategies(context)
 
     if dry_run:
         log.info("  [DRY RUN — command not sent]")
@@ -514,6 +527,14 @@ async def main(dry_run: bool) -> None:
         battery_state = await battery.get_state()
         initial_soc_wh = (battery_state.soc_pct or 50.0) / 100.0 * CAPACITY_WH
         state_ref = ControllerState(initial_soc_wh)
+
+        # Load config-driven integrations
+        _ha_client_for_integrations = ha_client if _ha_url else None
+        state_ref.registry = load_integrations(
+            _cfg.get("integrations") or [],
+            client,
+            _ha_client_for_integrations,
+        )
 
         # plan_loop and control_loop both start immediately.
         # control_loop will idle gracefully until the first plan is ready
