@@ -28,7 +28,7 @@ src/
   energy_manager/
     core/              # Abstractions, event bus, registry, config & storage protocols
       models.py        # Pure data models: DeviceState, EnergyPlan, Measurement, etc.
-      device.py        # Device protocol + DeviceCategory enum
+      device.py        # Device protocol + DeviceRole enum
       event.py         # Event dataclass + EventBus
       forecast.py      # ForecastProvider protocol
       tariff.py        # TariffModel protocol
@@ -37,15 +37,18 @@ src/
       registry.py      # DeviceRegistry
       config.py        # ConfigEntry model + ConfigManager protocol
       storage.py       # StorageBackend protocol
+      topology.py      # TopologyNode tree + residual derivation
     config/            # Config manager implementations
       yaml.py          # YamlConfigManager (phase 1)
       json.py          # JsonConfigManager (phase 2, UI-configured)
     storage/           # Storage backend implementations
       sqlite.py        # SqliteStorageBackend (aiosqlite)
     plugins/           # Built-in device & service integrations
-      fronius/
-      tibber/
-      mqtt/
+      generic_iobroker/  # generic_iobroker source
+      generic_ha/        # generic_ha source + ha_switch control
+      tibber/            # tibber_iobroker tariff
+      zendure/           # Zendure battery (MILP participant)
+      sma/               # SMA inverter / Energy Manager
       ...
     server/            # HTTP API, WebSocket, startup lifecycle
 tests/
@@ -77,14 +80,14 @@ class Device(Protocol):
     def device_id(self) -> str: ...
 
     @property
-    def category(self) -> DeviceCategory: ...
+    def role(self) -> DeviceRole: ...
 
     async def get_state(self) -> DeviceState: ...
 
     async def send_command(self, command: DeviceCommand) -> None: ...
 ```
 
-`DeviceCategory` is an enum: `SOURCE`, `STORAGE`, `CONSUMER`, `METER`.
+`DeviceRole` is an enum: `METER`, `PRODUCER`, `STORAGE`, `CONSUMER`, `EV_CHARGER`.
 
 `DeviceState` is a Pydantic model holding normalized readings (power,
 SoC, availability, etc.) with a timestamp.
@@ -143,8 +146,9 @@ class Optimizer(Protocol):
 ```
 
 `OptimizationContext` contains the current `DeviceState` for all registered
-devices, available forecasts, the active tariff model, and all active
-constraints.
+devices, the energy topology (for cost attribution), available forecasts,
+all active tariff models, and all active asset constraints discovered at
+runtime.
 
 `EnergyPlan` is a time-indexed schedule of control actions (Pydantic model).
 
@@ -169,18 +173,13 @@ class Constraint:
 
 ### Phase 1 — YAML
 
-Devices and integrations are declared in a YAML config file read at startup.
-Config is read-only at runtime; changes require a restart.
+Devices and the energy model are declared in a YAML config file read at
+startup. Config is read-only at runtime; changes require a restart.
+See [`DOMAIN_MODEL.md`](DOMAIN_MODEL.md) for the full reference and
+[`config.yaml.example`](config.yaml.example) for a complete annotated example.
 
-```yaml
-devices:
-  - id: solar_inverter
-    plugin: energy_manager.plugins.fronius
-    host: 192.168.1.10
-  - id: ev_charger
-    plugin: energy_manager.plugins.wallbox
-    host: 192.168.1.20
-```
+The six top-level sections are: `backends`, `tariffs`, `devices`, `topology`,
+`assets`, and `optimizer`.
 
 ### Phase 2 — JSON files
 
@@ -263,10 +262,13 @@ No layer holds a direct reference to another layer's implementation.
 | 1 | `pyproject.toml` scaffold + project structure |
 | 2 | Data models (`DeviceState`, `EnergyPlan`, `Measurement`, `ConfigEntry`, etc.) |
 | 3 | `EventBus` + tests |
-| 4 | `Device` protocol + `DeviceRegistry` + fake device for testing |
-| 5 | `ConfigManager` protocol + `YamlConfigManager` |
-| 6 | `StorageBackend` protocol + `SqliteStorageBackend` |
-| 7 | `TariffModel` protocol + flat-rate implementation |
-| 8 | `ForecastProvider` protocol + pass-through stub |
-| 9 | `Optimizer` protocol + rule-based default optimizer |
-| 10 | First real device plugin (e.g. Fronius, MQTT) |
+| 4 | `Device` protocol + `DeviceRole` enum + `DeviceRegistry` + fake device for testing |
+| 5 | `ConfigManager` protocol + `YamlConfigManager` (backends / tariffs / devices / topology / assets / optimizer) |
+| 6 | `TopologyNode` tree + residual derivation |
+| 7 | `StorageBackend` protocol + `SqliteStorageBackend` |
+| 8 | `TariffModel` protocol + flat-rate implementation |
+| 9 | `ForecastProvider` protocol + pass-through stub |
+| 10 | `Optimizer` protocol + MILP implementation |
+| 11 | `Asset` constraint model + runtime discovery |
+| 12 | First generic device plugins (`generic_ha`, `generic_iobroker`) |
+| 13 | First typed device plugin (e.g. Zendure battery with SOC tracking) |

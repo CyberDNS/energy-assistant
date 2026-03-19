@@ -30,6 +30,15 @@ class HAClientProtocol(Protocol):
         """Return the raw ``state`` string for *entity_id*, or ``None`` if unavailable."""
         ...
 
+    async def call_service(
+        self,
+        domain: str,
+        service: str,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        """Call a Home Assistant service (fire-and-forget)."""
+        ...
+
 
 class HAClient:
     """
@@ -70,6 +79,15 @@ class HAClient:
             return None
         data = response.json()
         return data.get("state")
+
+    async def call_service(
+        self,
+        domain: str,
+        service: str,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        """Call a Home Assistant service (fire-and-forget)."""
+        await self._http.post(f"/api/services/{domain}/{service}", json=data or {})
 
     async def close(self) -> None:
         await self._http.aclose()

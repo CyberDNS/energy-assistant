@@ -3,13 +3,29 @@
 # config.yaml is gitignored — every developer/deployment has their own copy.
 #
 # Real secrets (API tokens, passwords) go in secrets.yaml — NOT here.
+# See secrets.yaml.example for the list of required secret keys.
+
+# ---------------------------------------------------------------------------
+# Backends
+# ---------------------------------------------------------------------------
 
 iobroker:
   host: "192.168.x.x"
   port: 8087
 
+homeassistant:
+  # Direct Home Assistant REST API connection (for devices not bridged via ioBroker).
+  # Token goes in secrets.yaml as: ha_token: "<long-lived-access-token>"
+  url: "https://your-homeassistant-instance.example.com"
+  # or: url: "http://192.168.x.x:8123"
+
+# ---------------------------------------------------------------------------
+# Python device plugins
+# (devices with complex protocols or MILP participation — require custom code)
+# ---------------------------------------------------------------------------
+
 tibber_iobroker:
-  # Find your home ID under: tibberlink.0.Homes.*
+  # Find your home ID under: tibberlink.0.Homes.* in ioBroker
   home_id: "<your-tibber-home-id>"
 
 pvforecast_iobroker:
@@ -20,7 +36,7 @@ zendure_iobroker:
   # Find hub_id and device_serial: python scripts/probe_iobroker.py zendure
   hub_id: "<hub-id>"
   device_serial: "<device-serial>"
-  # Capacity = number of AB2000 packs x 2 kWh. Confirm via packNum OID.
+  # Capacity = number of AB2000 packs × 2 kWh. Confirm via the packNum OID.
   capacity_kwh: 8.0
   max_charge_kw: 1.2
   max_discharge_kw: 1.2
@@ -36,13 +52,15 @@ sma_modbus_iobroker:
   # oid_max_charge_w: "modbus.0.holdingRegisters.40189_WMaxCha"
   # oid_max_discharge_w: "modbus.0.holdingRegisters.40191_WMaxDsch"
 
-milp:
-  # Constant household background load when no load forecast is available.
-  baseline_load_kw: 0.3
-  # Grid feed-in tariff (EUR/kWh). Set to 0.0 if you don't sell back to the grid.
-  feed_in_eur_per_kwh: 0.082
-  # Planning horizon in hours.
-  horizon_hours: 24
+sma_em_iobroker:
+  # SMA Energy Manager — direct grid meter via ioBroker sma-em adapter.
+  # Find the serial under: sma-em.0.<serial> in the ioBroker object tree.
+  # serial: "1234567890"
+
+mt175_ha:
+  # MT175 smart meter exposed as a Home Assistant sensor.
+  # Uncomment to override the default entity ID (sensor.mt175_mt175_p).
+  # entity_id: "sensor.mt175_mt175_p"
 
 home_power_iobroker:
   # Real-time home energy sensors from Home Assistant via ioBroker hass adapter.
@@ -52,12 +70,130 @@ home_power_iobroker:
   # oid_cars_w: "hass.0.entities.sensor.power_consumption_cars.state"
   # oid_pv_w: "hass.0.entities.sensor.power_production_pv.state"
 
+# ---------------------------------------------------------------------------
+# Optimizer
+# ---------------------------------------------------------------------------
+
+milp:
+  # Constant household background load when no load forecast is available.
+  baseline_load_kw: 0.3
+  # Grid feed-in tariff (EUR/kWh). Set to 0.0 if you don't sell back to the grid.
+  feed_in_eur_per_kwh: 0.082
+  # Planning horizon in hours.
+  horizon_hours: 24
+
+# ---------------------------------------------------------------------------
+# Controller and server
+# ---------------------------------------------------------------------------
+
 controller:
-  # How often the control setpoint is sent to the Zendure battery (seconds).
+  # How often the control setpoint is sent to devices (seconds).
   control_interval_s: 15
   # How often the MILP plan is re-solved (seconds). 3600 = once per hour.
   plan_interval_s: 3600
   # Set to true to compute setpoints without sending commands (safe for testing).
   dry_run: false
-  # Planning horizon in hours (must match milp.horizon_hours).
-  horizon_hours: 24
+
+server:
+  # Port for the built-in web UI and REST API.
+  port: 8088
+
+# ---------------------------------------------------------------------------
+# Integrations
+#
+# Config-driven devices across a spectrum of complexity:
+#
+#   role:     what the device fundamentally is in the energy system
+#             source | grid | storage | consumer | ev_charger | meter
+#
+#   source:   how to read power (required)
+#             type: generic_iobroker | generic_homeassistant | template
+#
+#   control:  how to send commands (optional — omit for read-only devices)
+#             type: homeassistant_switch | iobroker_switch
+#
+#   strategy: how the optimizer should use this device (optional — requires control)
+#             type: overflow
+#
+#   tariff:   price data source (optional — reserved for future use)
+# ---------------------------------------------------------------------------
+
+integrations:
+
+  # --- Grid connection with dynamic tariff ---
+  - tibber:
+      role: grid
+      source:
+        type: generic_iobroker
+        power: "tibberlink.0.Homes.<home-id>.LiveMeasurement.power"
+        # Use import/export instead of net power if your meter exposes both legs:
+        # power_import: "tibberlink.0.Homes.<home-id>.LiveMeasurement.powerImport"
+        # power_export: "tibberlink.0.Homes.<home-id>.LiveMeasurement.powerExport"
+      tariff:
+        type: tibber_iobroker
+        home_id: "<home-id>"
+
+  # --- Physical grid meter (direct HA sensor) ---
+  - grid_meter:
+      role: grid
+      source:
+        type: generic_homeassistant
+        power: "sensor.mt175_mt175_p"
+        # Or use import/export legs if your meter exposes both:
+        # power_import: "sensor.energy_import_w"
+        # power_export: "sensor.energy_export_w"
+
+  # --- Household consumption meter ---
+  - household_meter:
+      role: meter
+      source:
+        type: generic_iobroker
+        power: "tibberlink.0.Homes.<home-id>.LiveMeasurement.power"
+
+  # --- Derived consumer: heatpump consumption calculated from meter difference ---
+  # (Wärmepumpentarif pattern: grid_meter − household_meter = heatpump leg)
+  - heatpump_meter:
+      role: consumer
+      source:
+        type: template
+        power: |
+          {% set grid = states("grid_meter.power") | float %}
+          {% set house = states("household_meter.power") | float %}
+          {% set diff = (grid - house) | round(1) %}
+          {{ [diff, 10] | max }}
+
+  # --- Controllable consumer: heat pump switched on PV overflow ---
+  # - heatpump:
+  #     role: consumer
+  #     source:
+  #       type: generic_homeassistant
+  #       power: "sensor.heatpump_power"
+  #     control:
+  #       type: homeassistant_switch
+  #       entity: "switch.heatpump_main"
+  #     strategy:
+  #       type: overflow
+  #       threshold_w: 300      # turn on when PV surplus ≥ 300 W
+  #       hysteresis_w: 50      # turn off when surplus < 250 W
+
+  # --- Controllable consumer: boiler via ioBroker boolean OID ---
+  # - boiler:
+  #     role: consumer
+  #     source:
+  #       type: generic_iobroker
+  #       power: "shelly.0.boiler.power"
+  #     control:
+  #       type: iobroker_switch
+  #       oid: "shelly.0.boiler.switch"
+  #     strategy:
+  #       type: overflow
+  #       threshold_w: 500
+  #       hysteresis_w: 100
+
+  # --- PV inverter (read-only source) ---
+  # - pv:
+  #     role: source
+  #     source:
+  #       type: generic_iobroker
+  #       power: "sma.0.pv_power"
+

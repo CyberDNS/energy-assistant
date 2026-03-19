@@ -202,6 +202,12 @@
     }
 
     /* ── Home power card ──────────────────────────────────────────────────── */
+    .integrations-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 12px;
+    }
+
     .power-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -481,6 +487,12 @@
     </div>
   </div>
 
+  <!-- Integrations (config-driven virtual devices) -->
+  <div id="integrations-section" style="display:none;grid-column:1/-1">
+    <div style="font-size:11px;font-weight:600;color:var(--text-sec);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Integrations</div>
+    <div class="integrations-grid" id="integrations-grid"></div>
+  </div>
+
   <!-- 24h Schedule card -->
   <div class="card full-width">
     <div class="card-header">
@@ -726,6 +738,40 @@ function updateUI(data) {
     schedMeta.className = 'badge badge-gray';
   }
   document.getElementById('schedule-container').innerHTML = scheduleHTML(data.schedule);
+
+  // Integrations (config-driven virtual meters / consumers)
+  const intSection = document.getElementById('integrations-section');
+  const intGrid = document.getElementById('integrations-grid');
+  if (data.integrations && data.integrations.length > 0) {
+    intSection.style.display = '';
+    intGrid.innerHTML = data.integrations.map(int => {
+      const pw = int.power_w !== null && int.power_w !== undefined ? fmt(int.power_w) : '—';
+      const color = (int.power_w ?? 0) > 5 ? 'var(--red)' : (int.power_w ?? 0) < -5 ? 'var(--green)' : 'var(--text-sec)';
+      let extra = '';
+      if (int.power_import_w !== null && int.power_import_w !== undefined) {
+        extra += `<div style="font-size:11px;color:var(--text-sec);margin-top:4px">⬇️ Import: ${fmt(int.power_import_w)} W</div>`;
+      }
+      if (int.power_export_w !== null && int.power_export_w !== undefined) {
+        extra += `<div style="font-size:11px;color:var(--text-sec);margin-top:2px">⬆️ Export: ${fmt(int.power_export_w)} W</div>`;
+      }
+      return `
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z"/></svg>
+              ${int.name.replace(/_/g, ' ')}
+            </div>
+          </div>
+          <div class="card-body">
+            <span style="font-size:28px;font-weight:300;color:${color}">${pw}</span>
+            <span style="font-size:13px;color:var(--text-sec)"> W</span>
+            ${extra}
+          </div>
+        </div>`;
+    }).join('');
+  } else {
+    intSection.style.display = 'none';
+  }
 }
 
 // ── SSE connection ────────────────────────────────────────────────────────

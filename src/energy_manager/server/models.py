@@ -43,6 +43,13 @@ class ScheduleSlot(BaseModel):
     active: bool
 
 
+class IntegrationCard(BaseModel):
+    """Snapshot of one config-driven virtual integration."""
+
+    name: str
+    power_w: float | None = None
+
+
 class StateResponse(BaseModel):
     """Full controller state snapshot returned by GET /api/state and SSE."""
 
@@ -54,3 +61,4 @@ class StateResponse(BaseModel):
     home_power: HomePowerCard | None
     grid: GridCard | None
     schedule: list[ScheduleSlot]
+    integrations: list[IntegrationCard] = []
