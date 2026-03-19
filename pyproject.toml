@@ -26,7 +26,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/energy_manager"]
+packages = ["src/energy_manager", "src/energy_assistant"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
