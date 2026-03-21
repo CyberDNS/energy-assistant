@@ -125,18 +125,24 @@ class ZendureIoBrokerDevice:
         """
         p = self._prefix
         oid_map = {
-            "soc":       f"{p}.electricLevel",
-            "charge_w":  f"{p}.outputPackPower",   # power INTO pack = charging
-            "disch_w":   f"{p}.packInputPower",    # power OUT OF pack = discharging
-            "solar_w":   f"{p}.solarInputPower",
-            "home_w":    f"{p}.outputHomePower",
-            "min_soc":   f"{p}.minSoc",
-            "max_soc":   f"{p}.socSet",
+            "soc":          f"{p}.electricLevel",
+            "pack_power":   f"{p}.packPower",        # signed net: + = charging, - = discharging
+            "charge_w":     f"{p}.outputPackPower",  # unsigned, power INTO battery
+            "disch_w":      f"{p}.packInputPower",   # unsigned, power OUT OF battery
+            "home_w":       f"{p}.outputHomePower",
+            "grid_input_w": f"{p}.gridInputPower",
+            "solar_w":      f"{p}.solarInputPower",
+            "ac_mode":      f"{p}.acMode",
+            "min_soc":      f"{p}.minSoc",
+            "max_soc":      f"{p}.socSet",
         }
         try:
             raw = await self._client.get_bulk(list(oid_map.values()))
-        except Exception:
-            _log.warning("ZendureIoBrokerDevice %r: failed to read state", self._device_id)
+        except Exception as exc:
+            _log.warning(
+                "ZendureIoBrokerDevice %r: failed to read state: %s",
+                self._device_id, exc,
+            )
             return DeviceState(device_id=self._device_id, available=False)
 
         def _f(key: str) -> float | None:
@@ -146,11 +152,12 @@ class ZendureIoBrokerDevice:
             except (TypeError, ValueError):
                 return None
 
-        charge_w = _f("charge_w") or 0.0
-        disch_w  = _f("disch_w")  or 0.0
-
-        # Positive = charging (consuming), negative = discharging (producing)
-        power_w = charge_w - disch_w
+        pack_power = _f("pack_power")
+        charge_w   = _f("charge_w") or 0.0
+        disch_w    = _f("disch_w")  or 0.0
+        # pack_power is the signed net reading — use it when available,
+        # fall back to the unsigned charge/discharge pair.
+        power_w = pack_power if pack_power is not None else (charge_w - disch_w)
 
         return DeviceState(
             device_id=self._device_id,
@@ -159,12 +166,14 @@ class ZendureIoBrokerDevice:
             soc_pct=_f("soc"),
             available=True,
             extra={
-                "charge_w":    charge_w,
-                "discharge_w": disch_w,
-                "solar_w":     _f("solar_w"),
-                "home_w":      _f("home_w"),
-                "min_soc_pct": _f("min_soc"),
-                "max_soc_pct": _f("max_soc"),
+                "charge_w":     charge_w,
+                "discharge_w":  disch_w,
+                "home_w":       _f("home_w"),
+                "grid_input_w": _f("grid_input_w"),
+                "solar_w":      _f("solar_w"),
+                "ac_mode":      _f("ac_mode"),
+                "min_soc_pct":  _f("min_soc"),
+                "max_soc_pct":  _f("max_soc"),
             },
         )
 
@@ -177,6 +186,10 @@ class ZendureIoBrokerDevice:
             Target net power in W using platform sign convention:
             positive = charge, negative = discharge, 0 = idle.
 
+            Written to ``control.setDeviceAutomationInOutLimit`` (W) which the
+            adapter defines as: negative = charging, positive = feed-in.
+            The sign is therefore inverted relative to the platform convention.
+
         ``set_charge_limit``
             Upper SoC limit in percent (0–100).
 
@@ -187,17 +200,18 @@ class ZendureIoBrokerDevice:
 
         if command.command == "set_power_w":
             power_w = float(command.value)
-            if power_w > 0:   # charge
-                await self._client.set_value(f"{p}.control.acMode", 1)
-                await self._client.set_value(f"{p}.control.setInputLimit", int(power_w))
-                await self._client.set_value(f"{p}.control.setOutputLimit", 0)
-            elif power_w < 0:  # discharge
-                await self._client.set_value(f"{p}.control.acMode", 2)
-                await self._client.set_value(f"{p}.control.setInputLimit", 0)
-                await self._client.set_value(f"{p}.control.setOutputLimit", int(-power_w))
-            else:              # idle
-                await self._client.set_value(f"{p}.control.setInputLimit", 0)
-                await self._client.set_value(f"{p}.control.setOutputLimit", 0)
+            # OID sign convention: negative = charging, positive = feed-in.
+            # Platform sign convention: positive = charging, negative = discharging.
+            # → negate before writing.
+            oid_value = int(-power_w)
+            await self._client.set_value(
+                f"{p}.control.setDeviceAutomationInOutLimit", oid_value
+            )
+            _log.debug(
+                "ZendureIoBrokerDevice %r: setDeviceAutomationInOutLimit = %d W"
+                " (requested %.0f W)",
+                self._device_id, oid_value, power_w,
+            )
 
         elif command.command == "set_charge_limit":
             await self._client.set_value(f"{p}.control.chargeLimit", int(command.value))
