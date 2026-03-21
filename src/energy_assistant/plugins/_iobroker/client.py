@@ -61,25 +61,47 @@ class IoBrokerClient:
         )
 
     async def get_value(self, oid: str) -> Any:
-        """Read a single OID and return its ``val`` field."""
-        resp = await self._client.get("/get", params={"id": oid, "prettyPrint": "false"})
+        """Read a single OID and return its ``val`` field.
+
+        Uses the path-based format ``/get/{oid}`` which is consistent with
+        the canonical ioBroker simple-api URL scheme and works reliably across
+        adapter versions for both static and MQTT-pushed state values.
+        """
+        from urllib.parse import quote as _q
+        path = f"/get/{_q(oid, safe='.')}"
+        resp = await self._client.get(path)
         resp.raise_for_status()
         data = resp.json()
         return data.get("val") if isinstance(data, dict) else None
 
     async def get_bulk(self, oids: list[str]) -> dict[str, Any]:
-        """Read multiple OIDs in one request; return a mapping OID → value."""
+        """Read multiple OIDs in parallel via concurrent ``/get`` requests.
+
+        ``/getBulk`` is unreliable across ioBroker simple-api versions; using
+        individual ``/get`` calls with ``asyncio.gather`` is more portable and
+        fast enough for the small OID sets we read.
+        """
         if not oids:
             return {}
-        params = [("id[]", oid) for oid in oids]
-        resp = await self._client.get("/getBulk", params=params)
-        resp.raise_for_status()
-        items = resp.json()
-        return {item["id"]: item.get("val") for item in items if "id" in item}
+        import asyncio
+        values = await asyncio.gather(
+            *[self.get_value(oid) for oid in oids],
+            return_exceptions=True,
+        )
+        return {
+            oid: (None if isinstance(val, BaseException) else val)
+            for oid, val in zip(oids, values)
+        }
 
     async def set_value(self, oid: str, value: Any) -> None:
-        """Write *value* to *oid*."""
-        resp = await self._client.get("/set", params={"id": oid, "value": str(value)})
+        """Write *value* to *oid*.
+
+        Uses the path-based format ``/set/{oid}?value={v}`` which is the
+        canonical ioBroker simple-api write endpoint across all versions.
+        """
+        from urllib.parse import quote as _q
+        path = f"/set/{_q(oid, safe='.')}"
+        resp = await self._client.get(path, params={"value": str(value)})
         resp.raise_for_status()
 
     async def close(self) -> None:
