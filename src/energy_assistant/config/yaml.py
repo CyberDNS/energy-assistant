@@ -87,11 +87,75 @@ class YamlConfigLoader:
         return AppConfig(
             backends=backends,
             tariffs=raw.get("tariffs") or {},
-            devices=raw.get("devices") or {},
+            devices=_normalize_devices(raw.get("devices") or {}),
             topology=raw.get("topology") or {},
             assets=raw.get("assets") or {},
             optimizer=raw.get("optimizer") or {},
         )
+
+
+def _normalize_devices(raw: Any) -> dict[str, dict[str, Any]]:
+    """Accept both dict-format and list-format device declarations.
+
+    Dict format (used in tests)::
+
+        devices:
+          my_device:
+            role: meter
+            type: generic_iobroker
+            ...
+
+    List format (used in config.yaml)::
+
+        devices:
+          - id: my_device
+            role: meter
+            type: generic_iobroker
+            ...
+
+    Nested ``source:`` wrappers are also flattened so every plugin factory
+    always receives a single flat config dict::
+
+        # before
+        my_device:
+          role: meter
+          source:
+            type: generic_iobroker
+            power: "..."
+
+        # after normalisation
+        my_device:
+          role: meter
+          type: generic_iobroker
+          power: "..."
+    """
+    if isinstance(raw, list):
+        result: dict[str, dict[str, Any]] = {}
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            device_id = entry.get("id")
+            if not device_id:
+                continue
+            result[device_id] = _flatten_device_cfg({k: v for k, v in entry.items() if k != "id"})
+        return result
+    if isinstance(raw, dict):
+        return {k: _flatten_device_cfg(v) for k, v in raw.items()}
+    return {}
+
+
+def _flatten_device_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Merge a ``source:`` sub-dict into the top-level device config dict.
+
+    Keys from ``source`` overwrite same-named top-level keys so that
+    ``source.type`` always wins over a stray top-level ``type``.
+    """
+    if "source" not in cfg:
+        return cfg
+    source = cfg.get("source") or {}
+    result = {k: v for k, v in cfg.items() if k != "source"}
+    result.update(source)
+    return result
 
 
 def _parse_backends(cfg: dict[str, Any]) -> BackendsConfig:

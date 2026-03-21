@@ -24,6 +24,21 @@ class DeviceRole(str, Enum):
     EV_CHARGER = "ev_charger"
 
 
+def parse_device_role(
+    raw: str | None,
+    default: DeviceRole = DeviceRole.CONSUMER,
+) -> DeviceRole:
+    """Parse *raw* into a ``DeviceRole``, returning *default* on unknown values."""
+    try:
+        return DeviceRole(raw or "")
+    except ValueError:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Unknown device role %r — defaulting to %s", raw, default.value
+        )
+        return default
+
+
 class DeviceState(BaseModel):
     """Normalised snapshot of a device's current readings.
 

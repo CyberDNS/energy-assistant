@@ -237,13 +237,11 @@ class TestDeviceLoaderMesskonzept8:
             devices={
                 "main_grid_meter": {
                     "role": "meter",
-                    "source": {
-                        "type": "generic_iobroker",
-                        "power": "some.oid",
-                    },
+                    "type": "generic_iobroker",
+                    "power": "some.oid",
                 }
             }
         )
         registry, _, _ = build(cfg)
-        # Device skipped because no iobroker backend configured
+        # Device skipped because no ioBroker backend configured
         assert registry.get("main_grid_meter") is None
