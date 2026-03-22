@@ -73,3 +73,15 @@ class FlatRateTariff:
             )
             for i in range(hours)
         ]
+
+    async def export_price_schedule(self, horizon: timedelta) -> list[TariffPoint]:
+        """Return hourly export (feed-in) price points for the full *horizon*."""
+        now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        hours = int(horizon.total_seconds() / 3600) + 1
+        return [
+            TariffPoint(
+                timestamp=now + timedelta(hours=i),
+                price_eur_per_kwh=self._export_price,
+            )
+            for i in range(hours)
+        ]

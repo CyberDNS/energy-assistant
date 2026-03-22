@@ -35,6 +35,7 @@ _log = logging.getLogger(__name__)
 # Factory type aliases:  (entity_id, cfg_dict, ctx) -> built object | None
 DeviceFactory = Callable[[str, dict[str, Any], "BuildContext"], Any]
 TariffFactory = Callable[[str, dict[str, Any], "BuildContext"], Any]
+ForecastFactory = Callable[[str, dict[str, Any], "BuildContext"], Any]
 
 
 @dataclass
@@ -54,6 +55,7 @@ class PluginRegistry:
         # value: (factory, is_deferred)
         self._device: dict[str, tuple[DeviceFactory, bool]] = {}
         self._tariff: dict[str, TariffFactory] = {}
+        self._forecast: dict[str, ForecastFactory] = {}
 
     def register_device(
         self,
@@ -76,6 +78,10 @@ class PluginRegistry:
     def register_tariff(self, type_name: str, factory: TariffFactory) -> None:
         """Register *factory* for tariffs with ``type: <type_name>``."""
         self._tariff[type_name] = factory
+
+    def register_forecast(self, type_name: str, factory: ForecastFactory) -> None:
+        """Register *factory* for forecast providers with ``type: <type_name>``."""
+        self._forecast[type_name] = factory
 
     def is_deferred(self, type_name: str) -> bool:
         """Return ``True`` when the given device type requires a second pass."""
@@ -108,3 +114,16 @@ class PluginRegistry:
             )
             return None
         return factory(tariff_id, cfg, ctx)
+
+    def build_forecast(
+        self, forecast_id: str, cfg: dict[str, Any], ctx: BuildContext
+    ) -> Any:
+        type_name = cfg.get("type", "")
+        factory = self._forecast.get(type_name)
+        if factory is None:
+            _log.warning(
+                "No forecast factory registered for type %r — skipping %r",
+                type_name, forecast_id,
+            )
+            return None
+        return factory(forecast_id, cfg, ctx)

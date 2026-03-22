@@ -110,9 +110,15 @@ class TibberIoBrokerTariff:
                     total = entry.get("total")
                     if starts_at is None or total is None:
                         continue
+                    _ts = datetime.fromisoformat(starts_at)
+                    _ts_utc = (
+                        _ts.astimezone(timezone.utc)
+                        if _ts.tzinfo is not None
+                        else _ts.replace(tzinfo=timezone.utc)
+                    )
                     points.append(
                         TariffPoint(
-                            timestamp=datetime.fromisoformat(starts_at),
+                            timestamp=_ts_utc,
                             price_eur_per_kwh=float(total),
                         )
                     )
@@ -133,6 +139,18 @@ class TibberIoBrokerTariff:
 
         points.sort(key=lambda p: p.timestamp)
         return points
+
+    async def export_price_schedule(self, horizon: timedelta) -> list[TariffPoint]:
+        """Tibber is an import-only tariff; export price is always zero."""
+        now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        hours = int(horizon.total_seconds() / 3600) + 1
+        return [
+            TariffPoint(
+                timestamp=now + timedelta(hours=i),
+                price_eur_per_kwh=0.0,
+            )
+            for i in range(hours)
+        ]
 
 
 

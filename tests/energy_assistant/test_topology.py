@@ -42,20 +42,23 @@ class TestTopologyNode:
 
 class TestBuildTopology:
     def test_empty_config_returns_none(self) -> None:
-        assert build_topology({}) is None
+        assert build_topology([]) is None
+        assert build_topology(None) is None
 
     def test_single_root_no_children(self) -> None:
-        root = build_topology({"main_grid_meter": {}})
+        root = build_topology([{"main_grid_meter": {}}])
         assert root is not None
         assert root.device_id == "main_grid_meter"
         assert root.children == []
 
     def test_root_with_string_children(self) -> None:
-        cfg = {
-            "main_grid_meter": {
-                "children": ["household_meter", "heatpump"]
+        cfg = [
+            {
+                "main_grid_meter": {
+                    "children": ["household_meter", "heatpump"]
+                }
             }
-        }
+        ]
         root = build_topology(cfg)
         assert root is not None
         assert root.device_id == "main_grid_meter"
@@ -63,18 +66,20 @@ class TestBuildTopology:
         assert child_ids == ["household_meter", "heatpump"]
 
     def test_nested_children(self) -> None:
-        cfg = {
-            "main_grid_meter": {
-                "children": [
-                    {
-                        "household_meter": {
-                            "children": ["sub_circuit_a"]
-                        }
-                    },
-                    "heatpump",
-                ]
+        cfg = [
+            {
+                "main_grid_meter": {
+                    "children": [
+                        {
+                            "household_meter": {
+                                "children": ["sub_circuit_a"]
+                            }
+                        },
+                        "heatpump",
+                    ]
+                }
             }
-        }
+        ]
         root = build_topology(cfg)
         assert root is not None
         household = root.find("household_meter")
@@ -83,19 +88,32 @@ class TestBuildTopology:
 
     def test_multiple_roots_raises(self) -> None:
         with pytest.raises(ValueError, match="exactly one root"):
-            build_topology({"meter1": {}, "meter2": {}})
+            build_topology([{"meter1": {}}, {"meter2": {}}])
+
+    def test_wrong_type_raises(self) -> None:
+        with pytest.raises(TypeError, match="list of dicts"):
+            build_topology({"main_grid_meter": {}})  # type: ignore[arg-type]
 
     def test_messkonzept8_topology(self) -> None:
-        """Full Messkonzept 8 topology parses correctly."""
-        cfg = {
-            "main_grid_meter": {
-                "children": ["household_meter", "heatpump"]
+        """Matches the exact YAML structure used in config.yaml."""
+        cfg = [
+            {
+                "main_grid_meter": {
+                    "children": [
+                        {
+                            "household_meter": {
+                                "children": [
+                                    {"heatpump_meter": None}
+                                ]
+                            }
+                        }
+                    ]
+                }
             }
-        }
+        ]
         root = build_topology(cfg)
         assert root is not None
         assert root.device_id == "main_grid_meter"
         assert root.find("household_meter") is not None
-        assert root.find("heatpump") is not None
-        all_ids = set(root.all_device_ids())
-        assert all_ids == {"main_grid_meter", "household_meter", "heatpump"}
+        assert root.find("heatpump_meter") is not None
+        assert set(root.all_device_ids()) == {"main_grid_meter", "household_meter", "heatpump_meter"}

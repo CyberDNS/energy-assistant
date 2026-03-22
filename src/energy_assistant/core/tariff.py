@@ -26,8 +26,16 @@ class TariffModel(Protocol):
         ...
 
     async def price_schedule(self, horizon: timedelta) -> list[TariffPoint]:
-        """Return hourly price points covering approximately *horizon*.
+        """Return hourly import-price points covering approximately *horizon*.
 
+        Points are ordered by timestamp, ascending.
+        """
+        ...
+
+    async def export_price_schedule(self, horizon: timedelta) -> list[TariffPoint]:
+        """Return hourly export (feed-in) price points covering approximately *horizon*.
+
+        Implementations that are import-only should return a schedule of 0.0.
         Points are ordered by timestamp, ascending.
         """
         ...

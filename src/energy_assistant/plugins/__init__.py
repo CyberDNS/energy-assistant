@@ -27,6 +27,7 @@ from . import (  # noqa: E402
     flat_rate,
     generic_homeassistant,
     generic_iobroker,
+    pvforecast_iobroker,
     sma_modbus_iobroker,
     tibber_iobroker,
     zendure_iobroker,
@@ -36,6 +37,7 @@ differential.register(registry)
 flat_rate.register(registry)
 generic_homeassistant.register(registry)
 generic_iobroker.register(registry)
+pvforecast_iobroker.register(registry)
 sma_modbus_iobroker.register(registry)
 tibber_iobroker.register(registry)
 zendure_iobroker.register(registry)

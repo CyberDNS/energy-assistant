@@ -93,6 +93,7 @@ class AppConfig:
     backends: BackendsConfig = field(default_factory=BackendsConfig)
     tariffs: dict[str, dict[str, Any]] = field(default_factory=dict)
     devices: dict[str, dict[str, Any]] = field(default_factory=dict)
+    forecasts: dict[str, dict[str, Any]] = field(default_factory=dict)
     topology: dict[str, Any] = field(default_factory=dict)
     assets: dict[str, Any] = field(default_factory=dict)
     optimizer: dict[str, Any] = field(default_factory=dict)

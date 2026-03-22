@@ -93,6 +93,8 @@ class SmaSunnyBoyStorageDevice:
         max_discharge_kw: float,
         voltage_max_v: float = 253.0,
         voltage_nominal_v: float = 230.0,
+        purchase_price_eur: float | None = None,
+        cycle_life: int | None = None,
     ) -> None:
         self._device_id = device_id
         self._client = client
@@ -100,6 +102,8 @@ class SmaSunnyBoyStorageDevice:
         self._capacity_kwh = capacity_kwh
         self._max_charge_kw = max_charge_kw
         self._max_discharge_kw = max_discharge_kw
+        self._purchase_price_eur = purchase_price_eur
+        self._cycle_life = cycle_life
         # Pre-computed voltage correction factor (253/230 ≈ 1.1)
         self._v_factor = voltage_max_v / voltage_nominal_v
 
@@ -130,6 +134,8 @@ class SmaSunnyBoyStorageDevice:
             capacity_kwh=self._capacity_kwh,
             max_charge_kw=self._max_charge_kw,
             max_discharge_kw=self._max_discharge_kw,
+            purchase_price_eur=self._purchase_price_eur,
+            cycle_life=self._cycle_life,
         )
 
     async def get_state(self) -> DeviceState:

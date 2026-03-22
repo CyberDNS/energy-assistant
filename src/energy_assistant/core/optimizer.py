@@ -19,7 +19,7 @@ class OptimizationContext:
 
     Built by the planning loop and passed to the optimizer unchanged.
 
-    Fields
+    fields
     ------
     device_states:
         Latest state snapshot per device, keyed by ``device_id``.
@@ -33,6 +33,10 @@ class OptimizationContext:
         Active hard and soft constraints (e.g. EV charging deadlines).
     horizon:
         Planning window.  Defaults to 24 h.
+    battery_cost_basis:
+        Weighted-average cost basis per storage device (from BatteryCostLedger).
+        Used as terminal value in the MILP — energy left at end of horizon is
+        worth this much, so the optimizer won't sell it for less.
     """
 
     device_states: dict[str, DeviceState]
@@ -41,6 +45,14 @@ class OptimizationContext:
     forecasts: dict[ForecastQuantity, list[ForecastPoint]] = field(default_factory=dict)
     constraints: list["Constraint"] = field(default_factory=list)
     horizon: timedelta = field(default_factory=lambda: timedelta(hours=24))
+    battery_cost_basis: dict[str, float] = field(default_factory=dict)
+    """Cost basis (€/kWh) per storage device, supplied by BatteryCostLedger.
+
+    Used by the MILP as a terminal value: stored energy left at the end of the
+    planning horizon is worth ``battery_cost_basis[device_id]`` €/kWh.  This
+    prevents the optimizer from discharging below what it cost to charge.
+    If a device is absent from this dict the terminal value defaults to 0.
+    """
 
 
 class Optimizer(Protocol):

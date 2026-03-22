@@ -88,10 +88,43 @@ class YamlConfigLoader:
             backends=backends,
             tariffs=raw.get("tariffs") or {},
             devices=_normalize_devices(raw.get("devices") or {}),
+            forecasts=_normalize_forecasts(raw.get("forecasts") or {}),
             topology=raw.get("topology") or {},
             assets=raw.get("assets") or {},
             optimizer=raw.get("optimizer") or {},
         )
+
+
+def _normalize_forecasts(raw: Any) -> dict[str, dict[str, Any]]:
+    """Accept both dict-format and list-format forecast declarations.
+
+    List format::
+
+        forecasts:
+          - id: pv
+            type: pvforecast_iobroker
+            oid: "pvforecast.0.plants.pv.JSONData"
+
+    Dict format::
+
+        forecasts:
+          pv:
+            type: pvforecast_iobroker
+            oid: "pvforecast.0.plants.pv.JSONData"
+    """
+    if isinstance(raw, list):
+        result: dict[str, dict[str, Any]] = {}
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            forecast_id = entry.get("id")
+            if not forecast_id:
+                continue
+            result[forecast_id] = {k: v for k, v in entry.items() if k != "id"}
+        return result
+    if isinstance(raw, dict):
+        return dict(raw)
+    return {}
 
 
 def _normalize_devices(raw: Any) -> dict[str, dict[str, Any]]:
@@ -171,9 +204,15 @@ def _parse_backends(cfg: dict[str, Any]) -> BackendsConfig:
         )
 
     if ha_cfg := cfg.get("homeassistant"):
+        token = ha_cfg.get("token", "")
+        if not token:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "homeassistant backend configured without a token — HA client will not be built"
+            )
         homeassistant = HomeAssistantConfig(
             url=ha_cfg["url"],
-            token=ha_cfg["token"],
+            token=token,
             timeout_s=float(ha_cfg.get("timeout_s", 10.0)),
         )
 

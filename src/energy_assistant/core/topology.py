@@ -66,27 +66,47 @@ class TopologyNode:
         return ids
 
 
-def build_topology(cfg: dict[str, Any]) -> TopologyNode | None:
+def build_topology(cfg: "list[dict[str, Any]] | None") -> "TopologyNode | None":
     """Parse the ``topology:`` config section and return the root node.
 
-    Returns ``None`` when the section is empty.
+    The expected format is a single-item list containing one dict::
+
+        topology:
+          - main_grid_meter:
+              children:
+                - household_meter:
+                    children:
+                      - heatpump_meter
+
+    Returns ``None`` when *cfg* is empty or ``None``.
 
     Raises
     ------
     ValueError
-        When more than one root node is declared.
+        When the list contains more than one root entry.
     """
     if not cfg:
         return None
 
-    items = list(cfg.items())
-    if len(items) != 1:
-        raise ValueError(
-            f"topology: must have exactly one root node, "
-            f"got {[k for k, _ in items]!r}"
+    if not isinstance(cfg, list) or not all(isinstance(item, dict) for item in cfg):
+        raise TypeError(
+            "topology: expected a list of dicts, "
+            f"got {type(cfg).__name__!r}"
         )
 
-    root_id, subtree = items[0]
+    if len(cfg) != 1:
+        raise ValueError(
+            f"topology: must have exactly one root entry, got {len(cfg)}"
+        )
+
+    root_entry = cfg[0]
+    if len(root_entry) != 1:
+        raise ValueError(
+            f"topology: root entry must have exactly one key, "
+            f"got {list(root_entry)!r}"
+        )
+
+    root_id, subtree = next(iter(root_entry.items()))
     return _parse_node(root_id, subtree or {})
 
 

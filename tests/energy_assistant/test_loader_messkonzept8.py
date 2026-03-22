@@ -157,10 +157,10 @@ def _messkonzept8_config(tmp_path: Path) -> AppConfig:
             tariff: heatpump_tariff
 
         topology:
-          main_grid_meter:
-            children:
-              - household_meter
-              - heatpump
+          - main_grid_meter:
+              children:
+                - household_meter
+                - heatpump
     """)
     config_file = tmp_path / "config.yaml"
     config_file.write_text(yaml_text)
