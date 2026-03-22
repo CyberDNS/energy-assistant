@@ -88,6 +88,8 @@ class ZendureIoBrokerDevice:
         max_charge_kw: float,
         max_discharge_kw: float,
         maintenance_charge_w: float = 300.0,
+        purchase_price_eur: float | None = None,
+        cycle_life: int | None = None,
     ) -> None:
         self._device_id = device_id
         self._client = client
@@ -96,6 +98,8 @@ class ZendureIoBrokerDevice:
         self._max_charge_kw = max_charge_kw
         self._max_discharge_kw = max_discharge_kw
         self._maintenance_charge_w = maintenance_charge_w
+        self._purchase_price_eur = purchase_price_eur
+        self._cycle_life = cycle_life
 
     @property
     def device_id(self) -> str:
@@ -112,6 +116,8 @@ class ZendureIoBrokerDevice:
             capacity_kwh=self._capacity_kwh,
             max_charge_kw=self._max_charge_kw,
             max_discharge_kw=self._max_discharge_kw,
+            purchase_price_eur=self._purchase_price_eur,
+            cycle_life=self._cycle_life,
         )
 
     @property
@@ -133,6 +139,7 @@ class ZendureIoBrokerDevice:
             "grid_input_w": f"{p}.gridInputPower",
             "solar_w":      f"{p}.solarInputPower",
             "ac_mode":      f"{p}.acMode",
+            "auto_model":   f"{p}.autoModel",        # 0 = manual, else = automatic
             "min_soc":      f"{p}.minSoc",
             "max_soc":      f"{p}.socSet",
         }
@@ -172,6 +179,7 @@ class ZendureIoBrokerDevice:
                 "grid_input_w": _f("grid_input_w"),
                 "solar_w":      _f("solar_w"),
                 "ac_mode":      _f("ac_mode"),
+                "auto_model":   _f("auto_model"),
                 "min_soc_pct":  _f("min_soc"),
                 "max_soc_pct":  _f("max_soc"),
             },
@@ -200,6 +208,18 @@ class ZendureIoBrokerDevice:
 
         if command.command == "set_power_w":
             power_w = float(command.value)
+            # The adapter requires autoMode = 0 (manual / "setDeviceAutomationInOutLimit"
+            # mode) before it will accept the limit write.  The OID may not be directly
+            # settable via the simple-api on all adapter versions, so we attempt it but
+            # do not abort when it fails.
+            try:
+                await self._client.set_value(f"{p}.autoModel", 0)
+            except Exception as exc:
+                _log.warning(
+                    "ZendureIoBrokerDevice %r: could not set autoModel=0 (%s); "
+                    "proceeding — ensure the device is already in manual mode.",
+                    self._device_id, exc,
+                )
             # OID sign convention: negative = charging, positive = feed-in.
             # Platform sign convention: positive = charging, negative = discharging.
             # → negate before writing.

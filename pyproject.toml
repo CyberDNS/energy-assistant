@@ -13,7 +13,8 @@ dependencies = [
     "aiosqlite>=0.19",
     "pyyaml>=6.0",
     "httpx>=0.27",
-    "pulp>=2.7",
+    "pulp>=3.0",
+    "highspy>=1.7",
     "fastapi>=0.115",
     "uvicorn>=0.29",
     "jinja2>=3.1",
@@ -31,3 +32,9 @@ packages = ["src/energy_manager", "src/energy_assistant"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.2.0",
+    "jupyter>=1.1.1",
+]

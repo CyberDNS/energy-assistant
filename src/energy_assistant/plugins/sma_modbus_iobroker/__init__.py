@@ -24,6 +24,8 @@ def _build(device_id: str, cfg: dict[str, Any], ctx: BuildContext) -> object | N
         return None
     iob = ctx.backends.iobroker
     client = ctx.iobroker_pool.get(host=iob.host, port=iob.port, api_token=iob.api_token)
+    purchase_price = cfg.get("purchase_price_eur")
+    cycle_life = cfg.get("cycle_life")
     return SmaSunnyBoyStorageDevice(
         device_id=device_id,
         client=client,
@@ -33,4 +35,6 @@ def _build(device_id: str, cfg: dict[str, Any], ctx: BuildContext) -> object | N
         max_discharge_kw=float(cfg.get("max_discharge_kw", 0.0)),
         voltage_max_v=float(cfg.get("voltage_max_v", 253.0)),
         voltage_nominal_v=float(cfg.get("voltage_nominal_v", 230.0)),
+        purchase_price_eur=float(purchase_price) if purchase_price is not None else None,
+        cycle_life=int(cycle_life) if cycle_life is not None else None,
     )

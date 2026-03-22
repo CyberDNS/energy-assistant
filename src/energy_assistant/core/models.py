@@ -86,6 +86,25 @@ class StorageConstraints(BaseModel):
     discharge_efficiency: float = 0.95
     min_soc_pct: float = 0.0
     max_soc_pct: float = 100.0
+    purchase_price_eur: float | None = None
+    """Total purchase price of the battery system in EUR (hardware only, excl. installation)."""
+    cycle_life: int | None = None
+    """Rated full-cycle lifetime of the battery (manufacturer spec, e.g. 3000 cycles at 80% DoD)."""
+
+    @property
+    def degradation_cost_per_kwh(self) -> float:
+        """Amortised degradation cost per kWh *stored* (€/kWh).
+
+        Computed as ``purchase_price_eur / (cycle_life × capacity_kwh)``.
+        Returns 0.0 when either field is absent or zero.
+
+        Interpretation: every kWh that passes through the battery costs this
+        much in wear.  The MILP adds this to the charge cost so the optimizer
+        only cycles the battery when the price spread justifies the wear.
+        """
+        if self.purchase_price_eur and self.cycle_life and self.capacity_kwh:
+            return self.purchase_price_eur / (self.cycle_life * self.capacity_kwh)
+        return 0.0
 
 
 class Measurement(BaseModel):
