@@ -90,6 +90,8 @@ class StorageConstraints(BaseModel):
     """Total purchase price of the battery system in EUR (hardware only, excl. installation)."""
     cycle_life: int | None = None
     """Rated full-cycle lifetime of the battery (manufacturer spec, e.g. 3000 cycles at 80% DoD)."""
+    no_grid_charge: bool = False
+    """When True the battery may only charge from local PV surplus, never from grid import."""
 
     @property
     def degradation_cost_per_kwh(self) -> float:
@@ -160,6 +162,21 @@ class ControlIntent(BaseModel):
     mode: str
     min_power_w: float | None = None
     max_power_w: float | None = None
+    planned_kw: float | None = None
+    """Average power the optimizer planned for this timestep (kW).
+
+    Sign convention mirrors the platform: positive = charging/consuming,
+    negative = discharging/generating.  Populated by the MILP optimizer;
+    ``None`` for intents produced outside the MILP (e.g. rule-based fallbacks).
+    """
+    reserved_kwh: float | None = None
+    """Energy budget reserved by the optimizer for this timestep (kWh).
+
+    Positive = charge budget allocated; negative = discharge budget allocated.
+    The fast control loop uses this to track how much of the planned energy
+    has actually been delivered so it can decide whether to allow PV overflow
+    on top of a partially-filled slot.
+    """
 
 
 class EnergyPlan(BaseModel):

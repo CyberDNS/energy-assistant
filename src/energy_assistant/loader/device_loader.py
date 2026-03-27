@@ -33,6 +33,56 @@ from ..plugins._iobroker.pool import IoBrokerConnectionPool
 _log = logging.getLogger(__name__)
 
 
+def build_device_forecasts(
+    app_config: AppConfig,
+    ctx: "BuildContext | None" = None,
+) -> list:
+    """Build forecast providers declared on individual consumer devices.
+
+    Iterates through all device configs and, for each device that has a
+    ``forecast:`` sub-section, builds the corresponding forecast provider
+    via the plugin registry.
+
+    This is separate from the top-level ``forecasts:`` section — device-level
+    forecasts model the consumption profile of that specific device and are
+    aggregated into the ``ForecastQuantity.CONSUMPTION`` forecast at plan time.
+
+    Parameters
+    ----------
+    app_config:
+        Parsed application configuration.
+    ctx:
+        Build context with backend clients.  When ``None`` a minimal context
+        without backend connections is created (sufficient for providers like
+        ``static_profile`` that need no live data).
+
+    Returns
+    -------
+    list:
+        Forecast provider instances for each device that declared one.
+    """
+    from ..core.plugin_registry import BuildContext as _BuildContext
+
+    if ctx is None:
+        ctx = _BuildContext(backends=app_config.backends)
+
+    providers = []
+    for device_id, cfg in app_config.devices.items():
+        forecast_cfg = cfg.get("forecast")
+        if not forecast_cfg or not isinstance(forecast_cfg, dict):
+            continue
+        forecast_id = f"{device_id}_forecast"
+        try:
+            provider = plugin_registry.build_forecast(forecast_id, forecast_cfg, ctx)
+            if provider is not None:
+                providers.append(provider)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning(
+                "Could not build forecast for device %r: %s", device_id, exc
+            )
+    return providers
+
+
 def build(
     app_config: AppConfig,
 ) -> tuple[DeviceRegistry, dict[str, TariffModel], TopologyNode | None]:

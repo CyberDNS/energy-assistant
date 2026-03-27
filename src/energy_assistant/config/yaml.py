@@ -84,15 +84,26 @@ class YamlConfigLoader:
             raw: dict[str, Any] = yaml.load(f, Loader=self._loader) or {}  # noqa: S506
 
         backends = _parse_backends(raw.get("backends") or {})
+        raw_tariffs: dict[str, Any] = raw.get("tariffs") or {}
+        default_tariff_id = _find_default_tariff(raw_tariffs)
         return AppConfig(
             backends=backends,
-            tariffs=raw.get("tariffs") or {},
+            tariffs=raw_tariffs,
             devices=_normalize_devices(raw.get("devices") or {}),
             forecasts=_normalize_forecasts(raw.get("forecasts") or {}),
             topology=raw.get("topology") or {},
             assets=raw.get("assets") or {},
             optimizer=raw.get("optimizer") or {},
+            default_tariff_id=default_tariff_id,
         )
+
+
+def _find_default_tariff(raw_tariffs: dict[str, Any]) -> str | None:
+    """Return the tariff_id marked with ``default: true``, or ``None``."""
+    for tariff_id, cfg in raw_tariffs.items():
+        if isinstance(cfg, dict) and cfg.get("default"):
+            return tariff_id
+    return None
 
 
 def _normalize_forecasts(raw: Any) -> dict[str, dict[str, Any]]:
