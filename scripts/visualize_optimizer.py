@@ -65,7 +65,7 @@ from energy_assistant.plugins.flat_rate.tariff import FlatRateTariff
 from energy_assistant.core.ledger import BatteryCostLedger
 from energy_assistant.core.optimizer import OptimizationContext
 from energy_assistant.core.plugin_registry import BuildContext
-from energy_assistant.loader.device_loader import build as build_from_config
+from energy_assistant.loader.device_loader import build as build_from_config, build_device_forecasts
 from energy_assistant.plugins import registry as plugin_registry
 from energy_assistant.plugins._iobroker.pool import IoBrokerConnectionPool
 from energy_assistant.plugins.milp_highs import MilpHigsOptimizer
@@ -290,6 +290,38 @@ async def _fetch_soc(device: Any) -> float | None:
 
 # ── Build forecast providers from config ──────────────────────────────────────
 
+async def _fetch_raw_consumption(
+    device_forecasts: list,
+    timestamps: list[datetime],
+    horizon: timedelta,
+) -> tuple[list[ForecastPoint], str]:
+    """Return per-step consumption forecast values as ForecastPoints.
+
+    Sums the consumption forecasts of all consumer devices that declared
+    a ``forecast:`` section (e.g. ``static_profile`` on the baseline device
+    or heatpump).  Each device carries its own tariff reference so future
+    versions can weight the cost correctly per load.
+    """
+    values = [0.0] * len(timestamps)
+    sources: list[str] = []
+
+    for provider in device_forecasts:
+        if getattr(provider, "quantity", None) != ForecastQuantity.CONSUMPTION:
+            continue
+        try:
+            raw = await provider.get_forecast(horizon)
+            aligned = _align(raw, timestamps)
+            for i, v in enumerate(aligned):
+                values[i] += v
+            sources.append(type(provider).__name__)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("Consumption forecast provider failed: %s", exc)
+
+    pts = [ForecastPoint(timestamp=ts, value=v) for ts, v in zip(timestamps, values)]
+    desc = ", ".join(sources) if sources else "no device forecasts configured"
+    return pts, desc
+
+
 def _build_forecast_providers(app_config: Any, ctx: BuildContext) -> list:
     providers = []
     for fid, cfg in app_config.forecasts.items():
@@ -336,6 +368,7 @@ async def _run(
         ha_client=None,
     )
     forecast_providers = _build_forecast_providers(app_config, ctx)
+    device_forecasts   = build_device_forecasts(app_config, ctx)
 
     # 4. Planning horizon cap from config (acts as an upper bound, not a fixed target)
     horizon_cap_h = int(app_config.optimizer.get("horizon_hours", 48))
@@ -414,9 +447,21 @@ async def _run(
 
     baseline_load_kw = float(app_config.optimizer.get("baseline_load_kw", 0.0))
     if baseline_load_kw > 0:
-        print(f"  Baseline load: {baseline_load_kw:.2f} kW  (from config: baseline_load_kw)")
-    consumption_fc = [ForecastPoint(timestamp=ts, value=baseline_load_kw)
-                      for ts in timestamps]
+        _log.warning(
+            "config.yaml: optimizer.baseline_load_kw=%.2f is deprecated — "
+            "add a 'baseline' generic_consumer device with a static_profile forecast instead.",
+            baseline_load_kw,
+        )
+    consumption_fc, consumption_src = await _fetch_raw_consumption(
+        device_forecasts, timestamps, horizon
+    )
+    # Legacy: add deprecated baseline on top of device forecasts
+    if baseline_load_kw > 0:
+        consumption_fc = [
+            ForecastPoint(timestamp=fp.timestamp, value=fp.value + baseline_load_kw)
+            for fp in consumption_fc
+        ]
+    print(f"  Consumption  : {consumption_src}")
 
     context = OptimizationContext(
         device_states=device_states,

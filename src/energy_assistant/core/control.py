@@ -1,0 +1,449 @@
+"""Control loop — executes the active EnergyPlan against live device states.
+
+Architecture overview
+---------------------
+The fast control loop runs on a short interval (e.g. every 30 s).  On each
+tick it:
+
+1. Receives a ``LiveSituation`` snapshot (grid power, spot price, elapsed dt).
+2. Finds the *active* ``ControlIntent`` for each registered contributor
+   (the most recent intent whose ``timestep ≤ now``).
+3. Asks each contributor for its **desired power setpoint**.
+4. Sends a ``DeviceCommand(set_power_w=…)`` for every non-None setpoint.
+5. Updates the ``BatteryCostLedger`` based on the *actual* measured power
+   of each controlled device.
+6. Applies gradual spot-floor decay to every storage contributor.
+
+Contributor model
+-----------------
+Any device that participates in the fast loop implements ``ControlContributor``.
+The protocol is intentionally minimal so that storage devices, EV chargers,
+heat pumps, and other controllable loads can all plug in the same way without
+changing the loop itself.
+
+Current implementations
+~~~~~~~~~~~~~~~~~~~~~~~
+``StorageControlContributor``
+    Battery / home storage.  Follows ``grid_fill`` / ``discharge`` intents
+    from the MILP optimizer and absorbs PV overflow when idle.
+
+Future extension points
+~~~~~~~~~~~~~~~~~~~~~~~
+To add EV chargers, heat pumps, or other controllable loads:
+- Implement ``ControlContributor`` (duck-typed; no inheritance needed).
+- Supply the contributor's charge price via ``price_eur_per_kwh()`` so the
+  ledger update uses the right marginal cost (e.g. export price for PV
+  overflow vs. import price for grid-fill).
+- Register with ``ControlLoop.register_contributor()``.
+
+No changes to ``ControlLoop`` itself are required.
+
+PV overflow
+-----------
+When the optimizer issues an ``idle`` intent (or no plan covers the current
+slot), ``StorageControlContributor`` inspects ``live.grid_power_w``:
+
+- ``grid_power_w < 0`` (grid is exporting surplus): absorb up to
+  ``min(|surplus|, max_charge_kw × 1000)`` W in the battery.
+- Otherwise: send 0 W (hold charge).
+
+This keeps the battery opportunistically full during sunny periods without
+the optimizer needing to forecast every PV spike.
+
+Ledger update
+-------------
+After sending commands the loop reads back ``state.power_w`` for each
+contributor and records the actual energy flow in ``BatteryCostLedger``:
+
+- Positive power (charging): ``record_charge(price=intent_price)``
+- Negative power (discharging): ``record_discharge``
+- Zero / unavailable: no ledger update
+
+The effective charge price passed to the ledger depends on *how* the energy
+arrived:
+- ``grid_fill`` intent → ``live.current_price_eur_per_kwh`` (grid import)
+- ``idle`` / PV overflow → ``live.pv_opportunity_price_eur_per_kwh``
+  (the export rate you forgo by self-consuming; often 0 or feed-in tariff)
+
+After all devices are updated, gradual spot-floor decay is applied to every
+``StorageControlContributor``'s ledger entry using the battery's max charge
+rate and the tick duration.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+from .ledger import BatteryCostLedger
+from .models import ControlIntent, DeviceCommand, EnergyPlan, DeviceState, StorageConstraints
+
+if TYPE_CHECKING:
+    from .registry import DeviceRegistry
+
+_log = logging.getLogger(__name__)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Live situation snapshot
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class LiveSituation:
+    """Snapshot of the energy situation at a single control tick.
+
+    Built by the outer orchestration layer and passed unchanged to
+    ``ControlLoop.tick()``.  All contributors receive the same snapshot.
+    """
+
+    timestamp: datetime
+    """Wall-clock time of this tick (UTC)."""
+
+    grid_power_w: float
+    """Net grid power in W.  Positive = importing; negative = exporting (PV surplus)."""
+
+    dt_hours: float
+    """Time elapsed since the previous tick, in hours.
+
+    Used by the ledger to compute energy from average power and by the
+    spot-floor decay to advance the exponential decay by the right amount.
+    """
+
+    device_states: dict[str, DeviceState] = field(default_factory=dict)
+    """Latest measured state per device, keyed by ``device_id``."""
+
+    current_price_eur_per_kwh: float = 0.0
+    """Current spot / tariff price for grid import (€/kWh).
+
+    Applied to the ledger when a storage device charges from the grid
+    (``grid_fill`` mode).
+    """
+
+    pv_opportunity_price_eur_per_kwh: float = 0.0
+    """Opportunity cost of self-consuming PV instead of exporting it (€/kWh).
+
+    Typically the feed-in tariff (e.g. 0.08 €/kWh).  When PV surplus charges
+    the battery in ``idle`` / overflow mode, the ledger records this as the
+    effective charge price — the cost of holding each kWh is what you gave
+    up by not selling it to the grid.
+
+    Defaults to 0.0 (no feed-in tariff / no opportunity cost).
+    """
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ControlContributor protocol
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@runtime_checkable
+class ControlContributor(Protocol):
+    """Protocol for any device that participates in the fast control loop.
+
+    Duck-typed — implementations do not inherit from this class.  Any object
+    that provides these two members satisfies the protocol.
+
+    Extension guide
+    ---------------
+    To add a new device category (e.g. EV charger, heat pump):
+
+    1. Create a class with ``device_id`` property and ``desired_setpoint_w``
+       method matching the signatures below.
+    2. Optionally override ``charge_price_eur_per_kwh`` to return the
+       marginal cost of the energy you're commanding (default: use
+       ``live.current_price_eur_per_kwh``).  This is important for EV
+       chargers that may have a separate tariff.
+    3. ``register_contributor(contributor)`` on the ``ControlLoop`` instance.
+
+    No other changes are needed.
+    """
+
+    @property
+    def device_id(self) -> str:
+        """Stable identifier of the device this contributor controls."""
+        ...
+
+    def desired_setpoint_w(
+        self,
+        intent: ControlIntent | None,
+        live: LiveSituation,
+    ) -> float | None:
+        """Return the desired power setpoint in W, or ``None`` to skip.
+
+        Sign convention
+        ---------------
+        Positive = charging / consuming.
+        Negative = discharging / generating.
+
+        Returning ``None`` means "send no command this tick" (the device
+        keeps its current behaviour).
+        """
+        ...
+
+    def charge_price_eur_per_kwh(self, intent: ControlIntent | None, live: LiveSituation) -> float:
+        """Effective marginal cost (€/kWh) for energy charged this tick.
+
+        The default implementation returns the grid import price for
+        ``grid_fill`` intents and the PV opportunity price for everything
+        else.  Override to use a device-specific tariff.
+        """
+        if intent is not None and intent.mode == "grid_fill":
+            return live.current_price_eur_per_kwh
+        return live.pv_opportunity_price_eur_per_kwh
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# StorageControlContributor
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class StorageControlContributor:
+    """Control contributor for battery / home-storage devices.
+
+    Execution rules per intent mode
+    --------------------------------
+    ``grid_fill``
+        Charge at the optimizer-planned rate: ``setpoint = intent.max_power_w``.
+    ``discharge``
+        Discharge at the optimizer-planned rate: ``setpoint = intent.min_power_w``
+        (which is ≤ 0 by platform convention).
+    ``idle`` / ``None`` (no covering intent)
+        **PV overflow**: if the grid is currently exporting
+        (``live.grid_power_w < 0``), absorb up to
+        ``min(|surplus|, max_charge_kw × 1000)`` W.
+        Otherwise hold at 0 W (no charge, no discharge).
+
+    The actual setpoint sent to the device respects physical limits
+    declared in ``StorageConstraints`` (``max_charge_kw``).
+    """
+
+    def __init__(self, constraints: StorageConstraints) -> None:
+        self._constraints = constraints
+
+    # ------------------------------------------------------------------
+    # ControlContributor protocol
+    # ------------------------------------------------------------------
+
+    @property
+    def device_id(self) -> str:
+        return self._constraints.device_id
+
+    def desired_setpoint_w(
+        self,
+        intent: ControlIntent | None,
+        live: LiveSituation,
+    ) -> float | None:
+        mode = intent.mode if intent is not None else "idle"
+
+        if mode == "grid_fill":
+            # Charge at the optimizer-planned upper bound.
+            return intent.max_power_w if intent is not None else None
+
+        if mode == "discharge":
+            # Discharge at the optimizer-planned lower bound (≤ 0 W).
+            return intent.min_power_w if intent is not None else None
+
+        # idle (or unknown mode): opportunistic PV absorption
+        surplus_w = -live.grid_power_w  # positive when grid is exporting
+        if surplus_w > 1.0:
+            max_charge_w = self._constraints.max_charge_kw * 1000.0
+            return min(surplus_w, max_charge_w)
+        return 0.0
+
+    def charge_price_eur_per_kwh(
+        self, intent: ControlIntent | None, live: LiveSituation
+    ) -> float:
+        if intent is not None and intent.mode == "grid_fill":
+            return live.current_price_eur_per_kwh
+        # PV overflow or idle — opportunity cost of not exporting
+        return live.pv_opportunity_price_eur_per_kwh
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ControlLoop
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class ControlLoop:
+    """Fast control loop that executes an ``EnergyPlan`` against live device states.
+
+    Typical usage
+    -------------
+    ::
+
+        ledger = BatteryCostLedger()
+        loop = ControlLoop(ledger=ledger)
+        loop.register_contributor(StorageControlContributor(battery_constraints))
+
+        # Subscribe to new plans:
+        event_bus.subscribe(PlanUpdatedEvent, lambda e: loop.update_plan(e.plan))
+
+        # In the scheduler / async task:
+        while True:
+            live = LiveSituation(
+                timestamp=datetime.now(timezone.utc),
+                grid_power_w=grid_meter.power_w,
+                dt_hours=30 / 3600,
+                device_states=registry.latest_states(),
+                current_price_eur_per_kwh=tariff.current_price(),
+                pv_opportunity_price_eur_per_kwh=tariff.export_price(),
+            )
+            await loop.tick(live, registry)
+            await asyncio.sleep(30)
+
+    Modularity
+    ----------
+    Add new device types by calling ``register_contributor()`` with any object
+    satisfying the ``ControlContributor`` protocol.  The loop is unaware of
+    device specifics — it only calls ``desired_setpoint_w`` and routes the
+    resulting command to the registry.
+    """
+
+    def __init__(
+        self,
+        ledger: BatteryCostLedger,
+        contributors: list[ControlContributor] | None = None,
+    ) -> None:
+        self._ledger = ledger
+        self._contributors: list[ControlContributor] = list(contributors or [])
+        self._active_plan: EnergyPlan | None = None
+
+    # ------------------------------------------------------------------
+    # Plan management
+    # ------------------------------------------------------------------
+
+    def update_plan(self, plan: EnergyPlan) -> None:
+        """Replace the current EnergyPlan.
+
+        Call this from a ``PlanUpdatedEvent`` subscriber.  The change
+        takes effect on the *next* tick — any command already in flight
+        for the current tick is not affected.
+        """
+        self._active_plan = plan
+        _log.info(
+            "ControlLoop: new plan  created_at=%s  intents=%d",
+            plan.created_at.isoformat(),
+            len(plan.intents),
+        )
+
+    # ------------------------------------------------------------------
+    # Contributor registry
+    # ------------------------------------------------------------------
+
+    def register_contributor(self, contributor: ControlContributor) -> None:
+        """Add a contributor to the control loop.
+
+        Contributors are processed in registration order.  For devices
+        that share a common constraint (e.g. multiple batteries competing
+        for the same grid connection), register them together and let the
+        individual contributors arbitrate via their ``desired_setpoint_w``
+        implementations.
+        """
+        self._contributors.append(contributor)
+
+    # ------------------------------------------------------------------
+    # Tick
+    # ------------------------------------------------------------------
+
+    async def tick(
+        self,
+        live: LiveSituation,
+        registry: "DeviceRegistry",
+    ) -> None:
+        """Execute one control tick.
+
+        For each registered contributor:
+        1. Resolve the active ``ControlIntent`` (most recent intent ≤ now).
+        2. Ask the contributor for its desired setpoint.
+        3. Send ``DeviceCommand(set_power_w=…)`` when the setpoint is not None.
+        4. Update the ``BatteryCostLedger`` from the *actual* measured power
+           in ``live.device_states`` (not from the setpoint sent).
+
+        After all devices are processed, apply gradual spot-floor decay to
+        every ``StorageControlContributor``'s ledger entry.
+
+        Parameters
+        ----------
+        live:
+            Current energy situation snapshot.
+        registry:
+            Device registry used to look up and command devices.
+        """
+        for contributor in self._contributors:
+            intent = self._find_intent(contributor.device_id, live.timestamp)
+            setpoint_w = contributor.desired_setpoint_w(intent, live)
+
+            if setpoint_w is not None:
+                device = registry.get(contributor.device_id)
+                if device is not None:
+                    await device.send_command(
+                        DeviceCommand(
+                            device_id=contributor.device_id,
+                            command="set_power_w",
+                            value=round(setpoint_w, 1),
+                        )
+                    )
+                else:
+                    _log.warning(
+                        "ControlLoop: device %r not found in registry — skipping",
+                        contributor.device_id,
+                    )
+
+            # Update ledger from *actual* measured power, not from setpoint.
+            # This correctly accounts for partial delivery, SoC clamping, etc.
+            state = live.device_states.get(contributor.device_id)
+            if state is not None and state.power_w is not None and live.dt_hours > 0:
+                actual_kwh = state.power_w / 1000.0 * live.dt_hours
+                if actual_kwh > 0.0:
+                    price = contributor.charge_price_eur_per_kwh(intent, live)
+                    self._ledger.record_charge(
+                        contributor.device_id,
+                        delta_kwh=actual_kwh,
+                        price_eur_per_kwh=price,
+                    )
+                elif actual_kwh < 0.0:
+                    self._ledger.record_discharge(
+                        contributor.device_id,
+                        delta_kwh=abs(actual_kwh),
+                    )
+
+        # Gradual spot-floor decay for all storage contributors.
+        for contributor in self._contributors:
+            if isinstance(contributor, StorageControlContributor):
+                self._ledger.apply_spot_floor(
+                    contributor.device_id,
+                    spot_price=live.current_price_eur_per_kwh,
+                    dt_hours=live.dt_hours,
+                    max_charge_kw=contributor._constraints.max_charge_kw,
+                    charge_efficiency=contributor._constraints.charge_efficiency,
+                )
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _find_intent(
+        self,
+        device_id: str,
+        now: datetime,
+    ) -> ControlIntent | None:
+        """Return the active ``ControlIntent`` for *device_id* at *now*.
+
+        "Active" means the intent with the *greatest* ``timestep`` that is
+        still ≤ *now* (i.e. we are inside that planning slot).
+        Returns ``None`` when no plan is active or no matching intent exists.
+        """
+        if self._active_plan is None:
+            return None
+
+        relevant = [
+            intent
+            for intent in self._active_plan.intents
+            if intent.device_id == device_id and intent.timestep <= now
+        ]
+        if not relevant:
+            return None
+        return max(relevant, key=lambda i: i.timestep)

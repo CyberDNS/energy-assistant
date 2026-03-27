@@ -5,6 +5,7 @@ Re-exports the full public API of all core modules.
 
 from .config import AppConfig, BackendsConfig, ConfigManager, HomeAssistantConfig, IoBrokerConfig
 from .constraint import Constraint
+from .control import ControlContributor, ControlLoop, LiveSituation, StorageControlContributor
 from .device import Device
 from .event import DeviceStateEvent, Event, EventBus, PlanUpdatedEvent
 from .forecast import ForecastProvider
@@ -33,7 +34,9 @@ __all__ = [
     "ConfigEntry",
     "ConfigManager",
     "Constraint",
+    "ControlContributor",
     "ControlIntent",
+    "ControlLoop",
     "Device",
     "DeviceCommand",
     "DeviceRegistry",
@@ -48,12 +51,14 @@ __all__ = [
     "ForecastQuantity",
     "HomeAssistantConfig",
     "IoBrokerConfig",
+    "LiveSituation",
     "Measurement",
     "OptimizationContext",
     "Optimizer",
     "PlanUpdatedEvent",
     "StorageBackend",
     "StorageConstraints",
+    "StorageControlContributor",
     "TariffModel",
     "TariffPoint",
     "TopologyNode",

@@ -266,6 +266,13 @@ class MilpHigsOptimizer:
                 f"grid_balance__{t}",
             )
 
+        # Tight per-step big-M: max possible grid import = consumption surplus + all charging.
+        # Used for the no_grid_charge constraint below.
+        big_m = [
+            max(0.0, net_load[t]) + sum(s.max_charge_kw * step_h for s in batteries)
+            for t in T
+        ]
+
         for sc in batteries:
             b = sc.device_id
             c_max_kwh = sc.max_charge_kw * step_h
@@ -278,6 +285,14 @@ class MilpHigsOptimizer:
                 # Charge only when u=1; discharge only when u=0
                 prob += c[(b, t)] <= c_max_kwh * u[(b, t)], f"c_max__{b}__{t}"
                 prob += d[(b, t)] <= d_max_kwh * (1 - u[(b, t)]), f"d_max__{b}__{t}"
+                # PV-only charging: when this battery is charging (u=1), grid import must
+                # be zero.  Via the energy balance this automatically caps total battery
+                # charging to the available PV surplus and correctly accounts for all other
+                # batteries competing for that surplus — unlike a static cap on c[b,t].
+                # At night (u=0 because no economic incentive) the constraint is inactive,
+                # so other batteries may still charge from the grid freely.
+                if sc.no_grid_charge:
+                    prob += g_imp[t] <= big_m[t] * (1 - u[(b, t)]), f"no_grid_charge__{b}__{t}"
 
                 # SoC dynamics
                 e_prev = e_init if t == 0 else e[(b, t - 1)]
@@ -456,6 +471,8 @@ def _extract_intents(
                         mode="grid_fill",
                         min_power_w=0.0,
                         max_power_w=round(c_w, 1),
+                        planned_kw=round(c_w / 1000.0, 4),
+                        reserved_kwh=round(c_kwh, 4),
                     )
                 )
             elif d_w > 1.0:
@@ -467,11 +484,14 @@ def _extract_intents(
                         mode="discharge",
                         min_power_w=round(-d_w, 1),
                         max_power_w=0.0,
+                        planned_kw=round(-d_w / 1000.0, 4),
+                        reserved_kwh=round(-d_kwh, 4),
                     )
                 )
             else:
                 intents.append(
-                    ControlIntent(device_id=b, timestep=ts, mode="idle")
+                    ControlIntent(device_id=b, timestep=ts, mode="idle",
+                                  planned_kw=0.0, reserved_kwh=0.0)
                 )
 
     return intents

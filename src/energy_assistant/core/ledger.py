@@ -29,11 +29,15 @@ pay for 1 kWh from the grid but only η_c kWh ends up stored.
 **Reset-to-spot floor**:
 
     If the current best available charge price ``spot`` < cost_basis, then:
-        cost_basis = max(cost_basis - decay_rate × Δt, spot)
+        cost_basis decays exponentially toward spot at rate:
+            k = max_charge_kw × η_c / stored_energy_kwh  (h⁻¹)
+        so: cost_basis(t) = spot + (cost_basis₀ − spot) × exp(−k × t)
 
-    Rationale: you can always recharge at ``spot`` right now, so holding
-    energy that cost more than ``spot`` has an opportunity cost.  Over time
-    the basis decays toward the current spot price if the spot is cheaper.
+    Intuition: you can always recharge at ``spot`` right now.  The faster
+    you can refill the battery (high max_charge_kw relative to stored energy),
+    the faster the basis tracks the current spot price.  When timing
+    information is unavailable, the basis is snapped to spot immediately
+    (legacy / fallback behaviour).
 
 Usage
 -----
@@ -59,6 +63,7 @@ Usage
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 
 _log = logging.getLogger(__name__)
@@ -182,19 +187,53 @@ class BatteryCostLedger:
         self,
         device_id: str,
         spot_price: float,
+        dt_hours: float = 0.0,
+        max_charge_kw: float = 0.0,
+        charge_efficiency: float = 0.95,
     ) -> None:
-        """Decay cost basis toward ``spot_price`` if spot is cheaper.
+        """Decay cost basis toward ``spot_price`` when spot is cheaper.
 
-        If the current best charge price is lower than the cost basis,
-        the opportunity cost of holding the stored energy falls — you could
-        discharge, take the break-even loss, and refill cheaper.  This call
-        immediately resets the basis to ``spot_price`` in that case.
+        Gradual decay (preferred)
+        ~~~~~~~~~~~~~~~~~~~~~~~~~
+        When ``dt_hours > 0`` and ``max_charge_kw > 0``, the basis decays
+        exponentially toward ``spot_price`` at a rate determined by how
+        quickly the battery *could* be refilled at the current spot price:
 
-        Call this periodically (e.g. on every new price tick) to keep the
-        basis grounded in current market conditions.
+            rate = max_charge_kw × η_c / stored_energy_kwh   (h⁻¹)
+            new_basis = spot + (basis − spot) × exp(−rate × dt_hours)
+
+        Intuition: if you *could* replace all stored energy in 1 hour at
+        current spot, the cost basis follows spot within an hour.  If the
+        battery is large relative to the charger it takes proportionally
+        longer.  The basis never drops below ``spot_price``.
+
+        Instant reset (legacy / fallback)
+        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        When ``dt_hours == 0`` or ``max_charge_kw == 0`` the basis is
+        snapped immediately to ``spot_price`` when spot is cheaper.  This
+        preserves backward-compatible behaviour for callers that do not
+        supply timing information.
+
+        Call this periodically (e.g. on every new price tick or control
+        tick) to keep the basis grounded in current market conditions.
         """
         entry = self._get_or_create(device_id, spot_price)
-        if spot_price < entry.cost_basis:
+        if spot_price >= entry.cost_basis:
+            return  # spot is not cheaper — no decay needed
+
+        if dt_hours > 0.0 and max_charge_kw > 0.0:
+            stored = max(entry.stored_energy_kwh, _MIN_ENERGY_KWH)
+            rate = max_charge_kw * charge_efficiency / stored  # h⁻¹
+            new_basis = spot_price + (entry.cost_basis - spot_price) * math.exp(-rate * dt_hours)
+            new_basis = max(new_basis, spot_price)
+            _log.debug(
+                "BatteryCostLedger: %r spot decay  basis %.4f → %.4f €/kWh"
+                "  (rate=%.3f h⁻¹  dt=%.4f h)",
+                device_id, entry.cost_basis, new_basis, rate, dt_hours,
+            )
+            entry.cost_basis = new_basis
+        else:
+            # Instant snap — backward-compatible fallback
             _log.debug(
                 "BatteryCostLedger: %r spot floor applied  "
                 "basis %.4f → %.4f €/kWh",

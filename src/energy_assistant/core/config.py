@@ -97,3 +97,9 @@ class AppConfig:
     topology: dict[str, Any] = field(default_factory=dict)
     assets: dict[str, Any] = field(default_factory=dict)
     optimizer: dict[str, Any] = field(default_factory=dict)
+    default_tariff_id: str | None = None
+    """Tariff used for devices/loads that have no explicit ``tariff:`` key.
+
+    Typically the main spot-price tariff (e.g. ``household`` / Tibber).
+    Set by marking a tariff with ``default: true`` in config.yaml.
+    """
