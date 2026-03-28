@@ -13,6 +13,16 @@ FROM python:${PYTHON_VERSION}-slim AS builder
 
 WORKDIR /build
 
+# Install native build toolchain needed to compile Python packages from source.
+# Required on ARM (linux/arm64, linux/arm/v7) where pre-built wheels may be
+# unavailable (e.g. numpy pulled in transitively by highspy).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        gfortran \
+        pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install uv for fast dependency installation
 RUN pip install --no-cache-dir uv
 
