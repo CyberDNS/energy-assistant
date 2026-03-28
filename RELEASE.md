@@ -119,7 +119,7 @@ application channel structure:
 ### Version format in `config.json`
 
 - dev:   `0.1.0-dev`  (static; communicates "unstable snapshot")
-- edge:  `0.2.0-rc1`  (mirrors the prerelease tag, dashes only — HA safe)
+- edge:  `0.2.0-rc.1`  (mirrors the prerelease tag, without the leading `v`)
 - prod:  `0.2.0`      (exact stable version)
 
 ### How to update the add-on version on a new release

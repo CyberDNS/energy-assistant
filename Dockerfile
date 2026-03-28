@@ -40,8 +40,10 @@ RUN groupadd --gid 1000 energyassistant \
 
 WORKDIR /app
 
-# Copy installed packages from builder
-COPY --from=builder /usr/local/lib/python*/site-packages /usr/local/lib/python3.14/site-packages
+# Copy installed packages from builder.
+# Copying /usr/local/lib captures all Python site-packages regardless of the
+# exact Python micro-version directory name.
+COPY --from=builder /usr/local/lib /usr/local/lib
 COPY --from=builder /usr/local/bin/energy-assistant /usr/local/bin/energy-assistant
 
 # Runtime data and config directories
