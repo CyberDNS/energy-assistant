@@ -85,6 +85,8 @@ class ZendureIoBrokerDevice:
         device_serial: str,
         *,
         capacity_kwh: float,
+        min_soc_pct: float = 0.0,
+        max_soc_pct: float = 100.0,
         max_charge_kw: float,
         max_discharge_kw: float,
         maintenance_charge_w: float = 300.0,
@@ -95,6 +97,8 @@ class ZendureIoBrokerDevice:
         self._client = client
         self._prefix = f"zendure-solarflow.0.{hub_id}.{device_serial}"
         self._capacity_kwh = capacity_kwh
+        self._min_soc_pct = min_soc_pct
+        self._max_soc_pct = max_soc_pct
         self._max_charge_kw = max_charge_kw
         self._max_discharge_kw = max_discharge_kw
         self._maintenance_charge_w = maintenance_charge_w
@@ -116,6 +120,8 @@ class ZendureIoBrokerDevice:
             capacity_kwh=self._capacity_kwh,
             max_charge_kw=self._max_charge_kw,
             max_discharge_kw=self._max_discharge_kw,
+            min_soc_pct=self._min_soc_pct,
+            max_soc_pct=self._max_soc_pct,
             purchase_price_eur=self._purchase_price_eur,
             cycle_life=self._cycle_life,
         )

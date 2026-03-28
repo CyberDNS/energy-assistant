@@ -89,6 +89,8 @@ class SmaSunnyBoyStorageDevice:
         modbus_instance: str = "modbus.0",
         *,
         capacity_kwh: float,
+        min_soc_pct: float = 0.0,
+        max_soc_pct: float = 100.0,
         max_charge_kw: float,
         max_discharge_kw: float,
         voltage_max_v: float = 253.0,
@@ -101,6 +103,8 @@ class SmaSunnyBoyStorageDevice:
         self._client = client
         self._mb = modbus_instance
         self._capacity_kwh = capacity_kwh
+        self._min_soc_pct = min_soc_pct
+        self._max_soc_pct = max_soc_pct
         self._max_charge_kw = max_charge_kw
         self._max_discharge_kw = max_discharge_kw
         self._purchase_price_eur = purchase_price_eur
@@ -136,6 +140,8 @@ class SmaSunnyBoyStorageDevice:
             capacity_kwh=self._capacity_kwh,
             max_charge_kw=self._max_charge_kw,
             max_discharge_kw=self._max_discharge_kw,
+            min_soc_pct=self._min_soc_pct,
+            max_soc_pct=self._max_soc_pct,
             purchase_price_eur=self._purchase_price_eur,
             cycle_life=self._cycle_life,
             no_grid_charge=self._no_grid_charge,

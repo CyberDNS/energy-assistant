@@ -37,6 +37,8 @@ def _build(device_id: str, cfg: dict[str, Any], ctx: BuildContext) -> object | N
         hub_id=hub_id,
         device_serial=device_serial,
         capacity_kwh=float(cfg.get("capacity_kwh", 0.0)),
+        min_soc_pct=float(cfg.get("min_soc_pct", 0.0)),
+        max_soc_pct=float(cfg.get("max_soc_pct", 100.0)),
         max_charge_kw=float(cfg.get("max_charge_kw", 0.0)),
         max_discharge_kw=float(cfg.get("max_discharge_kw", 0.0)),
         maintenance_charge_w=float(cfg.get("maintenance_charge_w", 300.0)),

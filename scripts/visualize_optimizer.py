@@ -65,7 +65,7 @@ from energy_assistant.plugins.flat_rate.tariff import FlatRateTariff
 from energy_assistant.core.ledger import BatteryCostLedger
 from energy_assistant.core.optimizer import OptimizationContext
 from energy_assistant.core.plugin_registry import BuildContext
-from energy_assistant.loader.device_loader import build as build_from_config, build_device_forecasts
+from energy_assistant.loader.device_loader import build as build_from_config, build_all_forecasts
 from energy_assistant.plugins import registry as plugin_registry
 from energy_assistant.plugins._iobroker.pool import IoBrokerConnectionPool
 from energy_assistant.plugins.milp_highs import MilpHigsOptimizer
@@ -323,15 +323,186 @@ async def _fetch_raw_consumption(
 
 
 def _build_forecast_providers(app_config: Any, ctx: BuildContext) -> list:
-    providers = []
-    for fid, cfg in app_config.forecasts.items():
-        try:
-            p = plugin_registry.build_forecast(fid, cfg, ctx)
-            if p is not None:
-                providers.append(p)
-        except Exception as exc:
-            _log.warning("Could not build forecast '%s': %s", fid, exc)
-    return providers
+    """Build all forecast providers — top-level (PV) and per-device (consumption)."""
+    return build_all_forecasts(app_config, ctx)
+
+
+# ── Shared Plotly energy-flow figure ─────────────────────────────────────────
+
+def _make_flows_figure(
+    timestamps: list,
+    pv_kw: list,
+    consumption_kw: list,
+    import_price_eur_per_kwh: list,
+    export_price_eur_per_kwh: list,
+    grid_import_kw: list,
+    grid_export_kw: list,
+    batteries: dict,
+    saving_eur: list,
+    cumulative_saving_eur: list,
+    step_minutes: int,
+    title: str = "Energy Flows & Cost Impact",
+):
+    """Return a 5-panel interactive Plotly figure showing flows, forecasts and savings.
+
+    Parameters
+    ----------
+    timestamps:
+        Local-timezone datetime objects, one per time step.
+    pv_kw / consumption_kw / grid_import_kw / grid_export_kw:
+        Per-step power in kW.
+    import_price_eur_per_kwh / export_price_eur_per_kwh:
+        Per-step import/export price in EUR/kWh.
+    batteries:
+        Dict keyed by device_id.  Each entry must have:
+        ``charge_kw``, ``discharge_kw`` (lists, len = N),
+        ``soc_pct`` (list, len = N+1, first element = initial SoC),
+        ``capacity_kwh``, ``cost_basis_eur_per_kwh``.
+    saving_eur / cumulative_saving_eur:
+        Per-step and running-total saving against the no-battery baseline.
+    step_minutes:
+        Time resolution in minutes (used for bar width and x-axis extension).
+    """
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+
+    battery_ids = list(batteries.keys())
+    _BAT_COLORS = ["#2980b9", "#8e44ad", "#16a085", "#d35400"]
+    bar_ms = step_minutes * 60 * 1000 * 0.85  # bar width in milliseconds
+
+    fig = make_subplots(
+        rows=5, cols=1,
+        shared_xaxes=True,
+        specs=[[{}], [{"secondary_y": True}], [{}], [{}], [{}]],
+        subplot_titles=(
+            "Energy flows  (+supply / −demand)",
+            "Forecasts  (PV / consumption / prices)",
+            "Per-step saving vs no-battery baseline",
+            "Cumulative saving",
+            "Battery SoC",
+        ),
+        row_heights=[0.30, 0.20, 0.16, 0.14, 0.20],
+        vertical_spacing=0.07,
+    )
+
+    # ── Panel 1: energy flows ─────────────────────────────────────────────────
+    # Supply (positive stack)
+    fig.add_trace(go.Bar(
+        x=timestamps, y=pv_kw, name="PV",
+        marker_color="#27ae60", opacity=0.85, width=bar_ms,
+        hovertemplate="PV: %{y:.2f} kW<extra></extra>",
+    ), row=1, col=1)
+    for i, bid in enumerate(battery_ids):
+        c = _BAT_COLORS[i % len(_BAT_COLORS)]
+        fig.add_trace(go.Bar(
+            x=timestamps, y=batteries[bid]["discharge_kw"],
+            name=f"{bid} discharge", marker_color=c, opacity=0.80, width=bar_ms,
+            hovertemplate=f"{bid} discharge: %{{y:.2f}} kW<extra></extra>",
+        ), row=1, col=1)
+    fig.add_trace(go.Bar(
+        x=timestamps, y=grid_import_kw, name="Grid import",
+        marker_color="#e74c3c", opacity=0.85, width=bar_ms,
+        hovertemplate="Grid import: %{y:.2f} kW<extra></extra>",
+    ), row=1, col=1)
+    # Demand (negative stack)
+    fig.add_trace(go.Bar(
+        x=timestamps, y=[-v for v in consumption_kw], name="Consumption",
+        marker_color="#555555", opacity=0.75, width=bar_ms,
+        hovertemplate="Consumption: %{y:.2f} kW<extra></extra>",
+    ), row=1, col=1)
+    for i, bid in enumerate(battery_ids):
+        c = _BAT_COLORS[i % len(_BAT_COLORS)]
+        fig.add_trace(go.Bar(
+            x=timestamps, y=[-v for v in batteries[bid]["charge_kw"]],
+            name=f"{bid} charge", marker_color=c, opacity=0.40, width=bar_ms,
+            hovertemplate=f"{bid} charge: %{{y:.2f}} kW<extra></extra>",
+        ), row=1, col=1)
+    fig.add_trace(go.Bar(
+        x=timestamps, y=[-v for v in grid_export_kw], name="Grid export",
+        marker_color="#3498db", opacity=0.75, width=bar_ms,
+        hovertemplate="Grid export: %{y:.2f} kW<extra></extra>",
+    ), row=1, col=1)
+
+    # ── Panel 2: forecasts ────────────────────────────────────────────────────
+    fig.add_trace(go.Scatter(
+        x=timestamps, y=consumption_kw,
+        mode="lines", name="Consumption forecast",
+        line=dict(color="#555555", width=2),
+        hovertemplate="Consumption: %{y:.2f} kW<extra></extra>",
+    ), row=2, col=1, secondary_y=False)
+    fig.add_trace(go.Scatter(
+        x=timestamps, y=pv_kw,
+        mode="lines", name="PV forecast",
+        line=dict(color="#27ae60", width=2),
+        hovertemplate="PV: %{y:.2f} kW<extra></extra>",
+    ), row=2, col=1, secondary_y=False)
+    fig.add_trace(go.Scatter(
+        x=timestamps, y=import_price_eur_per_kwh,
+        mode="lines", name="Import price",
+        line=dict(color="#c0392b", width=2, dash="solid"),
+        hovertemplate="Import: %{y:.3f} €/kWh<extra></extra>",
+    ), row=2, col=1, secondary_y=True)
+    fig.add_trace(go.Scatter(
+        x=timestamps, y=export_price_eur_per_kwh,
+        mode="lines", name="Export price",
+        line=dict(color="#2980b9", width=2, dash="dot"),
+        hovertemplate="Export: %{y:.3f} €/kWh<extra></extra>",
+    ), row=2, col=1, secondary_y=True)
+
+    # ── Panel 3: per-step saving ──────────────────────────────────────────────
+    fig.add_trace(go.Bar(
+        x=timestamps, y=saving_eur,
+        marker_color=["#2ecc71" if v >= 0 else "#e74c3c" for v in saving_eur],
+        opacity=0.85, showlegend=False, width=bar_ms,
+        hovertemplate="Saving: %{y:.4f} €<extra></extra>",
+    ), row=3, col=1)
+
+    # ── Panel 4: cumulative saving ────────────────────────────────────────────
+    total_save = cumulative_saving_eur[-1] if cumulative_saving_eur else 0.0
+    line_col = "#2ecc71" if total_save >= 0 else "#e74c3c"
+    fill_col = "rgba(46,204,113,0.25)" if total_save >= 0 else "rgba(231,76,60,0.25)"
+    xs_ext = list(timestamps) + [timestamps[-1] + timedelta(minutes=step_minutes)]
+    cum_ext = [0.0] + list(cumulative_saving_eur)
+    fig.add_trace(go.Scatter(
+        x=xs_ext, y=cum_ext,
+        fill="tozeroy", fillcolor=fill_col,
+        line=dict(color=line_col, width=2, shape="hv"),
+        name=f"Cumulative: {total_save:+.3f} €",
+        hovertemplate="Cumulative: %{y:.3f} €<extra></extra>",
+    ), row=4, col=1)
+
+    # ── Panel 5: battery SoC ──────────────────────────────────────────────────
+    step_td = timedelta(minutes=step_minutes)
+    xs_soc = [timestamps[0] - step_td] + list(timestamps)
+    for i, bid in enumerate(battery_ids):
+        c = _BAT_COLORS[i % len(_BAT_COLORS)]
+        cap   = batteries[bid].get("capacity_kwh", "?")
+        basis = batteries[bid].get("cost_basis_eur_per_kwh", 0.0)
+        fig.add_trace(go.Scatter(
+            x=xs_soc, y=batteries[bid]["soc_pct"],
+            mode="lines+markers", name=f"{bid} SoC",
+            line=dict(color=c, width=2), marker=dict(size=3),
+            hovertemplate=(
+                f"<b>{bid}</b><br>SoC: %{{y:.1f}} %<br>"
+                f"cap: {cap} kWh · basis: {basis:.4f} €/kWh<extra></extra>"
+            ),
+        ), row=5, col=1)
+
+    fig.update_layout(
+        height=980,
+        title_text=title,
+        barmode="relative",
+        legend=dict(orientation="h", y=-0.08, font_size=11),
+        margin=dict(t=70, b=10),
+        hovermode="x unified",
+    )
+    fig.update_yaxes(title_text="kW",          row=1, col=1, zeroline=True, zerolinewidth=1)
+    fig.update_yaxes(title_text="kW",          row=2, col=1, secondary_y=False)
+    fig.update_yaxes(title_text="€/kWh",       row=2, col=1, secondary_y=True)
+    fig.update_yaxes(title_text="€ / step",    row=3, col=1, zeroline=True, zerolinewidth=1)
+    fig.update_yaxes(title_text="€ (cumul.)",  row=4, col=1)
+    fig.update_yaxes(title_text="SoC (%)",     row=5, col=1, range=[0, 105])
+    return fig
 
 
 # ── Main async routine ────────────────────────────────────────────────────────
@@ -368,7 +539,9 @@ async def _run(
         ha_client=None,
     )
     forecast_providers = _build_forecast_providers(app_config, ctx)
-    device_forecasts   = build_device_forecasts(app_config, ctx)
+    # forecast_providers already contains both PV and consumption providers
+    # (build_all_forecasts = top-level + per-device), so no separate call needed.
+    device_forecasts = forecast_providers
 
     # 4. Planning horizon cap from config (acts as an upper bound, not a fixed target)
     horizon_cap_h = int(app_config.optimizer.get("horizon_hours", 48))

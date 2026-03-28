@@ -39,9 +39,31 @@ CREATE TABLE IF NOT EXISTS measurements (
 )
 """
 
+_CREATE_LEDGER_TABLE = """
+CREATE TABLE IF NOT EXISTS ledger_state (
+    device_id       TEXT PRIMARY KEY,
+    cost_basis      REAL NOT NULL,
+    stored_energy_kwh REAL NOT NULL,
+    updated_at      TEXT NOT NULL
+)
+"""
+
 _CREATE_INDEX = """
 CREATE INDEX IF NOT EXISTS idx_device_timestamp
     ON measurements (device_id, timestamp)
+"""
+
+_UPSERT_LEDGER = """
+INSERT INTO ledger_state (device_id, cost_basis, stored_energy_kwh, updated_at)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(device_id) DO UPDATE SET
+    cost_basis        = excluded.cost_basis,
+    stored_energy_kwh = excluded.stored_energy_kwh,
+    updated_at        = excluded.updated_at
+"""
+
+_LOAD_LEDGER = """
+SELECT cost_basis, stored_energy_kwh FROM ledger_state WHERE device_id = ?
 """
 
 _INSERT = """
@@ -69,6 +91,7 @@ class SqliteStorageBackend:
         """Open the database and ensure the schema is in place."""
         self._db = await aiosqlite.connect(self._db_path)
         await self._db.execute(_CREATE_TABLE)
+        await self._db.execute(_CREATE_LEDGER_TABLE)
         await self._db.execute(_CREATE_INDEX)
         await self._db.commit()
 
@@ -124,3 +147,31 @@ class SqliteStorageBackend:
                 )
             )
         return result
+
+    async def save_ledger_state(
+        self,
+        device_id: str,
+        cost_basis: float,
+        stored_energy_kwh: float,
+    ) -> None:
+        """Persist the current ledger state for *device_id* (upsert)."""
+        assert self._db is not None, "Call start() before save_ledger_state()"
+        from datetime import timezone
+        now = datetime.now(timezone.utc).isoformat()
+        await self._db.execute(
+            _UPSERT_LEDGER,
+            (device_id, cost_basis, stored_energy_kwh, now),
+        )
+        await self._db.commit()
+
+    async def load_ledger_state(
+        self,
+        device_id: str,
+    ) -> tuple[float, float] | None:
+        """Return ``(cost_basis, stored_energy_kwh)`` for *device_id*, or ``None``."""
+        assert self._db is not None, "Call start() before load_ledger_state()"
+        async with self._db.execute(_LOAD_LEDGER, (device_id,)) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return float(row[0]), float(row[1])
