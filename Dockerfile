@@ -18,7 +18,7 @@ RUN pip install --no-cache-dir uv
 
 # Copy only the files needed to resolve and install dependencies first
 # (maximises Docker layer cache — source changes don't invalidate deps)
-COPY pyproject.toml uv.lock* ./
+COPY pyproject.toml uv.lock* README.md ./
 COPY src/ ./src/
 
 # Install the package and its runtime dependencies into an isolated prefix
