@@ -30,3 +30,7 @@ secrets.yaml.bak
 # Energy Assistant — local device configuration (user/device-specific, not for git)
 config.yaml
 config.yaml.bak
+
+# Energy Assistant — runtime data (SQLite databases, generated at runtime)
+data/
+*.db

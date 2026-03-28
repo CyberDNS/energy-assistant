@@ -328,6 +328,27 @@ class ControlLoop:
             plan.created_at.isoformat(),
             len(plan.intents),
         )
+        # Log the next 2 upcoming intents per device so the operator can see
+        # what the optimizer has decided without digging into the plan object.
+        now = datetime.now(timezone.utc)
+        upcoming = sorted(
+            (i for i in plan.intents if i.timestep >= now),
+            key=lambda i: i.timestep,
+        )
+        slots_logged: dict[str, int] = {}
+        for intent in upcoming:
+            if slots_logged.get(intent.device_id, 0) >= 2:
+                continue
+            slots_logged[intent.device_id] = slots_logged.get(intent.device_id, 0) + 1
+            _log.info(
+                "  plan  %s  %-14s  mode=%-10s  planned=%+.0f W  bounds=[%.0f … %.0f W]",
+                intent.timestep.strftime("%H:%M"),
+                intent.device_id,
+                intent.mode,
+                (intent.planned_kw or 0.0) * 1000.0,
+                intent.min_power_w or 0.0,
+                intent.max_power_w or 0.0,
+            )
 
     # ------------------------------------------------------------------
     # Contributor registry
@@ -372,9 +393,13 @@ class ControlLoop:
         registry:
             Device registry used to look up and command devices.
         """
+        setpoints = {
+            device_id: (setpoint_w, intent)
+            for device_id, setpoint_w, _mode, intent in self._compute_setpoints(live)
+        }
+
         for contributor in self._contributors:
-            intent = self._find_intent(contributor.device_id, live.timestamp)
-            setpoint_w = contributor.desired_setpoint_w(intent, live)
+            setpoint_w, intent = setpoints[contributor.device_id]
 
             if setpoint_w is not None:
                 device = registry.get(contributor.device_id)
@@ -422,8 +447,76 @@ class ControlLoop:
                 )
 
     # ------------------------------------------------------------------
+    # Dry-run helper
+    # ------------------------------------------------------------------
+
+    def describe_setpoints(
+        self,
+        live: LiveSituation,
+    ) -> list[tuple[str, float | None, str]]:
+        """Compute what ``tick()`` *would* send without touching any device.
+
+        Returns a list of ``(device_id, setpoint_w, mode)`` tuples — one per
+        registered contributor.  Discharge setpoints are capped to the
+        current grid import demand (same logic as ``tick()``).
+        """
+        return [
+            (device_id, setpoint_w, mode)
+            for device_id, setpoint_w, mode, _intent in self._compute_setpoints(live)
+        ]
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _compute_setpoints(
+        self,
+        live: LiveSituation,
+    ) -> list[tuple[str, float | None, str, ControlIntent | None]]:
+        """Resolve and cap setpoints for all contributors.
+
+        Discharge setpoints are processed sequentially.  Each contributor
+        may only discharge as much as the remaining grid import demand,
+        preventing total discharge from exceeding house consumption and
+        accidentally feeding energy back to the grid at a poor export price.
+
+        Returns ``(device_id, setpoint_w, mode, intent)`` for every contributor.
+        """
+        # Available headroom for battery discharge = grid import + whatever the
+        # batteries are already contributing.  If the batteries are currently
+        # supplying 1 kW and the heat pump is using 2 kW, grid import is only
+        # 1 kW — but the house load is 3 kW, so we can safely discharge up to
+        # 3 kW total without pushing anything back to the grid.
+        current_discharge_w = sum(
+            -live.device_states[c.device_id].power_w
+            for c in self._contributors
+            if c.device_id in live.device_states
+            and live.device_states[c.device_id].power_w is not None
+            and live.device_states[c.device_id].power_w < 0
+        )
+        remaining_import_w = max(0.0, live.grid_power_w + current_discharge_w)
+        result: list[tuple[str, float | None, str, ControlIntent | None]] = []
+        for contributor in self._contributors:
+            intent = self._find_intent(contributor.device_id, live.timestamp)
+            raw_w = contributor.desired_setpoint_w(intent, live)
+            mode = intent.mode if intent is not None else "no_plan"
+
+            if raw_w is not None and raw_w < 0:
+                # Cap: don't discharge more than remaining grid import
+                capped = max(raw_w, -remaining_import_w)
+                if capped != raw_w:
+                    _log.info(
+                        "ControlLoop: discharge capped  %s  %.0f → %.0f W"
+                        "  (grid_import=%.0f W)",
+                        contributor.device_id, raw_w, capped, live.grid_power_w,
+                    )
+                remaining_import_w = max(0.0, remaining_import_w + capped)
+                setpoint_w: float | None = capped
+            else:
+                setpoint_w = raw_w
+
+            result.append((contributor.device_id, setpoint_w, mode, intent))
+        return result
 
     def _find_intent(
         self,

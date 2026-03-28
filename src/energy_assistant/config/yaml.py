@@ -94,6 +94,8 @@ class YamlConfigLoader:
             topology=raw.get("topology") or {},
             assets=raw.get("assets") or {},
             optimizer=raw.get("optimizer") or {},
+            controller=raw.get("controller") or {},
+            server=raw.get("server") or {},
             default_tariff_id=default_tariff_id,
         )
 

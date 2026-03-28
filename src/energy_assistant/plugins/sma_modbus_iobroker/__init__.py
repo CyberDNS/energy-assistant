@@ -31,6 +31,8 @@ def _build(device_id: str, cfg: dict[str, Any], ctx: BuildContext) -> object | N
         client=client,
         modbus_instance=cfg.get("modbus_instance", "modbus.0"),
         capacity_kwh=float(cfg.get("capacity_kwh", 0.0)),
+        min_soc_pct=float(cfg.get("min_soc_pct", 0.0)),
+        max_soc_pct=float(cfg.get("max_soc_pct", 100.0)),
         max_charge_kw=float(cfg.get("max_charge_kw", 0.0)),
         max_discharge_kw=float(cfg.get("max_discharge_kw", 0.0)),
         voltage_max_v=float(cfg.get("voltage_max_v", 253.0)),

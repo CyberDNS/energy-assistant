@@ -33,6 +33,84 @@ from ..plugins._iobroker.pool import IoBrokerConnectionPool
 _log = logging.getLogger(__name__)
 
 
+def make_build_context(app_config: AppConfig) -> BuildContext:
+    """Create a ``BuildContext`` with live backend connections from *app_config*.
+
+    Call this once and share the resulting context across all build functions
+    so that all plugins reuse the same backend client instances.
+    """
+    iobroker_pool: IoBrokerConnectionPool | None = None
+    ha_client: HAClient | None = None
+
+    if app_config.backends.iobroker:
+        iobroker_pool = IoBrokerConnectionPool()
+
+    if app_config.backends.homeassistant:
+        ha_cfg = app_config.backends.homeassistant
+        ha_client = HAClient(
+            url=ha_cfg.url,
+            token=ha_cfg.token,
+            timeout=ha_cfg.timeout_s,
+        )
+
+    return BuildContext(
+        backends=app_config.backends,
+        iobroker_pool=iobroker_pool,
+        ha_client=ha_client,
+    )
+
+
+def build_top_level_forecasts(
+    app_config: AppConfig,
+    ctx: "BuildContext | None" = None,
+) -> list:
+    """Build forecast providers declared in the top-level ``forecasts:`` section.
+
+    These are system-wide forecasts (e.g. PV generation) rather than
+    per-device consumption profiles.  Both types are returned aggregated by
+    ``build_all_forecasts``.
+
+    Parameters
+    ----------
+    app_config:
+        Parsed application configuration.
+    ctx:
+        Build context with backend clients.  When ``None`` a minimal context
+        is created; providers that require live backends (e.g. ``pvforecast_iobroker``)
+        will be skipped.
+
+    Returns
+    -------
+    list:
+        Forecast provider instances built from ``app_config.forecasts``.
+    """
+    if ctx is None:
+        ctx = BuildContext(backends=app_config.backends)
+
+    providers = []
+    for forecast_id, cfg in app_config.forecasts.items():
+        try:
+            provider = plugin_registry.build_forecast(forecast_id, cfg, ctx)
+            if provider is not None:
+                providers.append(provider)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("Could not build top-level forecast %r: %s", forecast_id, exc)
+    return providers
+
+
+def build_all_forecasts(
+    app_config: AppConfig,
+    ctx: "BuildContext | None" = None,
+) -> list:
+    """Build all forecast providers — top-level and per-device.
+
+    Combines the results of ``build_top_level_forecasts`` and
+    ``build_device_forecasts`` into a single list.  All providers sharing
+    the same ``BuildContext`` so they reuse backend connections.
+    """
+    return build_top_level_forecasts(app_config, ctx) + build_device_forecasts(app_config, ctx)
+
+
 def build_device_forecasts(
     app_config: AppConfig,
     ctx: "BuildContext | None" = None,
@@ -85,8 +163,16 @@ def build_device_forecasts(
 
 def build(
     app_config: AppConfig,
+    ctx: "BuildContext | None" = None,
 ) -> tuple[DeviceRegistry, dict[str, TariffModel], TopologyNode | None]:
     """Build runtime objects from *app_config*.
+
+    Parameters
+    ----------
+    ctx:
+        Optional pre-built ``BuildContext``.  When omitted a new context is
+        created internally.  Pass a shared context (from ``make_build_context``)
+        to ensure all devices reuse the same backend connection pool.
 
     Returns
     -------
@@ -98,25 +184,8 @@ def build(
         Root of the topology tree, or ``None`` when not configured.
     """
     # --- Backend clients ---
-    iobroker_pool: IoBrokerConnectionPool | None = None
-    ha_client: HAClient | None = None
-
-    if app_config.backends.iobroker:
-        iobroker_pool = IoBrokerConnectionPool()
-
-    if app_config.backends.homeassistant:
-        ha_cfg = app_config.backends.homeassistant
-        ha_client = HAClient(
-            url=ha_cfg.url,
-            token=ha_cfg.token,
-            timeout=ha_cfg.timeout_s,
-        )
-
-    ctx = BuildContext(
-        backends=app_config.backends,
-        iobroker_pool=iobroker_pool,
-        ha_client=ha_client,
-    )
+    if ctx is None:
+        ctx = make_build_context(app_config)
 
     # --- Tariffs ---
     tariffs: dict[str, TariffModel] = {}

@@ -133,10 +133,47 @@ class MilpHigsOptimizer:
 
         initial_energy = self._initial_energy(batteries, context)
 
+        # ── Terminal value: max(actual cost basis, p70 × η_d) ───────────
+        # Reflects what 1 kWh stored in the battery is worth at the end of
+        # the planning horizon.  Two competing lower bounds:
+        #
+        #   cost_basis  — what we actually paid per stored kWh (ledger).
+        #                 Sets the economic floor: never sell below cost.
+        #                 Discharge threshold = cost_basis / η_d.
+        #
+        #   p70 × (η_d − 0.01)  — expected future dispatch value based on
+        #                 forecast prices.  p70 = 70th-percentile of the
+        #                 48-hour price curve.  The (−0.01) offset ensures
+        #                 discharge is triggered AT p70, not just above it
+        #                 (avoids the exact-threshold numerical tie).
+        #                 Discharge threshold ≈ p70.
+        #
+        # Taking max() means: the optimizer holds unless BOTH the price is
+        # high enough to cover cost AND it's in the top ~30% of prices.
+        # When basis = 0.0 (first start), only the p70 term applies.
+        # Once the ledger has tracked real charge prices, the basis term
+        # prevents selling below cost regardless of the price distribution.
+        sorted_prices = sorted(prices)
+        p70 = sorted_prices[int(0.70 * len(sorted_prices))]
+        cost_bases = context.battery_cost_basis or {}
+        terminal_value_basis = {
+            sc.device_id: max(
+                cost_bases.get(sc.device_id, 0.0),
+                p70 * max(0.0, sc.discharge_efficiency - 0.01),
+            )
+            for sc in batteries
+        }
+        _log.debug(
+            "MilpHigsOptimizer: p70=%.4f €/kWh  TV=%s  (from %d price steps)",
+            p70,
+            {sc.device_id: round(terminal_value_basis[sc.device_id], 4) for sc in batteries},
+            len(prices),
+        )
+
         # ── Build and solve the MILP model ─────────────────────────────
         prob, variables = self._build_model(
             n_steps, step_h, batteries, net_load, prices, export_prices,
-            initial_energy, context.battery_cost_basis,
+            initial_energy, context.battery_cost_basis, terminal_value_basis,
         )
         status = prob.solve(self._get_solver())
 
@@ -360,6 +397,12 @@ class MilpHigsOptimizer:
         for tariff in context.tariffs.values():
             try:
                 sched: list[TariffPoint] = await tariff.price_schedule(context.horizon)
+                if not sched or not any(tp.price_eur_per_kwh > 0.001 for tp in sched):
+                    _log.debug(
+                        "MilpHigsOptimizer: tariff %r has no non-zero import prices — skipping",
+                        tariff.tariff_id,
+                    )
+                    continue
                 points = [
                     ForecastPoint(timestamp=tp.timestamp, value=tp.price_eur_per_kwh)
                     for tp in sched
@@ -391,9 +434,12 @@ class MilpHigsOptimizer:
         """Return initial stored energy (kWh) keyed by device_id."""
         result: dict[str, float] = {}
         for sc in batteries:
+            e_min = sc.capacity_kwh * sc.min_soc_pct / 100.0
+            e_max = sc.capacity_kwh * sc.max_soc_pct / 100.0
             state = context.device_states.get(sc.device_id)
             if state is not None and state.soc_pct is not None:
-                result[sc.device_id] = sc.capacity_kwh * state.soc_pct / 100.0
+                raw_energy = sc.capacity_kwh * state.soc_pct / 100.0
+                result[sc.device_id] = max(e_min, min(e_max, raw_energy))
             else:
                 default_soc_pct = (sc.min_soc_pct + sc.max_soc_pct) / 2.0
                 result[sc.device_id] = sc.capacity_kwh * default_soc_pct / 100.0
