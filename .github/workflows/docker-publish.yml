@@ -1,9 +1,11 @@
-# Publish container images to GHCR on every push to main and on version tags.
+# Build and publish container images.
 #
-# Channel mapping:
-#   push to main            → :dev  + :sha-<short-sha>
-#   prerelease tag (v*-*)   → :edge + :<full-tag>
-#   stable tag (vX.Y.Z)     → :latest + :<full-tag>
+# Trigger behaviour:
+#   pull_request             → build only (all platforms), no push — used to
+#                              catch Dockerfile/dependency issues before merge
+#   push to main             → build + publish :dev + :sha-<short-sha>
+#   prerelease tag (v*-*)    → build + publish :edge + :<full-tag>
+#   stable tag (vX.Y.Z)      → build + publish :latest + :<full-tag>
 #
 # Images are published to:
 #   ghcr.io/cyberdns/energy-assistant
@@ -11,6 +13,7 @@
 name: Publish Docker image
 
 on:
+  pull_request:
   push:
     branches:
       - main
@@ -36,7 +39,6 @@ jobs:
         platform:
           - linux/amd64
           - linux/arm64
-          - linux/arm/v7
 
     steps:
       - name: Checkout repository
@@ -50,6 +52,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -77,7 +80,20 @@ jobs:
             org.opencontainers.image.description=Open-source, vendor-neutral energy management platform
             org.opencontainers.image.vendor=CyberDNS
 
+      # PR validation: build only — do not push to GHCR
+      - name: Build (PR validation)
+        if: github.event_name == 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: false
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+
+      # main / tag push: build and push by digest for multi-arch manifest merge
       - name: Build and push by digest
+        if: github.event_name != 'pull_request'
         id: build
         uses: docker/build-push-action@v6
         with:
@@ -89,15 +105,17 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
 
       - name: Export digest
+        if: github.event_name != 'pull_request'
         run: |
           mkdir -p /tmp/digests
           digest="${{ steps.build.outputs.digest }}"
           touch "/tmp/digests/${digest#sha256:}"
 
       - name: Upload digest
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
-          name: digests-${{ matrix.platform == 'linux/amd64' && 'amd64' || matrix.platform == 'linux/arm64' && 'arm64' || 'armv7' }}
+          name: digests-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
@@ -107,6 +125,7 @@ jobs:
     name: Merge multi-arch manifest
     runs-on: ubuntu-latest
     needs: build-and-push
+    if: github.event_name != 'pull_request'
 
     permissions:
       contents: read
