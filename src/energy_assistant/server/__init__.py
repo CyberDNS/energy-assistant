@@ -602,6 +602,8 @@ class Application:
                         "device_id": i.device_id,
                         "timestep": i.timestep.isoformat(),
                         "mode": i.mode,
+                        "charge_policy": i.charge_policy,
+                        "discharge_policy": i.discharge_policy,
                         "planned_kw": i.planned_kw,
                         "min_power_w": i.min_power_w,
                         "max_power_w": i.max_power_w,

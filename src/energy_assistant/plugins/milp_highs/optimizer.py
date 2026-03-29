@@ -510,6 +510,7 @@ def _extract_intents(
 
             if c_w > 1.0:
                 # Platform sign: positive power = charging
+                charge_policy = "pv_only" if sc.no_grid_charge else "grid_allowed"
                 intents.append(
                     ControlIntent(
                         device_id=b,
@@ -519,6 +520,8 @@ def _extract_intents(
                         max_power_w=round(c_w, 1),
                         planned_kw=round(c_w / 1000.0, 4),
                         reserved_kwh=round(c_kwh, 4),
+                        charge_policy=charge_policy,
+                        discharge_policy="meet_load_only",
                     )
                 )
             elif d_w > 1.0:
@@ -532,12 +535,20 @@ def _extract_intents(
                         max_power_w=0.0,
                         planned_kw=round(-d_w / 1000.0, 4),
                         reserved_kwh=round(-d_kwh, 4),
+                        discharge_policy="meet_load_only",
                     )
                 )
             else:
                 intents.append(
-                    ControlIntent(device_id=b, timestep=ts, mode="idle",
-                                  planned_kw=0.0, reserved_kwh=0.0)
+                    ControlIntent(
+                        device_id=b,
+                        timestep=ts,
+                        mode="idle",
+                        planned_kw=0.0,
+                        reserved_kwh=0.0,
+                        charge_policy="auto",
+                        discharge_policy="meet_load_only",
+                    )
                 )
 
     return intents

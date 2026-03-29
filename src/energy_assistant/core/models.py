@@ -178,6 +178,28 @@ class ControlIntent(BaseModel):
     on top of a partially-filled slot.
     """
 
+    charge_policy: str = "auto"
+    """Charging source policy for this timestep.
+
+    Values:
+    - ``auto``: let contributor defaults decide (typically grid-allowed unless
+        constrained by device capabilities such as ``no_grid_charge``).
+    - ``pv_only``: charge only from live PV surplus, never from grid import.
+    - ``grid_allowed``: follow planned charge power even if it draws from grid.
+    - ``grid_only``: charge from grid demand explicitly.
+    """
+
+    discharge_policy: str = "meet_load_only"
+    """Discharge/export policy for this timestep.
+
+    Values:
+    - ``meet_load_only``: cap discharge to live import demand (no export).
+    - ``forbid_export``: strict no-export cap (same as meet_load_only).
+    - ``allow_export_if_profitable``: permit export only when battery basis is
+        below or equal to the current export opportunity price.
+    - ``auto``: currently treated as ``meet_load_only`` for safety.
+    """
+
 
 class EnergyPlan(BaseModel):
     """Time-indexed schedule of control intents for all controllable devices.

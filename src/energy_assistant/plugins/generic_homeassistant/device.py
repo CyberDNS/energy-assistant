@@ -68,6 +68,7 @@ class GenericHADevice:
         entity_power: str | None = None,
         entity_power_import: str | None = None,
         entity_power_export: str | None = None,
+        invert_sign: bool = False,
     ) -> None:
         has_single = entity_power is not None
         has_pair = entity_power_import is not None and entity_power_export is not None
@@ -82,6 +83,7 @@ class GenericHADevice:
         self._entity_power = entity_power
         self._entity_power_import = entity_power_import
         self._entity_power_export = entity_power_export
+        self._invert_sign = invert_sign
 
     @property
     def device_id(self) -> str:
@@ -111,6 +113,9 @@ class GenericHADevice:
                     power_w = import_w - export_w
                     extra["import_w"] = import_w
                     extra["export_w"] = export_w
+
+            if power_w is not None and self._invert_sign:
+                power_w = -power_w
 
             return DeviceState(
                 device_id=self._device_id,
