@@ -39,6 +39,7 @@ def _build(device_id: str, cfg: dict[str, Any], ctx: BuildContext) -> object | N
             entity_power=_get(cfg, "oid_power", "power"),
             entity_power_import=_get(cfg, "oid_power_import", "power_import"),
             entity_power_export=_get(cfg, "oid_power_export", "power_export"),
+            invert_sign=bool(cfg.get("invert_sign", False)),
         )
     except ValueError as exc:
         _log.warning("Device %r: %s — skipping", device_id, exc)
