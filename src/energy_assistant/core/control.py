@@ -237,10 +237,18 @@ class StorageControlContributor:
         live: LiveSituation,
     ) -> float | None:
         mode = intent.mode if intent is not None else "idle"
+        charge_policy = self._resolve_charge_policy(intent)
 
         if mode == "grid_fill":
-            # Charge at the optimizer-planned upper bound.
-            return intent.max_power_w if intent is not None else None
+            if intent is None or intent.max_power_w is None:
+                return None
+            planned_w = max(0.0, intent.max_power_w)
+            if charge_policy == "pv_only":
+                # Follow plan, but only up to currently available surplus.
+                surplus_w = max(0.0, -live.grid_power_w)
+                return min(planned_w, surplus_w)
+            # grid_allowed / grid_only: follow optimizer setpoint.
+            return planned_w
 
         if mode == "discharge":
             # Discharge at the optimizer-planned lower bound (≤ 0 W).
@@ -252,6 +260,13 @@ class StorageControlContributor:
             max_charge_w = self._constraints.max_charge_kw * 1000.0
             return min(surplus_w, max_charge_w)
         return 0.0
+
+    def _resolve_charge_policy(self, intent: ControlIntent | None) -> str:
+        policy = (intent.charge_policy if intent is not None else "auto") or "auto"
+        if policy == "auto":
+            # Device capability remains the ultimate source constraint.
+            return "pv_only" if self._constraints.no_grid_charge else "grid_allowed"
+        return policy
 
     def charge_price_eur_per_kwh(
         self, intent: ControlIntent | None, live: LiveSituation
@@ -502,21 +517,46 @@ class ControlLoop:
             mode = intent.mode if intent is not None else "no_plan"
 
             if raw_w is not None and raw_w < 0:
-                # Cap: don't discharge more than remaining grid import
-                capped = max(raw_w, -remaining_import_w)
-                if capped != raw_w:
-                    _log.info(
-                        "ControlLoop: discharge capped  %s  %.0f → %.0f W"
-                        "  (grid_import=%.0f W)",
-                        contributor.device_id, raw_w, capped, live.grid_power_w,
-                    )
-                remaining_import_w = max(0.0, remaining_import_w + capped)
-                setpoint_w: float | None = capped
+                discharge_policy = (
+                    (intent.discharge_policy if intent is not None else "meet_load_only")
+                    or "meet_load_only"
+                )
+                allow_export = self._allow_export(discharge_policy, contributor, live)
+                if allow_export:
+                    setpoint_w = raw_w
+                else:
+                    # Cap: don't discharge more than remaining grid import
+                    capped = max(raw_w, -remaining_import_w)
+                    if capped != raw_w:
+                        _log.info(
+                            "ControlLoop: discharge capped  %s  %.0f → %.0f W"
+                            "  (grid_import=%.0f W)",
+                            contributor.device_id, raw_w, capped, live.grid_power_w,
+                        )
+                    remaining_import_w = max(0.0, remaining_import_w + capped)
+                    setpoint_w = capped
             else:
                 setpoint_w = raw_w
 
             result.append((contributor.device_id, setpoint_w, mode, intent))
         return result
+
+    def _allow_export(
+        self,
+        discharge_policy: str,
+        contributor: ControlContributor,
+        live: LiveSituation,
+    ) -> bool:
+        """Return True when this tick may export battery energy to the grid."""
+        if discharge_policy in ("meet_load_only", "forbid_export", "auto"):
+            return False
+        if discharge_policy != "allow_export_if_profitable":
+            return False
+
+        basis = self._ledger.cost_basis(contributor.device_id)
+        if basis is None:
+            return False
+        return basis <= live.pv_opportunity_price_eur_per_kwh
 
     def _find_intent(
         self,

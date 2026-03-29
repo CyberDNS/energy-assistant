@@ -296,6 +296,57 @@ class TestMilpHigsOptimizerIntentValues:
             assert intent.min_power_w < 0, "Discharge power bound must be negative"
             assert intent.max_power_w == 0.0
 
+    async def test_grid_fill_policy_defaults_to_grid_allowed(self) -> None:
+        optimizer = MilpHigsOptimizer(step_minutes=60)
+        now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        prices = [0.05] + [0.35] * 23
+        consumption = [
+            ForecastPoint(timestamp=now + timedelta(hours=h), value=1.0)
+            for h in range(24)
+        ]
+        ctx = OptimizationContext(
+            device_states={"bat": _state("bat", soc_pct=10.0)},
+            storage_constraints=[_battery("bat")],
+            forecasts={
+                ForecastQuantity.PRICE: _hourly_prices(now, prices),
+                ForecastQuantity.CONSUMPTION: consumption,
+            },
+            horizon=timedelta(hours=24),
+        )
+        plan = await optimizer.optimize(ctx)
+        charge_intents = [i for i in plan.intents if i.mode == "grid_fill"]
+        assert charge_intents
+        assert all(i.charge_policy == "grid_allowed" for i in charge_intents)
+
+    async def test_grid_fill_policy_is_pv_only_for_no_grid_charge(self) -> None:
+        optimizer = MilpHigsOptimizer(step_minutes=60)
+        now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        prices = [0.25] * 24
+        consumption = [
+            ForecastPoint(timestamp=now + timedelta(hours=h), value=1.0)
+            for h in range(24)
+        ]
+        pv = [
+            ForecastPoint(timestamp=now + timedelta(hours=h), value=4.0)
+            for h in range(24)
+        ]
+        sc = _battery("bat")
+        sc.no_grid_charge = True
+        ctx = OptimizationContext(
+            device_states={"bat": _state("bat", soc_pct=10.0)},
+            storage_constraints=[sc],
+            forecasts={
+                ForecastQuantity.PRICE: _hourly_prices(now, prices),
+                ForecastQuantity.CONSUMPTION: consumption,
+                ForecastQuantity.PV_GENERATION: pv,
+            },
+            horizon=timedelta(hours=24),
+        )
+        plan = await optimizer.optimize(ctx)
+        charge_intents = [i for i in plan.intents if i.mode == "grid_fill"]
+        assert charge_intents
+        assert all(i.charge_policy == "pv_only" for i in charge_intents)
+
 
 class TestMilpHigsOptimizerTimeResolution:
     """Verify the optimizer handles sub-hourly time steps correctly."""

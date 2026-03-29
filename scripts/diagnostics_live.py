@@ -57,11 +57,46 @@ async def _fetch_and_display(
     config_path: Path,
     price_tariff_id: str | None,
 ) -> None:
+    active_policies: dict[str, tuple[str, str]] = {}
+
     # ── Live Status ───────────────────────────────────────────────────────────
     async with httpx.AsyncClient() as client:
         resp = await client.get(f"{api_base_url}/api/status", timeout=5)
         resp.raise_for_status()
         s = resp.json()
+
+        # Also fetch the active plan so we can show policy semantics next to
+        # the currently effective setpoints.
+        rp = await client.get(f"{api_base_url}/api/plan", timeout=5)
+        rp.raise_for_status()
+        plan_data = rp.json()
+
+    if plan_data.get("intents"):
+        now = pd.Timestamp(s["timestamp"])
+        if now.tzinfo is None:
+            now = now.tz_localize("UTC")
+        else:
+            now = now.tz_convert("UTC")
+
+        for intent in plan_data["intents"]:
+            ts = pd.Timestamp(intent["timestep"])
+            if ts.tzinfo is None:
+                ts = ts.tz_localize("UTC")
+            else:
+                ts = ts.tz_convert("UTC")
+            if ts <= now:
+                did = str(intent.get("device_id"))
+                cur = active_policies.get(did)
+                if cur is None or ts > pd.Timestamp(cur[2]):
+                    cp = str(intent.get("charge_policy") or "auto")
+                    dp = str(intent.get("discharge_policy") or "meet_load_only")
+                    active_policies[did] = (cp, dp, ts.isoformat())
+
+    # drop helper timestamp from map values
+    active_policies = {
+        did: (vals[0], vals[1])
+        for did, vals in active_policies.items()
+    }
 
     print(f"  Timestamp  : {s['timestamp']}")
     grid_w = s["grid_power_w"]
@@ -89,7 +124,11 @@ async def _fetch_and_display(
         w     = sp["setpoint_w"] or 0
         arrow = (f"charge    {w:+.0f} W" if w > 0 else
                  f"discharge {w:+.0f} W" if w < 0 else "hold (0 W)")
-        print(f"    {sp['device_id']:<22}  mode={sp['mode']:<10}  → {arrow}")
+        cp, dp = active_policies.get(sp["device_id"], ("auto", "meet_load_only"))
+        print(
+            f"    {sp['device_id']:<22}  mode={sp['mode']:<10}  "
+            f"policy(c={cp}, d={dp})  → {arrow}"
+        )
     print()
 
     # Battery ledger
