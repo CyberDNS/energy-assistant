@@ -29,3 +29,15 @@ Three channels are available:
 | Energy Assistant (dev)        | Nightly / unstable |
 | Energy Assistant (edge)       | Pre-release       |
 | Energy Assistant              | Stable            |
+
+Recommended file locations in Home Assistant:
+
+- Config file: `/config/energy-assistant/config.yaml`
+- SQLite DB: `/config/energy-assistant/energy-assistant.db`
+
+These paths are visible in common Home Assistant file-management add-ons
+such as File Editor. The app also supports overriding both paths via
+environment variables:
+
+- `ENERGY_ASSISTANT_CONFIG`
+- `ENERGY_ASSISTANT_DB`

@@ -28,18 +28,58 @@ from .server import Application
 
 _DEFAULT_CONFIG = "config.yaml"
 _DEFAULT_DB = "data/history.db"
+_HA_CONFIG = Path("/config/energy-assistant/config.yaml")
+_HA_DB = Path("/config/energy-assistant/energy-assistant.db")
+_LEGACY_CONTAINER_CONFIG = Path("/config/config.yaml")
+_LEGACY_CONTAINER_DB = Path("/data/history.db")
+
+
+def _default_config_path() -> Path:
+    env_value = os.environ.get("ENERGY_ASSISTANT_CONFIG")
+    if env_value:
+        return Path(env_value)
+    if _HA_CONFIG.parent.exists():
+        return _HA_CONFIG
+    if _LEGACY_CONTAINER_CONFIG.exists():
+        return _LEGACY_CONTAINER_CONFIG
+    return Path(_DEFAULT_CONFIG)
+
+
+def _default_db_path() -> Path:
+    env_value = os.environ.get("ENERGY_ASSISTANT_DB")
+    if env_value:
+        return Path(env_value)
+    if _HA_DB.parent.exists():
+        return _HA_DB
+    if _LEGACY_CONTAINER_DB.parent.exists():
+        return _LEGACY_CONTAINER_DB
+    return Path(_DEFAULT_DB)
 
 
 def _parse_args() -> tuple[Path, Path]:
     """Return (config_path, db_path) from ``sys.argv``."""
     args = sys.argv[1:]
-    config_path = Path(args[0]) if args else Path(_DEFAULT_CONFIG)
-    db_path = Path(_DEFAULT_DB)
-    # Simple --db <path> flag
-    if "--db" in args:
-        idx = args.index("--db")
-        if idx + 1 < len(args):
+    config_path: Path | None = None
+    db_path: Path | None = None
+    idx = 0
+    while idx < len(args):
+        arg = args[idx]
+        if arg in {"--config", "-c"} and idx + 1 < len(args):
+            config_path = Path(args[idx + 1])
+            idx += 2
+            continue
+        if arg == "--db" and idx + 1 < len(args):
             db_path = Path(args[idx + 1])
+            idx += 2
+            continue
+        if not arg.startswith("-") and config_path is None:
+            config_path = Path(arg)
+        idx += 1
+
+    if config_path is None:
+        config_path = _default_config_path()
+    if db_path is None:
+        db_path = _default_db_path()
     return config_path, db_path
 
 
