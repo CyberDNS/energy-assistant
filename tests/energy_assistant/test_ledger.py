@@ -103,3 +103,18 @@ class TestBatteryCostLedgerAllCostBases:
         assert set(bases.keys()) == {"bat1", "bat2"}
         assert bases["bat1"] == pytest.approx(0.20)
         assert bases["bat2"] == pytest.approx(0.25)
+
+
+class TestBatteryCostLedgerSetStoredEnergy:
+    def test_set_stored_energy_updates_only_energy(self) -> None:
+        ledger = BatteryCostLedger()
+        ledger.initialise("bat", stored_energy_kwh=4.0, cost_basis_eur_per_kwh=0.23)
+        ledger.set_stored_energy("bat", 6.1)
+        assert ledger.stored_energy("bat") == pytest.approx(6.1)
+        assert ledger.cost_basis("bat") == pytest.approx(0.23)
+
+    def test_set_stored_energy_creates_missing_entry(self) -> None:
+        ledger = BatteryCostLedger()
+        ledger.set_stored_energy("bat", 3.5)
+        assert ledger.stored_energy("bat") == pytest.approx(3.5)
+        assert ledger.cost_basis("bat") == pytest.approx(0.0)
