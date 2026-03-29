@@ -4,9 +4,41 @@ Usage
 -----
 ::
 
-    python -m energy_assistant                     # uses ./config.yaml
+    python -m energy_assistant                     # uses ./config.yaml (local)
     python -m energy_assistant path/to/config.yaml
     python -m energy_assistant config.yaml --db data/history.db
+
+Runtime modes
+-------------
+The app detects which mode it is running in and chooses default paths:
+
+* **Local / VS Code** — ``./config.yaml`` and ``./data/history.db``
+* **Home Assistant add-on** — ``/config/config.yaml`` and
+  ``/data/energy-assistant.db``
+
+Detection order:
+
+1. ``ENERGY_ASSISTANT_MODE`` env var — explicit override
+   (``ha`` / ``local`` / ``dev`` etc.)
+2. Presence of ``/data/options.json`` — written by the Supervisor only
+   inside a running HA add-on container.
+
+Both paths can be overridden individually regardless of mode:
+
+* ``ENERGY_ASSISTANT_CONFIG`` — full path to the YAML config file
+* ``ENERGY_ASSISTANT_DB`` — full path to the SQLite database file
+
+Home Assistant filesystem mapping
+----------------------------------
+Inside the add-on container the Supervisor mounts:
+
+* ``/data``   — private persistent storage (always available, writable).
+  ``/data/options.json`` contains the user-configured options.
+* ``/config`` — user-accessible folder, mounted from the host at
+  ``/addon_configs/{REPO}_{slug}/``.  Users browse this via File Editor.
+  ``{REPO}`` is ``local`` for local installs or a hash of the GitHub
+  repo URL for store installs.  ``{slug}`` is defined in the add-on
+  repository's ``config.yaml``.
 
 Environment
 -----------
@@ -28,20 +60,29 @@ from .server import Application
 
 _DEFAULT_CONFIG = "config.yaml"
 _DEFAULT_DB = "data/history.db"
-_HA_CONFIG = Path("/config/energy-assistant/config.yaml")
-_HA_DB = Path("/config/energy-assistant/energy-assistant.db")
-_LEGACY_CONTAINER_CONFIG = Path("/config/config.yaml")
-_LEGACY_CONTAINER_DB = Path("/data/history.db")
+# Home Assistant add-on paths (inside the container).
+# /config  → host: /addon_configs/{REPO}_{slug}/  (user-visible via File Editor)
+# /data    → host: managed by Supervisor, private persistent storage
+_HA_CONFIG = Path("/config/config.yaml")
+_HA_DB = Path("/data/energy-assistant.db")
+
+
+def _is_home_assistant_runtime() -> bool:
+    """Return True when running as a Home Assistant add-on container."""
+    mode = os.environ.get("ENERGY_ASSISTANT_MODE", "").strip().lower()
+    if mode in {"ha", "homeassistant", "home-assistant", "addon", "add-on"}:
+        return True
+    if mode in {"local", "dev", "development"}:
+        return False
+    return Path("/data/options.json").exists()
 
 
 def _default_config_path() -> Path:
     env_value = os.environ.get("ENERGY_ASSISTANT_CONFIG")
     if env_value:
         return Path(env_value)
-    if _HA_CONFIG.parent.exists():
+    if _is_home_assistant_runtime():
         return _HA_CONFIG
-    if _LEGACY_CONTAINER_CONFIG.exists():
-        return _LEGACY_CONTAINER_CONFIG
     return Path(_DEFAULT_CONFIG)
 
 
@@ -49,10 +90,8 @@ def _default_db_path() -> Path:
     env_value = os.environ.get("ENERGY_ASSISTANT_DB")
     if env_value:
         return Path(env_value)
-    if _HA_DB.parent.exists():
+    if _is_home_assistant_runtime():
         return _HA_DB
-    if _LEGACY_CONTAINER_DB.parent.exists():
-        return _LEGACY_CONTAINER_DB
     return Path(_DEFAULT_DB)
 
 
