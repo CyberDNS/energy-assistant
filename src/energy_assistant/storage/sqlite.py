@@ -92,12 +92,15 @@ class SqliteStorageBackend:
         self._db: aiosqlite.Connection | None = None
 
     @staticmethod
-    def _ha_fallback_db_path() -> Path | None:
-        """Return a Home Assistant-safe fallback DB path when available."""
-        base = Path("/config")
-        if not base.exists():
-            return None
-        return base / "energy-assistant" / "energy-assistant.db"
+    def _ha_fallback_db_paths() -> list[Path]:
+        """Return Home Assistant-safe fallback DB paths in preference order."""
+        fallbacks: list[Path] = []
+        if Path("/data").exists():
+            fallbacks.append(Path("/data/energy-assistant.db"))
+        if Path("/config").exists():
+            # Useful when addon_config is mapped and users should inspect the DB.
+            fallbacks.append(Path("/config/energy-assistant/energy-assistant.db"))
+        return fallbacks
 
     @staticmethod
     async def _open_db(path: Path) -> aiosqlite.Connection:
@@ -109,17 +112,23 @@ class SqliteStorageBackend:
         try:
             self._db = await self._open_db(self._db_path)
         except sqlite3.OperationalError as exc:
-            fallback = self._ha_fallback_db_path()
-            if fallback is None or fallback == self._db_path:
+            for fallback in self._ha_fallback_db_paths():
+                if fallback == self._db_path:
+                    continue
+                _log.warning(
+                    "Could not open SQLite DB at %s (%s); trying fallback %s",
+                    self._db_path,
+                    exc,
+                    fallback,
+                )
+                try:
+                    self._db_path = fallback
+                    self._db = await self._open_db(self._db_path)
+                    break
+                except sqlite3.OperationalError:
+                    continue
+            else:
                 raise
-            _log.warning(
-                "Could not open SQLite DB at %s (%s); trying fallback %s",
-                self._db_path,
-                exc,
-                fallback,
-            )
-            self._db_path = fallback
-            self._db = await self._open_db(self._db_path)
 
         await self._db.execute(_CREATE_TABLE)
         await self._db.execute(_CREATE_LEDGER_TABLE)

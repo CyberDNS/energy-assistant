@@ -47,3 +47,31 @@ class TestParseArgs:
 
         assert config_path == Path("/tmp/from-env.yaml")
         assert db_path == Path("/tmp/from-env.db")
+
+    def test_ha_mode_uses_ha_paths(self, monkeypatch, tmp_path: Path) -> None:
+        # /config/config.yaml — no subdir, the host folder is already namespaced
+        # by {REPO}_{slug} and mounted at /config inside the container.
+        monkeypatch.setattr(app_main.sys, "argv", ["energy-assistant"])
+        monkeypatch.delenv("ENERGY_ASSISTANT_CONFIG", raising=False)
+        monkeypatch.delenv("ENERGY_ASSISTANT_DB", raising=False)
+        monkeypatch.setenv("ENERGY_ASSISTANT_MODE", "ha")
+        ha_cfg = tmp_path / "config" / "config.yaml"
+        ha_db = tmp_path / "data" / "energy-assistant.db"
+        monkeypatch.setattr(app_main, "_HA_CONFIG", ha_cfg)
+        monkeypatch.setattr(app_main, "_HA_DB", ha_db)
+
+        config_path, db_path = app_main._parse_args()
+
+        assert config_path == ha_cfg
+        assert db_path == ha_db
+
+    def test_local_mode_uses_repo_defaults(self, monkeypatch) -> None:
+        monkeypatch.setattr(app_main.sys, "argv", ["energy-assistant"])
+        monkeypatch.delenv("ENERGY_ASSISTANT_CONFIG", raising=False)
+        monkeypatch.delenv("ENERGY_ASSISTANT_DB", raising=False)
+        monkeypatch.setenv("ENERGY_ASSISTANT_MODE", "local")
+
+        config_path, db_path = app_main._parse_args()
+
+        assert config_path == Path(app_main._DEFAULT_CONFIG)
+        assert db_path == Path(app_main._DEFAULT_DB)
