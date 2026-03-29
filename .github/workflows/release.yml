@@ -1,0 +1,68 @@
+# Create GitHub Releases automatically when version tags are pushed.
+#
+# Trigger behaviour:
+#   prerelease tag (v*-*)  → GitHub pre-release with auto-generated notes
+#   stable tag (vX.Y.Z)    → GitHub release with auto-generated notes
+#
+# Release notes are generated from merged pull requests since the previous tag.
+# Maintainers can edit the release body on GitHub after the workflow runs.
+#
+# This workflow is the canonical owner of GitHub Release objects for this repo.
+# The HA add-on repository derives its CHANGELOG.md from these releases; it is
+# not an independent source of truth.
+
+name: Create release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  create-release:
+    name: Create GitHub release
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Full history needed for changelog generation
+          fetch-depth: 0
+
+      # Detect whether this is a prerelease tag (vX.Y.Z-something) or stable
+      - name: Determine release type
+        id: release-type
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if [[ "$TAG" == *"-"* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "Tag '$TAG' is a pre-release"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "Tag '$TAG' is a stable release"
+          fi
+
+      # Create the release; GitHub will auto-generate notes from merged PRs
+      # and commits since the previous tag.  Maintainers can refine the body
+      # through the GitHub Releases UI after this workflow completes.
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if [[ "${{ steps.release-type.outputs.prerelease }}" == "true" ]]; then
+            gh release create "$TAG" \
+              --prerelease \
+              --generate-notes \
+              --title "$TAG" \
+              --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" \
+              --generate-notes \
+              --title "$TAG" \
+              --repo "$GITHUB_REPOSITORY"
+          fi
