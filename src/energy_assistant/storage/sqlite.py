@@ -99,7 +99,7 @@ class SqliteStorageBackend:
             fallbacks.append(Path("/data/energy-assistant.db"))
         if Path("/config").exists():
             # Useful when addon_config is mapped and users should inspect the DB.
-            fallbacks.append(Path("/config/energy-assistant/energy-assistant.db"))
+            fallbacks.append(Path("/config/energy-assistant.db"))
         return fallbacks
 
     @staticmethod
@@ -109,9 +109,11 @@ class SqliteStorageBackend:
 
     async def start(self) -> None:
         """Open the database and ensure the schema is in place."""
+        errors: list[tuple[Path, Exception]] = []
         try:
             self._db = await self._open_db(self._db_path)
-        except sqlite3.OperationalError as exc:
+        except (sqlite3.OperationalError, OSError) as exc:
+            errors.append((self._db_path, exc))
             for fallback in self._ha_fallback_db_paths():
                 if fallback == self._db_path:
                     continue
@@ -125,10 +127,16 @@ class SqliteStorageBackend:
                     self._db_path = fallback
                     self._db = await self._open_db(self._db_path)
                     break
-                except sqlite3.OperationalError:
+                except (sqlite3.OperationalError, OSError) as fallback_exc:
+                    errors.append((fallback, fallback_exc))
                     continue
             else:
-                raise
+                msg = "; ".join(
+                    f"{path}: {err.__class__.__name__}: {err}" for path, err in errors
+                )
+                raise sqlite3.OperationalError(
+                    f"unable to open database file (attempts: {msg})"
+                ) from exc
 
         await self._db.execute(_CREATE_TABLE)
         await self._db.execute(_CREATE_LEDGER_TABLE)

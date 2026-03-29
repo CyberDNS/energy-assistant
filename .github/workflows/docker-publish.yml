@@ -13,7 +13,7 @@
 name: Publish Docker image
 
 on:
-  pull_request:
+#  pull_request:
   push:
     branches:
       - main
