@@ -1,0 +1,260 @@
+# Synchronise CyberDNS/hassio-addons-repository after source-repo events.
+#
+# Trigger behaviour:
+#   push to main          → open/update PR for energy-assistant-dev  (dev channel)
+#   prerelease tag (v*-*) → open/update PR for energy-assistant-edge (edge channel)
+#   stable tag (vX.Y.Z)   → open/update PR for energy-assistant      (prod channel)
+#
+# Each PR updates:
+#   config.json  — version field
+#   CHANGELOG.md — brief entry with a link back to the canonical release notes
+#
+# The HA add-on repository is NOT a source of truth for release notes.
+# It only receives a short derived summary that points users back here.
+#
+# Required secret:
+#   HASSIO_ADDONS_PAT — a GitHub personal access token (classic) or fine-grained
+#                       PAT with "Contents: Read & Write" and "Pull requests:
+#                       Read & Write" permissions on
+#                       CyberDNS/hassio-addons-repository.
+#
+# Channel / version mapping:
+#   main push            → addon folder: energy-assistant-dev   version: <base>-dev
+#   prerelease tag       → addon folder: energy-assistant-edge  version: X.Y.Z-rc.N
+#   stable tag           → addon folder: energy-assistant       version: X.Y.Z
+
+name: Sync HA add-on repository
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+
+jobs:
+  sync-addon:
+    name: Sync add-on repo (${{ github.ref_name }})
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout energy-assistant (source)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ------------------------------------------------------------------ #
+      #  Determine channel, add-on folder, and version string               #
+      # ------------------------------------------------------------------ #
+      - name: Compute channel metadata
+        id: meta
+        run: |
+          REF="${GITHUB_REF}"
+          TAG="${GITHUB_REF_NAME}"
+          SHORT_SHA="${GITHUB_SHA::7}"
+
+          # Read base version from pyproject.toml (used for dev label)
+          BASE_VERSION=$(grep -m1 '^version' pyproject.toml | sed 's/.*= *"\(.*\)"/\1/')
+
+          if [[ "$REF" == "refs/heads/main" ]]; then
+            CHANNEL="dev"
+            ADDON_FOLDER="energy-assistant-dev"
+            VERSION="${BASE_VERSION}-dev"
+            PR_TITLE="chore(energy-assistant-dev): sync dev snapshot ${SHORT_SHA}"
+            REF_DISPLAY="commit [${SHORT_SHA}](https://github.com/CyberDNS/energy-assistant/commit/${GITHUB_SHA}) on \`main\`"
+            EXTRA_LINK="For a full list of changes see the [commit history](https://github.com/CyberDNS/energy-assistant/commits/main)."
+
+          elif [[ "$TAG" == *"-"* ]]; then
+            CHANNEL="edge"
+            ADDON_FOLDER="energy-assistant-edge"
+            # Strip leading 'v' from tag
+            VERSION="${TAG#v}"
+            PR_TITLE="chore(energy-assistant-edge): bump to ${TAG}"
+            REF_DISPLAY="pre-release [${TAG}](https://github.com/CyberDNS/energy-assistant/releases/tag/${TAG})"
+            EXTRA_LINK="See the [upstream release notes](https://github.com/CyberDNS/energy-assistant/releases/tag/${TAG}) for the full changelog."
+
+          else
+            CHANNEL="prod"
+            ADDON_FOLDER="energy-assistant"
+            VERSION="${TAG#v}"
+            PR_TITLE="chore(energy-assistant): bump to ${TAG}"
+            REF_DISPLAY="release [${TAG}](https://github.com/CyberDNS/energy-assistant/releases/tag/${TAG})"
+            EXTRA_LINK="See the [upstream release notes](https://github.com/CyberDNS/energy-assistant/releases/tag/${TAG}) for the full changelog."
+          fi
+
+          PR_BODY="Automated sync from CyberDNS/energy-assistant ${REF_DISPLAY}.
+
+          This PR updates \`${ADDON_FOLDER}\` in the add-on repository.
+
+          ${EXTRA_LINK}"
+
+          # Changelog entry date
+          ENTRY_DATE=$(date -u +%Y-%m-%d)
+
+          echo "channel=${CHANNEL}"          >> "$GITHUB_OUTPUT"
+          echo "addon_folder=${ADDON_FOLDER}">> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}"          >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}"      >> "$GITHUB_OUTPUT"
+          echo "entry_date=${ENTRY_DATE}"    >> "$GITHUB_OUTPUT"
+          echo "pr_title=${PR_TITLE}"        >> "$GITHUB_OUTPUT"
+          # Multi-line body: use delimiter
+          {
+            echo "pr_body<<EOF_BODY"
+            printf '%b\n' "$PR_BODY"
+            echo "EOF_BODY"
+          } >> "$GITHUB_OUTPUT"
+
+      # ------------------------------------------------------------------ #
+      #  Checkout the add-on repo                                           #
+      # ------------------------------------------------------------------ #
+      - name: Checkout hassio-addons-repository
+        uses: actions/checkout@v4
+        with:
+          repository: CyberDNS/hassio-addons-repository
+          token: ${{ secrets.HASSIO_ADDONS_PAT }}
+          path: hassio-addons-repository
+
+      # ------------------------------------------------------------------ #
+      #  Ensure the add-on folder exists (edge/prod may not yet)            #
+      # ------------------------------------------------------------------ #
+      - name: Ensure add-on folder exists
+        env:
+          ADDON_FOLDER: ${{ steps.meta.outputs.addon_folder }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          CHANNEL: ${{ steps.meta.outputs.channel }}
+        run: |
+          TARGET="hassio-addons-repository/${ADDON_FOLDER}"
+          if [[ ! -d "$TARGET" ]]; then
+            echo "Creating new add-on folder: ${ADDON_FOLDER}"
+            mkdir -p "$TARGET"
+
+            # Seed config.json from the dev template, then customise
+            DEV_CONFIG="hassio-addons-repository/energy-assistant-dev/config.json"
+            if [[ -f "$DEV_CONFIG" ]]; then
+              cp "$DEV_CONFIG" "${TARGET}/config.json"
+              # Also copy supporting assets if they exist
+              for f in icon.png logo.png README.md; do
+                [[ -f "hassio-addons-repository/energy-assistant-dev/$f" ]] && \
+                  cp "hassio-addons-repository/energy-assistant-dev/$f" "${TARGET}/$f"
+              done
+            fi
+
+            # Adjust slug and name for channel
+            if [[ "$CHANNEL" == "edge" ]]; then
+              SLUG="energy-assistant-edge"
+              NAME="Energy Assistant (edge)"
+              DESC="Open-source, vendor-neutral energy management platform for homeowners (edge channel — pre-release builds)"
+            else
+              SLUG="energy-assistant"
+              NAME="Energy Assistant"
+              DESC="Open-source, vendor-neutral energy management platform for homeowners"
+            fi
+            # Update fields in config.json using jq (pre-installed on runner)
+            jq --arg slug  "${SLUG}" \
+               --arg name  "${NAME}" \
+               --arg desc  "${DESC}" \
+               '.slug = $slug | .name = $name | .description = $desc' \
+               "${TARGET}/config.json" > /tmp/cfg_new.json \
+            && mv /tmp/cfg_new.json "${TARGET}/config.json"
+
+            # Seed minimal CHANGELOG.md
+            echo "# Changelog" > "${TARGET}/CHANGELOG.md"
+            echo "" >> "${TARGET}/CHANGELOG.md"
+            echo "For full release notes see the [upstream releases](https://github.com/CyberDNS/energy-assistant/releases)." >> "${TARGET}/CHANGELOG.md"
+            echo "" >> "${TARGET}/CHANGELOG.md"
+          fi
+
+      # ------------------------------------------------------------------ #
+      #  Update config.json version                                         #
+      # ------------------------------------------------------------------ #
+      - name: Update config.json version
+        env:
+          ADDON_FOLDER: ${{ steps.meta.outputs.addon_folder }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          CONFIG="hassio-addons-repository/${ADDON_FOLDER}/config.json"
+          jq --arg version "${VERSION}" '.version = $version' \
+            "${CONFIG}" > /tmp/cfg_new.json \
+          && mv /tmp/cfg_new.json "${CONFIG}"
+          echo "Updated ${CONFIG} version to ${VERSION}"
+
+      # ------------------------------------------------------------------ #
+      #  Prepend a CHANGELOG.md entry                                       #
+      # ------------------------------------------------------------------ #
+      - name: Update CHANGELOG.md
+        env:
+          ADDON_FOLDER: ${{ steps.meta.outputs.addon_folder }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          CHANNEL: ${{ steps.meta.outputs.channel }}
+          ENTRY_DATE: ${{ steps.meta.outputs.entry_date }}
+          SHORT_SHA: ${{ steps.meta.outputs.short_sha }}
+        run: |
+          CHANGELOG="hassio-addons-repository/${ADDON_FOLDER}/CHANGELOG.md"
+
+          # Build the new entry
+          if [[ "$CHANNEL" == "dev" ]]; then
+            TAG_OR_SHA="${SHORT_SHA}"
+            LINK="https://github.com/CyberDNS/energy-assistant/commit/${GITHUB_SHA}"
+            SUMMARY="Dev snapshot from \`main\` (commit [${SHORT_SHA}](${LINK}))."
+          else
+            TAG="${GITHUB_REF_NAME}"
+            LINK="https://github.com/CyberDNS/energy-assistant/releases/tag/${TAG}"
+            SUMMARY="See [upstream release notes](${LINK}) for the full changelog."
+          fi
+
+          NEW_ENTRY="## ${VERSION} (${ENTRY_DATE})
+
+          ${SUMMARY}
+
+          "
+
+          # Prepend the new entry after the first heading line (if present)
+          if [[ -f "$CHANGELOG" ]]; then
+            HEADER=$(head -1 "$CHANGELOG")
+            REST=$(tail -n +2 "$CHANGELOG")
+            printf '%s\n\n%s\n%s' "$HEADER" "$NEW_ENTRY" "$REST" > "$CHANGELOG"
+          else
+            printf '# Changelog\n\n%s' "$NEW_ENTRY" > "$CHANGELOG"
+          fi
+
+          echo "Prepended entry for ${VERSION} to ${CHANGELOG}"
+
+      # ------------------------------------------------------------------ #
+      #  Commit and open PR                                                  #
+      # ------------------------------------------------------------------ #
+      - name: Open pull request in hassio-addons-repository
+        env:
+          GH_TOKEN: ${{ secrets.HASSIO_ADDONS_PAT }}
+          ADDON_FOLDER: ${{ steps.meta.outputs.addon_folder }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          SHORT_SHA: ${{ steps.meta.outputs.short_sha }}
+          PR_TITLE: ${{ steps.meta.outputs.pr_title }}
+          PR_BODY: ${{ steps.meta.outputs.pr_body }}
+        run: |
+          cd hassio-addons-repository
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          BRANCH="sync/${ADDON_FOLDER}-${VERSION}-${SHORT_SHA}"
+
+          git checkout -b "$BRANCH"
+          git add "${ADDON_FOLDER}/"
+
+          if git diff --cached --quiet; then
+            echo "No changes detected in ${ADDON_FOLDER}/ — skipping PR"
+            exit 0
+          fi
+
+          git commit -m "${PR_TITLE}"
+          git push origin "$BRANCH"
+
+          gh pr create \
+            --repo CyberDNS/hassio-addons-repository \
+            --head "$BRANCH" \
+            --base main \
+            --title "${PR_TITLE}" \
+            --body "${PR_BODY}"
