@@ -92,51 +92,28 @@ class SqliteStorageBackend:
         self._db: aiosqlite.Connection | None = None
 
     @staticmethod
-    def _ha_fallback_db_paths() -> list[Path]:
-        """Return Home Assistant-safe fallback DB paths in preference order."""
-        fallbacks: list[Path] = []
-        if Path("/data").exists():
-            fallbacks.append(Path("/data/energy-assistant.db"))
-        if Path("/config").exists():
-            # Useful when addon_config is mapped and users should inspect the DB.
-            fallbacks.append(Path("/config/energy-assistant.db"))
-        return fallbacks
-
-    @staticmethod
     async def _open_db(path: Path) -> aiosqlite.Connection:
+        """Create parent directory and open the SQLite database."""
         path.parent.mkdir(parents=True, exist_ok=True)
         return await aiosqlite.connect(path)
 
     async def start(self) -> None:
         """Open the database and ensure the schema is in place."""
-        errors: list[tuple[Path, Exception]] = []
         try:
             self._db = await self._open_db(self._db_path)
         except (sqlite3.OperationalError, OSError) as exc:
-            errors.append((self._db_path, exc))
-            for fallback in self._ha_fallback_db_paths():
-                if fallback == self._db_path:
-                    continue
-                _log.warning(
-                    "Could not open SQLite DB at %s (%s); trying fallback %s",
-                    self._db_path,
-                    exc,
-                    fallback,
-                )
-                try:
-                    self._db_path = fallback
-                    self._db = await self._open_db(self._db_path)
-                    break
-                except (sqlite3.OperationalError, OSError) as fallback_exc:
-                    errors.append((fallback, fallback_exc))
-                    continue
-            else:
-                msg = "; ".join(
-                    f"{path}: {err.__class__.__name__}: {err}" for path, err in errors
-                )
-                raise sqlite3.OperationalError(
-                    f"unable to open database file (attempts: {msg})"
-                ) from exc
+            # In HA: /data is always mounted and writable by the Supervisor.
+            # If we can't open the DB there, it's a configuration issue, not a fallback scenario.
+            _log.error(
+                "Could not open SQLite DB at %s (%s: %s). "
+                "In Home Assistant, ensure /data is mounted and writable. "
+                "In local mode, check that the parent directory exists and is writable. "
+                "To use a custom DB path, set ENERGY_ASSISTANT_DB environment variable.",
+                self._db_path,
+                exc.__class__.__name__,
+                exc,
+            )
+            raise
 
         await self._db.execute(_CREATE_TABLE)
         await self._db.execute(_CREATE_LEDGER_TABLE)

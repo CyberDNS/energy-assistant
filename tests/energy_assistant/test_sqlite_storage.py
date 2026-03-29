@@ -19,64 +19,31 @@ class _FakeConnection:
 
 
 class TestSqliteStorageBackendStart:
-    async def test_falls_back_to_first_available_ha_path_when_primary_fails(
-        self,
-        monkeypatch,
-        tmp_path: Path,
-    ) -> None:
-        primary = tmp_path / "unwritable" / "state.db"
-        fallback_data = tmp_path / "ha-data" / "energy-assistant.db"
-        fallback_config = tmp_path / "ha-config" / "energy-assistant.db"
+    async def test_creates_parent_dir_and_opens_db(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "data" / "energy-assistant.db"
+        # Parent directory doesn't exist yet
+        assert not db_path.parent.exists()
 
-        calls: list[Path] = []
-
-        async def fake_open_db(path: Path):
-            calls.append(path)
-            if path == primary:
-                raise sqlite3.OperationalError("unable to open database file")
-            return _FakeConnection()
-
-        monkeypatch.setattr(SqliteStorageBackend, "_open_db", staticmethod(fake_open_db))
-        monkeypatch.setattr(
-            SqliteStorageBackend,
-            "_ha_fallback_db_paths",
-            staticmethod(lambda: [fallback_data, fallback_config]),
-        )
-
-        backend = SqliteStorageBackend(primary)
+        backend = SqliteStorageBackend(db_path)
         await backend.start()
+        await backend.stop()
 
-        assert calls == [primary, fallback_data]
-        assert backend._db_path == fallback_data
+        # Parent directory was created and DB file exists
+        assert db_path.parent.exists()
+        assert db_path.exists()
 
-    async def test_raises_clear_error_when_all_paths_fail(
+    async def test_raises_os_error_when_db_path_not_writable(
         self,
         monkeypatch,
         tmp_path: Path,
     ) -> None:
-        primary = tmp_path / "unwritable" / "state.db"
-        fallback_data = tmp_path / "ha-data" / "energy-assistant.db"
-        fallback_config = tmp_path / "ha-config" / "energy-assistant.db"
+        db_path = tmp_path / "energy-assistant.db"
 
         async def fake_open_db(path: Path):
-            if path == primary:
-                raise sqlite3.OperationalError("unable to open database file")
-            if path == fallback_data:
-                raise sqlite3.OperationalError("unable to open database file")
-            raise PermissionError("permission denied")
+            raise PermissionError("Permission denied")
 
         monkeypatch.setattr(SqliteStorageBackend, "_open_db", staticmethod(fake_open_db))
-        monkeypatch.setattr(
-            SqliteStorageBackend,
-            "_ha_fallback_db_paths",
-            staticmethod(lambda: [fallback_data, fallback_config]),
-        )
 
-        backend = SqliteStorageBackend(primary)
-        with pytest.raises(sqlite3.OperationalError) as exc_info:
+        backend = SqliteStorageBackend(db_path)
+        with pytest.raises(PermissionError):
             await backend.start()
-
-        message = str(exc_info.value)
-        assert str(primary) in message
-        assert str(fallback_data) in message
-        assert str(fallback_config) in message
