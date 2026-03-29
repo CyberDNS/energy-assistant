@@ -519,6 +519,11 @@ class Application:
         """Build the FastAPI application exposing live server state."""
         api = FastAPI(title="Energy Assistant", version="0.1")
 
+        @api.get("/health")
+        async def health() -> dict:
+            """Liveness probe endpoint used by container health checks."""
+            return {"status": "ok"}
+
         @api.get("/api/status")
         async def get_status() -> dict:
             """Live snapshot: grid power, price, device states, setpoints, ledger."""
