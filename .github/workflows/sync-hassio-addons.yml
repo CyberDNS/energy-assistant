@@ -252,9 +252,15 @@ jobs:
           git commit -m "${PR_TITLE}"
           git push origin "$BRANCH"
 
+          # Detect the actual default branch of the target repository so the
+          # PR base is correct regardless of whether it is "main" or "master".
+          BASE_BRANCH=$(gh repo view CyberDNS/hassio-addons-repository \
+            --json defaultBranchRef --jq '.defaultBranchRef.name')
+          echo "Target default branch: ${BASE_BRANCH}"
+
           gh pr create \
             --repo CyberDNS/hassio-addons-repository \
             --head "$BRANCH" \
-            --base main \
+            --base "${BASE_BRANCH}" \
             --title "${PR_TITLE}" \
             --body "${PR_BODY}"
