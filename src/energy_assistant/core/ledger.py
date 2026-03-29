@@ -255,6 +255,21 @@ class BatteryCostLedger:
         entry = self._entries.get(device_id)
         return entry.stored_energy_kwh if entry is not None else None
 
+    def set_stored_energy(self, device_id: str, stored_energy_kwh: float) -> None:
+        """Set stored energy directly (typically from live SoC).
+
+        Keeps the existing cost basis unchanged. If the device is unknown,
+        creates an entry with zero basis as a safe fallback.
+        """
+        entry = self._entries.get(device_id)
+        if entry is None:
+            self._entries[device_id] = _BatteryEntry(
+                stored_energy_kwh=max(0.0, stored_energy_kwh),
+                cost_basis=0.0,
+            )
+            return
+        entry.stored_energy_kwh = max(0.0, stored_energy_kwh)
+
     def all_cost_bases(self) -> dict[str, float]:
         """Return cost basis for every tracked device."""
         return {did: e.cost_basis for did, e in self._entries.items()}

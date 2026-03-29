@@ -52,6 +52,33 @@ CREATE TABLE IF NOT EXISTS ledger_state (
 )
 """
 
+_CREATE_LEDGER_HISTORY_TABLE = """
+CREATE TABLE IF NOT EXISTS ledger_history (
+    device_id           TEXT NOT NULL,
+    timestamp           TEXT NOT NULL,
+    cost_basis          REAL NOT NULL,
+    stored_energy_kwh   REAL NOT NULL,
+    PRIMARY KEY (device_id, timestamp)
+)
+"""
+
+_CREATE_LEDGER_HISTORY_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_ledger_history_device_ts
+    ON ledger_history (device_id, timestamp)
+"""
+
+_INSERT_LEDGER_HISTORY = """
+INSERT OR IGNORE INTO ledger_history (device_id, timestamp, cost_basis, stored_energy_kwh)
+VALUES (?, ?, ?, ?)
+"""
+
+_QUERY_LEDGER_HISTORY = """
+SELECT timestamp, cost_basis, stored_energy_kwh
+FROM ledger_history
+WHERE device_id = ? AND timestamp BETWEEN ? AND ?
+ORDER BY timestamp
+"""
+
 _CREATE_INDEX = """
 CREATE INDEX IF NOT EXISTS idx_device_timestamp
     ON measurements (device_id, timestamp)
@@ -117,7 +144,9 @@ class SqliteStorageBackend:
 
         await self._db.execute(_CREATE_TABLE)
         await self._db.execute(_CREATE_LEDGER_TABLE)
+        await self._db.execute(_CREATE_LEDGER_HISTORY_TABLE)
         await self._db.execute(_CREATE_INDEX)
+        await self._db.execute(_CREATE_LEDGER_HISTORY_INDEX)
         await self._db.commit()
 
     async def stop(self) -> None:
@@ -188,6 +217,50 @@ class SqliteStorageBackend:
             (device_id, cost_basis, stored_energy_kwh, now),
         )
         await self._db.commit()
+
+    async def append_ledger_history(
+        self,
+        device_id: str,
+        cost_basis: float,
+        stored_energy_kwh: float,
+        timestamp: datetime | None = None,
+    ) -> None:
+        """Append a ledger snapshot to the history table.
+
+        Uses INSERT OR IGNORE so duplicate (device_id, timestamp) pairs are
+        silently dropped — prevents flooding when the control tick fires more
+        frequently than desired.
+        """
+        assert self._db is not None, "Call start() before append_ledger_history()"
+        from datetime import timezone
+        ts = (timestamp or datetime.now(timezone.utc)).isoformat()
+        await self._db.execute(
+            _INSERT_LEDGER_HISTORY,
+            (device_id, ts, cost_basis, stored_energy_kwh),
+        )
+        await self._db.commit()
+
+    async def query_ledger_history(
+        self,
+        device_id: str,
+        start: datetime,
+        end: datetime,
+    ) -> list[dict]:
+        """Return ledger history rows for *device_id* in ``[start, end]``."""
+        assert self._db is not None, "Call start() before query_ledger_history()"
+        async with self._db.execute(
+            _QUERY_LEDGER_HISTORY,
+            (device_id, start.isoformat(), end.isoformat()),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [
+            {
+                "t": row[0],
+                "cost_basis_eur_per_kwh": row[1],
+                "stored_energy_kwh": row[2],
+            }
+            for row in rows
+        ]
 
     async def load_ledger_state(
         self,
