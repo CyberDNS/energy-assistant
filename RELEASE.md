@@ -46,10 +46,39 @@ automatically based on the git ref that triggered it.
 
 ---
 
+## Automated workflows
+
+Three workflows handle the full release pipeline automatically:
+
+| Workflow | File | Triggered by |
+|---|---|---|
+| Tests | `tests.yml` | every PR and `main` push |
+| Publish Docker image | `docker-publish.yml` | every PR (build-only), `main` push, and tag push |
+| Create release | `release.yml` | tag push `v*` |
+| Sync HA add-on repo | `sync-hassio-addons.yml` | `main` push and tag push `v*` |
+
+### Required secrets
+
+| Secret | Used by | Purpose |
+|---|---|---|
+| `GITHUB_TOKEN` | all workflows | default; provided automatically |
+| `HASSIO_ADDONS_PAT` | `sync-hassio-addons.yml` | push a branch and open a PR in `CyberDNS/hassio-addons-repository` |
+
+`HASSIO_ADDONS_PAT` must be a fine-grained PAT (or classic PAT) with:
+- **Contents: Read & Write** on `CyberDNS/hassio-addons-repository`
+- **Pull requests: Read & Write** on `CyberDNS/hassio-addons-repository`
+
+---
+
 ## Making a release
 
 ### Dev (automatic)
-Every push to `main` publishes a fresh `:dev` image.  No manual steps needed.
+Every push to `main`:
+- publishes a fresh `:dev` Docker image and `:sha-<short-sha>`,
+- opens a PR in `CyberDNS/hassio-addons-repository` updating
+  `energy-assistant-dev/config.json` and `CHANGELOG.md`.
+
+No manual steps needed.
 
 ### Edge release
 1. Ensure `pyproject.toml` version matches the planned release (e.g. `0.2.0`).
@@ -58,8 +87,12 @@ Every push to `main` publishes a fresh `:dev` image.  No manual steps needed.
    git tag v0.2.0-rc.1
    git push origin v0.2.0-rc.1
    ```
-3. The workflow publishes `:edge` and `:v0.2.0-rc.1`.
-4. Create a **GitHub pre-release** for the tag with release notes (see below).
+3. Automation will:
+   - publish `:edge` and `:v0.2.0-rc.1` Docker images,
+   - create a GitHub **pre-release** with auto-generated notes,
+   - open a PR in `CyberDNS/hassio-addons-repository` updating
+     `energy-assistant-edge/`.
+4. Optionally refine the release notes in the GitHub Releases UI.
 
 ### Stable release
 1. Set `pyproject.toml` version to the final version (e.g. `0.2.0`).
@@ -69,8 +102,12 @@ Every push to `main` publishes a fresh `:dev` image.  No manual steps needed.
    git tag v0.2.0
    git push origin v0.2.0
    ```
-4. The workflow publishes `:latest` and `:v0.2.0`.
-5. Publish the **GitHub Release** with user-facing release notes.
+4. Automation will:
+   - publish `:latest` and `:v0.2.0` Docker images,
+   - create a GitHub **release** with auto-generated notes,
+   - open a PR in `CyberDNS/hassio-addons-repository` updating
+     `energy-assistant/`.
+5. Optionally refine the release notes in the GitHub Releases UI.
 
 ---
 
@@ -79,29 +116,30 @@ Every push to `main` publishes a fresh `:dev` image.  No manual steps needed.
 ### dev channel
 - No formal release notes are required.
 - Each commit to `main` is visible in the commit log.
-- GitHub's auto-generated release notes (if a release is created) are
-  sufficient for tracking what changed.
+- The sync workflow adds a brief entry in the HA add-on
+  `energy-assistant-dev/CHANGELOG.md` pointing to the commit.
 
 ### edge channel (pre-release tags)
-- Create a **GitHub pre-release** for the tag.
-- Use GitHub's **"Generate release notes"** button to auto-populate from merged
-  PRs since the last tag.
-- Edit the generated notes to highlight user-facing changes.
-- Mark the release as **Pre-release** in the GitHub UI.
+- The `release.yml` workflow automatically creates a **GitHub pre-release**
+  with notes generated from merged PRs since the previous tag.
+- Maintainers can refine the body in the GitHub Releases UI after the
+  workflow runs.
+- The HA add-on `energy-assistant-edge/CHANGELOG.md` is updated automatically
+  with a short entry that links back to the upstream release.
 
 ### prod channel (stable tags)
-- Create a **GitHub Release** for the tag.
-- Write user-facing release notes covering:
-  - New features (what users can do now)
-  - Breaking changes and migration steps
-  - Bug fixes worth highlighting
-- Use the `CHANGELOG.md` in the HA add-on folder as the
-  human-readable summary visible in the Home Assistant UI.
+- The `release.yml` workflow automatically creates a **GitHub release** with
+  notes generated from merged PRs since the previous tag.
+- Maintainers can refine the body in the GitHub Releases UI after the
+  workflow runs.
+- The HA add-on `energy-assistant/CHANGELOG.md` is updated automatically
+  with a short entry that links back to the upstream release.
 
 ### Canonical source
 **GitHub Releases** are the canonical source of release notes for tagged
 releases.  The HA add-on repository `CHANGELOG.md` files are a condensed
-mirror intended for users who read them inside Home Assistant.
+mirror intended for users who read them inside Home Assistant.  The add-on
+repo must not become an independent source of truth.
 
 ---
 
@@ -122,16 +160,12 @@ application channel structure:
 - edge:  `0.2.0-rc.1`  (mirrors the prerelease tag, without the leading `v`)
 - prod:  `0.2.0`      (exact stable version)
 
-### How to update the add-on version on a new release
+### How add-on versions are updated
 
-When a new stable tag is pushed, update the HA add-on repository:
-1. Set `config.json` `"version"` to match the new tag (without the `v` prefix).
-2. Update `CHANGELOG.md` with a summary of user-visible changes.
-3. Open a PR in `CyberDNS/hassio-addons-repository`.
-
-This keeps the two repositories in sync without coupling their pipelines.
-A future automation step can open that PR automatically from the
-`docker-publish` workflow using a repository dispatch event.
+The `sync-hassio-addons.yml` workflow handles this automatically by opening a
+PR in `CyberDNS/hassio-addons-repository` whenever a push to `main` or a tag
+push occurs.  Manual updates are only needed if the automation is bypassed or
+the PR needs human editing before merging.
 
 ---
 
