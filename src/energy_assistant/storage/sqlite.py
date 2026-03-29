@@ -20,12 +20,16 @@ Call ``start()`` before the first write/query and ``stop()`` on shutdown::
 from __future__ import annotations
 
 import json
+import logging
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 
 import aiosqlite
 
 from ..core.models import Measurement
+
+_log = logging.getLogger(__name__)
 
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS measurements (
@@ -87,9 +91,36 @@ class SqliteStorageBackend:
         self._db_path = Path(db_path)
         self._db: aiosqlite.Connection | None = None
 
+    @staticmethod
+    def _ha_fallback_db_path() -> Path | None:
+        """Return a Home Assistant-safe fallback DB path when available."""
+        base = Path("/config")
+        if not base.exists():
+            return None
+        return base / "energy-assistant" / "energy-assistant.db"
+
+    @staticmethod
+    async def _open_db(path: Path) -> aiosqlite.Connection:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return await aiosqlite.connect(path)
+
     async def start(self) -> None:
         """Open the database and ensure the schema is in place."""
-        self._db = await aiosqlite.connect(self._db_path)
+        try:
+            self._db = await self._open_db(self._db_path)
+        except sqlite3.OperationalError as exc:
+            fallback = self._ha_fallback_db_path()
+            if fallback is None or fallback == self._db_path:
+                raise
+            _log.warning(
+                "Could not open SQLite DB at %s (%s); trying fallback %s",
+                self._db_path,
+                exc,
+                fallback,
+            )
+            self._db_path = fallback
+            self._db = await self._open_db(self._db_path)
+
         await self._db.execute(_CREATE_TABLE)
         await self._db.execute(_CREATE_LEDGER_TABLE)
         await self._db.execute(_CREATE_INDEX)
