@@ -270,8 +270,8 @@ def _web_ui_html() -> str:
 
         async function refresh() {
             const [statusResp, planResp] = await Promise.all([
-                fetch('/api/status'),
-                fetch('/api/plan'),
+                fetch('api/status'),
+                fetch('api/plan'),
             ]);
             const status = await statusResp.json();
             const plan = await planResp.json();
