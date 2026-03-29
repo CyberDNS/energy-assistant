@@ -6,7 +6,7 @@
 #   stable tag (vX.Y.Z)   → open/update PR for energy-assistant      (prod channel)
 #
 # Each PR updates:
-#   config.json  — version field
+#   config.yaml  — version field
 #   CHANGELOG.md — brief entry with a link back to the canonical release notes
 #
 # The HA add-on repository is NOT a source of truth for release notes.
@@ -131,10 +131,10 @@ jobs:
             echo "Creating new add-on folder: ${ADDON_FOLDER}"
             mkdir -p "$TARGET"
 
-            # Seed config.json from the dev template, then customise
-            DEV_CONFIG="hassio-addons-repository/energy-assistant-dev/config.json"
+            # Seed config.yaml from the dev template, then customise
+            DEV_CONFIG="hassio-addons-repository/energy-assistant-dev/config.yaml"
             if [[ -f "$DEV_CONFIG" ]]; then
-              cp "$DEV_CONFIG" "${TARGET}/config.json"
+              cp "$DEV_CONFIG" "${TARGET}/config.yaml"
               # Also copy supporting assets if they exist
               for f in icon.png logo.png README.md; do
                 [[ -f "hassio-addons-repository/energy-assistant-dev/$f" ]] && \
@@ -152,13 +152,10 @@ jobs:
               NAME="Energy Assistant"
               DESC="Open-source, vendor-neutral energy management platform for homeowners"
             fi
-            # Update fields in config.json using jq (pre-installed on runner)
-            jq --arg slug  "${SLUG}" \
-               --arg name  "${NAME}" \
-               --arg desc  "${DESC}" \
-               '.slug = $slug | .name = $name | .description = $desc' \
-               "${TARGET}/config.json" > /tmp/cfg_new.json \
-            && mv /tmp/cfg_new.json "${TARGET}/config.json"
+            # Update fields in config.yaml using yq (pre-installed on ubuntu-latest runners)
+            SLUG="${SLUG}" NAME="${NAME}" DESC="${DESC}" \
+              yq e '.slug = env(SLUG) | .name = env(NAME) | .description = env(DESC)' \
+              -i "${TARGET}/config.yaml"
 
             # Seed minimal CHANGELOG.md
             echo "# Changelog" > "${TARGET}/CHANGELOG.md"
@@ -168,17 +165,15 @@ jobs:
           fi
 
       # ------------------------------------------------------------------ #
-      #  Update config.json version                                         #
+      #  Update config.yaml version                                         #
       # ------------------------------------------------------------------ #
-      - name: Update config.json version
+      - name: Update config.yaml version
         env:
           ADDON_FOLDER: ${{ steps.meta.outputs.addon_folder }}
           VERSION: ${{ steps.meta.outputs.version }}
         run: |
-          CONFIG="hassio-addons-repository/${ADDON_FOLDER}/config.json"
-          jq --arg version "${VERSION}" '.version = $version' \
-            "${CONFIG}" > /tmp/cfg_new.json \
-          && mv /tmp/cfg_new.json "${CONFIG}"
+          CONFIG="hassio-addons-repository/${ADDON_FOLDER}/config.yaml"
+          VERSION="${VERSION}" yq e '.version = env(VERSION)' -i "${CONFIG}"
           echo "Updated ${CONFIG} version to ${VERSION}"
 
       # ------------------------------------------------------------------ #

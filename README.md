@@ -32,12 +32,21 @@ Three channels are available:
 
 Recommended file locations in Home Assistant:
 
-- Config file: `/config/energy-assistant/config.yaml`
-- SQLite DB: `/config/energy-assistant/energy-assistant.db`
+- Config file (user-editable): `/config/energy-assistant/config.yaml`
+- SQLite DB (private, persistent): `/data/energy-assistant.db`
 
-These paths are visible in common Home Assistant file-management add-ons
-such as File Editor. The app also supports overriding both paths via
-environment variables:
+If you want users to inspect/back up the DB via File Editor, set
+`ENERGY_ASSISTANT_DB=/config/energy-assistant/energy-assistant.db`
+and map `addon_config` with write access in the add-on definition.
+
+The app supports overriding both paths via environment variables:
 
 - `ENERGY_ASSISTANT_CONFIG`
 - `ENERGY_ASSISTANT_DB`
+
+Two runtime use cases are supported by default:
+
+| Use case | Runtime hint | Default config path | Default DB path |
+|---|---|---|---|
+| Local development (VS Code) | `ENERGY_ASSISTANT_MODE=local` (optional) | `./config.yaml` | `./data/history.db` |
+| Home Assistant add-on | `ENERGY_ASSISTANT_MODE=ha` (optional) or auto-detected via `/data/options.json` | `/config/energy-assistant/config.yaml` | `/data/energy-assistant.db` |
