@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 import uvicorn
 
 from ..config.yaml import YamlConfigLoader
@@ -64,6 +65,260 @@ from ..plugins.milp_highs import MilpHigsOptimizer
 from ..storage.sqlite import SqliteStorageBackend
 
 _log = logging.getLogger(__name__)
+
+
+def _web_ui_html() -> str:
+        """Return a lightweight built-in web UI for live diagnostics."""
+        return """<!doctype html>
+<html lang=\"en\">
+<head>
+    <meta charset=\"utf-8\" />
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+    <title>Energy Assistant UI</title>
+    <script src=\"https://cdn.plot.ly/plotly-2.35.2.min.js\"></script>
+    <style>
+        :root {
+            --bg: #f6f8f4;
+            --card: #ffffff;
+            --ink: #1f2a22;
+            --muted: #5d6b61;
+            --ok: #1d7f4e;
+            --warn: #ad7b00;
+            --bad: #9f2d2d;
+            --line: #d7ddd8;
+            --accent: #0f6a8f;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            font-family: ui-sans-serif, -apple-system, Segoe UI, Helvetica, Arial, sans-serif;
+            background: radial-gradient(circle at top right, #e7efe8, var(--bg));
+            color: var(--ink);
+        }
+        .wrap {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 16px;
+        }
+        .top {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+        h1 {
+            font-size: 1.2rem;
+            margin: 0;
+            letter-spacing: 0.02em;
+        }
+        .stamp { color: var(--muted); font-size: 0.9rem; }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(180px, 1fr));
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+        .card {
+            background: var(--card);
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            padding: 10px 12px;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+        }
+        .k { color: var(--muted); font-size: 0.8rem; text-transform: uppercase; letter-spacing: .08em; }
+        .v { font-size: 1.35rem; font-weight: 700; margin-top: 4px; }
+        .ok { color: var(--ok); }
+        .warn { color: var(--warn); }
+        .bad { color: var(--bad); }
+        .section {
+            display: grid;
+            grid-template-columns: 1.3fr 1fr;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+        .panel {
+            background: var(--card);
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            padding: 10px;
+        }
+        .panel h2 {
+            margin: 0 0 8px 0;
+            font-size: 0.95rem;
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: .08em;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.9rem;
+        }
+        th, td { padding: 6px; border-bottom: 1px solid var(--line); text-align: left; }
+        th { color: var(--muted); font-weight: 600; }
+        @media (max-width: 980px) {
+            .grid { grid-template-columns: repeat(2, minmax(150px, 1fr)); }
+            .section { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+    <div class=\"wrap\">
+        <div class=\"top\">
+            <h1>Energy Assistant Live UI</h1>
+            <div class=\"stamp\" id=\"stamp\">loading...</div>
+        </div>
+
+        <div class=\"grid\">
+            <div class=\"card\"><div class=\"k\">Grid Power</div><div class=\"v\" id=\"gridPower\">-</div></div>
+            <div class=\"card\"><div class=\"k\">Import Price</div><div class=\"v\" id=\"importPrice\">-</div></div>
+            <div class=\"card\"><div class=\"k\">Export Price</div><div class=\"v\" id=\"exportPrice\">-</div></div>
+            <div class=\"card\"><div class=\"k\">Dry Run</div><div class=\"v\" id=\"dryRun\">-</div></div>
+        </div>
+
+        <div class=\"section\">
+            <div class=\"panel\">
+                <h2>Plan Power (kW)</h2>
+                <div id=\"planChart\" style=\"height:360px\"></div>
+            </div>
+            <div class=\"panel\">
+                <h2>Active Setpoints</h2>
+                <table id=\"setpointsTable\">
+                    <thead><tr><th>Device</th><th>Mode</th><th>Policy</th><th>Setpoint W</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class=\"section\">
+            <div class=\"panel\">
+                <h2>Devices</h2>
+                <table id=\"devicesTable\">
+                    <thead><tr><th>Device</th><th>Power W</th><th>SoC %</th><th>OK</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+            <div class=\"panel\">
+                <h2>Battery Ledger</h2>
+                <table id=\"ledgerTable\">
+                    <thead><tr><th>Device</th><th>Stored kWh</th><th>Basis €/kWh</th><th>Cap kWh</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function fmt(n, d=2) {
+            if (n === null || n === undefined || Number.isNaN(Number(n))) return '-';
+            return Number(n).toFixed(d);
+        }
+
+        function setText(id, txt, cls='') {
+            const el = document.getElementById(id);
+            el.textContent = txt;
+            el.className = 'v ' + cls;
+        }
+
+        function tableRows(id, rows) {
+            const tbody = document.querySelector('#' + id + ' tbody');
+            tbody.innerHTML = rows.map(r => '<tr>' + r.map(c => '<td>' + c + '</td>').join('') + '</tr>').join('');
+        }
+
+        function buildPlanChart(plan) {
+            const intents = plan.intents || [];
+            const byDevice = {};
+            for (const i of intents) {
+                const dev = i.device_id;
+                if (!byDevice[dev]) byDevice[dev] = {x: [], y: []};
+                byDevice[dev].x.push(i.timestep);
+                byDevice[dev].y.push(Number(i.planned_kw || 0));
+            }
+            const traces = Object.entries(byDevice).map(([dev, arr]) => ({
+                type: 'scatter', mode: 'lines', name: dev, x: arr.x, y: arr.y,
+            }));
+            Plotly.newPlot('planChart', traces, {
+                margin: {l: 50, r: 10, t: 10, b: 40},
+                yaxis: {title: 'kW'},
+                xaxis: {title: 'time'},
+                legend: {orientation: 'h'},
+                paper_bgcolor: 'white',
+                plot_bgcolor: 'white',
+            }, {responsive: true, displayModeBar: false});
+        }
+
+        function activePolicies(plan, nowIso) {
+            const now = new Date(nowIso).getTime();
+            const map = {};
+            for (const i of (plan.intents || [])) {
+                const ts = new Date(i.timestep).getTime();
+                if (ts <= now) {
+                    const cur = map[i.device_id];
+                    if (!cur || ts > cur.ts) {
+                        map[i.device_id] = {
+                            ts,
+                            cp: i.charge_policy || 'auto',
+                            dp: i.discharge_policy || 'meet_load_only',
+                        };
+                    }
+                }
+            }
+            return map;
+        }
+
+        async function refresh() {
+            const [statusResp, planResp] = await Promise.all([
+                fetch('/api/status'),
+                fetch('/api/plan'),
+            ]);
+            const status = await statusResp.json();
+            const plan = await planResp.json();
+
+            const gp = Number(status.grid_power_w || 0);
+            const gpClass = gp > 50 ? 'warn' : (gp < -50 ? 'ok' : '');
+            setText('gridPower', `${Math.round(gp)} W`, gpClass);
+            setText('importPrice', `${fmt(status.current_price_eur_per_kwh, 4)} €/kWh`);
+            setText('exportPrice', `${fmt(status.pv_opportunity_price_eur_per_kwh, 4)} €/kWh`);
+            setText('dryRun', status.dry_run ? 'YES' : 'NO', status.dry_run ? 'warn' : 'ok');
+            document.getElementById('stamp').textContent = `updated ${new Date(status.timestamp).toLocaleString()}`;
+
+            const policies = activePolicies(plan, status.timestamp);
+
+            tableRows('setpointsTable', (status.setpoints || []).map(sp => {
+                const p = policies[sp.device_id] || {cp: 'auto', dp: 'meet_load_only'};
+                return [
+                    sp.device_id,
+                    sp.mode || '-',
+                    `c=${p.cp}, d=${p.dp}`,
+                    String(Math.round(Number(sp.setpoint_w || 0))),
+                ];
+            }));
+
+            tableRows('devicesTable', (status.devices || []).map(d => [
+                d.device_id,
+                String(Math.round(Number(d.power_w || 0))),
+                d.soc_pct === null || d.soc_pct === undefined ? '-' : fmt(d.soc_pct, 1),
+                d.available ? 'yes' : 'no',
+            ]));
+
+            tableRows('ledgerTable', (status.ledger || []).map(l => [
+                l.device_id,
+                fmt(l.stored_energy_kwh, 2),
+                fmt(l.cost_basis_eur_per_kwh, 4),
+                fmt(l.capacity_kwh, 2),
+            ]));
+
+            buildPlanChart(plan);
+        }
+
+        refresh().catch(console.error);
+        setInterval(() => refresh().catch(console.error), 10000);
+    </script>
+</body>
+</html>
+"""
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -518,6 +773,16 @@ class Application:
     def _build_api(self) -> FastAPI:
         """Build the FastAPI application exposing live server state."""
         api = FastAPI(title="Energy Assistant", version="0.1")
+
+        @api.get("/", response_class=HTMLResponse)
+        async def ui_root() -> str:
+            """Built-in live web UI with Plotly charts."""
+            return _web_ui_html()
+
+        @api.get("/ui", response_class=HTMLResponse)
+        async def ui_page() -> str:
+            """Alias for the built-in live web UI."""
+            return _web_ui_html()
 
         @api.get("/health")
         async def health() -> dict:
