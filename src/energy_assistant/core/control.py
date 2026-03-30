@@ -133,6 +133,38 @@ class LiveSituation:
     Defaults to 0.0 (no feed-in tariff / no opportunity cost).
     """
 
+    pv_power_w: float = 0.0
+    """Current PV production in W (positive = generating).
+
+    Used to compute the site-level blended market price.  Defaults to 0.0
+    when no PV device is available.
+    """
+
+    @property
+    def market_price_eur_per_kwh(self) -> float:
+        """Blended price for energy consumed at this site right now (€/kWh).
+
+        Every device at this site draws from the same mix of PV and grid:
+
+            total_w     = pv_power_w + max(0, grid_power_w)
+            pv_fraction = pv_power_w / total_w   (clamped to [0, 1])
+            market_price = pv_fraction × feed_in + (1 − pv_fraction) × tibber
+
+        Examples
+        --------
+        * PV 750W, grid 250W (import): total=1000W, pv_frac=0.75 → 75 % feed-in
+        * PV 500W, grid −100W (export): total=500W, pv_frac=1.0 → 100 % feed-in
+        * PV 0W, grid 1000W: total=1000W, pv_frac=0.0 → 100 % tibber
+        """
+        total_w = self.pv_power_w + max(0.0, self.grid_power_w)
+        if total_w <= 0.0:
+            return self.current_price_eur_per_kwh
+        pv_fraction = min(1.0, self.pv_power_w / total_w)
+        return (
+            pv_fraction * self.pv_opportunity_price_eur_per_kwh
+            + (1.0 - pv_fraction) * self.current_price_eur_per_kwh
+        )
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # ControlContributor protocol
@@ -186,13 +218,11 @@ class ControlContributor(Protocol):
     def charge_price_eur_per_kwh(self, intent: ControlIntent | None, live: LiveSituation) -> float:
         """Effective marginal cost (€/kWh) for energy charged this tick.
 
-        The default implementation returns the grid import price for
-        ``grid_fill`` intents and the PV opportunity price for everything
-        else.  Override to use a device-specific tariff.
+        The default implementation returns the site-level blended market price
+        (PV fraction × feed-in + grid fraction × import).  Override to use a
+        device-specific tariff (e.g. a heat-pump with a separate flat rate).
         """
-        if intent is not None and intent.mode == "grid_fill":
-            return live.current_price_eur_per_kwh
-        return live.pv_opportunity_price_eur_per_kwh
+        return live.market_price_eur_per_kwh
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -271,10 +301,20 @@ class StorageControlContributor:
     def charge_price_eur_per_kwh(
         self, intent: ControlIntent | None, live: LiveSituation
     ) -> float:
-        if intent is not None and intent.mode == "grid_fill":
-            return live.current_price_eur_per_kwh
-        # PV overflow or idle — opportunity cost of not exporting
-        return live.pv_opportunity_price_eur_per_kwh
+        """Blended market price (€/kWh) for energy stored this tick.
+
+        Uses ``live.market_price_eur_per_kwh`` — the site-level blend of
+        PV feed-in price and grid import price, weighted by each source's
+        share of total site consumption:
+
+            total_w     = pv_power_w + max(0, grid_power_w)
+            pv_fraction = pv_power_w / total_w
+            price       = pv_fraction × feed_in + (1 − pv_fraction) × tibber
+
+        Example: PV=750W, grid=250W → 75% feed-in, 25% Tibber.  This is the
+        same price that applies to any other load on the site at this moment.
+        """
+        return live.market_price_eur_per_kwh
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -439,10 +479,16 @@ class ControlLoop:
                 actual_kwh = state.power_w / 1000.0 * live.dt_hours
                 if actual_kwh > 0.0:
                     price = contributor.charge_price_eur_per_kwh(intent, live)
+                    eta_c = (
+                        contributor._constraints.charge_efficiency
+                        if isinstance(contributor, StorageControlContributor)
+                        else 0.95
+                    )
                     self._ledger.record_charge(
                         contributor.device_id,
                         delta_kwh=actual_kwh,
                         price_eur_per_kwh=price,
+                        charge_efficiency=eta_c,
                     )
                 elif actual_kwh < 0.0:
                     self._ledger.record_discharge(
