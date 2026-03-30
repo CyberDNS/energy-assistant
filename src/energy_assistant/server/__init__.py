@@ -156,6 +156,7 @@ def _web_ui_html() -> str:
         <div class=\"card\"><div class=\"k\">PV</div><div class=\"v\" id=\"kPv\">-</div></div>
         <div class=\"card\"><div class=\"k\">Import Price</div><div class=\"v\" id=\"kPrice\">-</div></div>
         <div class=\"card\"><div class=\"k\">Export Price</div><div class=\"v\" id=\"kExport\">-</div></div>
+        <div class=\"card\" title=\"Blended site price: PV share x feed-in + grid share x import\"><div class=\"k\">Market Price</div><div class=\"v\" id=\"kMarket\">-</div><div class=\"k\" id=\"kMarketBreak\" style=\"font-size:.72rem;margin-top:2px\"></div></div>
         <div class=\"card\"><div class=\"k\">Dry Run</div><div class=\"v\" id=\"kDryRun\">-</div></div>
         <div id=\"batteryKpis\"></div>
     </div>
@@ -344,9 +345,20 @@ async function refreshLive() {
 
     const gp = Number(status.grid_power_w || 0);
     setText('kGrid', Math.round(gp) + ' W', gp > 50 ? 'warn' : (gp < -50 ? 'ok' : ''));
-    setText('kPv', pvDev ? (Math.round(-Number(pvDev.power_w || 0)) + ' W') : '-', pvDev && pvDev.power_w < -50 ? 'ok' : '');
+    const pvW = pvDev ? Math.abs(Number(pvDev.power_w || 0)) : 0;
+    setText('kPv', Math.round(pvW) + ' W', pvW > 50 ? 'ok' : '');
     setText('kPrice', fmt(status.current_price_eur_per_kwh, 4) + ' €/kWh');
     setText('kExport', fmt(status.pv_opportunity_price_eur_per_kwh, 4) + ' €/kWh');
+    // Market price: site-level blend of PV feed-in and grid import prices
+    const gridImport = Math.max(0, gp);
+    const totalW = pvW + gridImport;
+    const pvFrac = totalW > 0 ? Math.min(1, pvW / totalW) : 0;
+    const marketPrice = pvFrac * (status.pv_opportunity_price_eur_per_kwh || 0)
+                      + (1 - pvFrac) * (status.current_price_eur_per_kwh || 0);
+    const marketCls = pvFrac > 0.66 ? 'ok' : (pvFrac > 0.33 ? '' : 'warn');
+    setText('kMarket', fmt(marketPrice, 4) + ' €/kWh', marketCls);
+    document.getElementById('kMarketBreak').textContent =
+        Math.round(pvFrac * 100) + '% PV · ' + Math.round((1 - pvFrac) * 100) + '% Grid';
     setText('kDryRun', status.dry_run ? 'YES' : 'NO', status.dry_run ? 'warn' : 'ok');
     document.getElementById('stamp').textContent = 'updated ' + new Date(status.timestamp).toLocaleString();
 
@@ -919,6 +931,10 @@ class Application:
             else (next(iter(self._tariffs.values()), None))
         )
         self._grid_meter_id = self._topology.device_id if self._topology else None
+        self._pv_device_id: str | None = next(
+            (d.device_id for d in self._registry.all() if d.role == DeviceRole.PRODUCER),
+            None,
+        )
         self._pv_opportunity_price = 0.0  # refreshed on first planning cycle
         self._first_poll_done = asyncio.Event()
 
@@ -1093,6 +1109,13 @@ class Application:
             if state is not None and state.power_w is not None:
                 grid_power_w = state.power_w
 
+        # PV production (positive = generating)
+        pv_power_w = 0.0
+        if self._pv_device_id:
+            pv_state = self._registry.latest_state(self._pv_device_id)
+            if pv_state is not None and pv_state.power_w is not None:
+                pv_power_w = abs(pv_state.power_w)
+
         # Current import price from default tariff
         current_price = 0.0
         if self._default_tariff is not None:
@@ -1114,6 +1137,7 @@ class Application:
             device_states=device_states,
             current_price_eur_per_kwh=current_price,
             pv_opportunity_price_eur_per_kwh=self._pv_opportunity_price,
+            pv_power_w=pv_power_w,
         )
 
         self._sync_ledger_stored_energy_from_soc()
