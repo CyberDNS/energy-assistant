@@ -2,7 +2,7 @@
 
 Wires all platform components together and runs three concurrent async loops:
 
-Polling loop (``control_interval_s``, default 30 s)
+Polling loop (``poll_interval_s``, default 30 s)
     Reads current state from every registered device, persists it to the
     SQLite history store, and publishes ``DeviceStateEvent`` on the bus.
     After the very first tick it initialises the ``BatteryCostLedger`` from
@@ -34,13 +34,15 @@ Usage (programmatic)::
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+from collections import defaultdict
 import logging
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 import uvicorn
 
@@ -56,16 +58,37 @@ from ..core.models import (
     ForecastQuantity,
     Measurement,
     StorageConstraints,
+    TariffPoint,
 )
 from ..core.optimizer import OptimizationContext
+from ..core.plugin_registry import BuildContext
 from ..core.registry import DeviceRegistry
 from ..core.tariff import TariffModel
 from ..core.topology import TopologyNode
 from ..loader.device_loader import build, build_all_forecasts, make_build_context
+from ..plugins import registry as plugin_registry
 from ..plugins.milp_highs import MilpHigsOptimizer
 from ..storage.sqlite import SqliteStorageBackend
 
 _log = logging.getLogger(__name__)
+
+
+@dataclasses.dataclass
+class _TariffZone:
+    """Devices assigned to a single tariff zone for market-price computation."""
+
+    tariff_id: str
+    meter_ids: list[str] = dataclasses.field(default_factory=list)
+    """``role=meter`` devices that measure grid import for this circuit."""
+    producer_ids: list[str] = dataclasses.field(default_factory=list)
+    """``role=producer`` (PV) devices physically on this circuit."""
+    storage_ids: list[str] = dataclasses.field(default_factory=list)
+    """``role=storage`` devices (batteries) physically on this circuit."""
+    diff_minuend_id: str | None = None
+    """For differential zones (e.g. heatpump = Z1 − Z2): the Z1 (minuend) device."""
+    diff_subtrahend_id: str | None = None
+    """For differential zones: the Z2 (subtrahend) device whose zone's market price
+    is used for the feedback contribution when Z2 is exporting."""
 
 
 def _web_ui_html() -> str:
@@ -156,7 +179,7 @@ def _web_ui_html() -> str:
         <div class=\"card\"><div class=\"k\">PV</div><div class=\"v\" id=\"kPv\">-</div></div>
         <div class=\"card\"><div class=\"k\">Import Price</div><div class=\"v\" id=\"kPrice\">-</div></div>
         <div class=\"card\"><div class=\"k\">Export Price</div><div class=\"v\" id=\"kExport\">-</div></div>
-        <div class=\"card\" title=\"Blended site price: PV share x feed-in + grid share x import\"><div class=\"k\">Market Price</div><div class=\"v\" id=\"kMarket\">-</div><div class=\"k\" id=\"kMarketBreak\" style=\"font-size:.72rem;margin-top:2px\"></div></div>
+        <div id=\"marketKpis\"></div>
         <div class=\"card\"><div class=\"k\">Dry Run</div><div class=\"v\" id=\"kDryRun\">-</div></div>
         <div id=\"batteryKpis\"></div>
     </div>
@@ -349,16 +372,34 @@ async function refreshLive() {
     setText('kPv', Math.round(pvW) + ' W', pvW > 50 ? 'ok' : '');
     setText('kPrice', fmt(status.current_price_eur_per_kwh, 4) + ' €/kWh');
     setText('kExport', fmt(status.pv_opportunity_price_eur_per_kwh, 4) + ' €/kWh');
-    // Market price: site-level blend of PV feed-in and grid import prices
+    // Source mix fractions (shared across all market price cards)
     const gridImport = Math.max(0, gp);
-    const totalW = pvW + gridImport;
-    const pvFrac = totalW > 0 ? Math.min(1, pvW / totalW) : 0;
-    const marketPrice = pvFrac * (status.pv_opportunity_price_eur_per_kwh || 0)
-                      + (1 - pvFrac) * (status.current_price_eur_per_kwh || 0);
-    const marketCls = pvFrac > 0.66 ? 'ok' : (pvFrac > 0.33 ? '' : 'warn');
-    setText('kMarket', fmt(marketPrice, 4) + ' €/kWh', marketCls);
-    document.getElementById('kMarketBreak').textContent =
-        Math.round(pvFrac * 100) + '% PV · ' + Math.round((1 - pvFrac) * 100) + '% Grid';
+    const ledgerMap = {};
+    for (const l of (status.ledger || [])) ledgerMap[l.device_id] = l.cost_basis_eur_per_kwh || 0;
+    let batW = 0;
+    for (const d of (status.devices || [])) {
+        const pw = Number(d.power_w || 0);
+        if (pw < 0 && ledgerMap[d.device_id] !== undefined) batW += Math.abs(pw);
+    }
+    const totalW = pvW + gridImport + batW;
+    const pvFrac   = totalW > 0 ? Math.min(1, pvW / totalW) : 0;
+    const gridFrac = totalW > 0 ? gridImport / totalW : 0;
+    const batFrac  = totalW > 0 ? batW / totalW : 0;
+    const mixParts = [];
+    if (pvFrac > 0.01)   mixParts.push(Math.round(pvFrac * 100) + '% PV');
+    if (gridFrac > 0.01) mixParts.push(Math.round(gridFrac * 100) + '% Grid');
+    if (batFrac > 0.01)  mixParts.push(Math.round(batFrac * 100) + '% Bat');
+    const mixLabel = mixParts.join(' \u00b7 ') || '\u2014';
+    const mixCls = pvFrac > 0.66 ? 'ok' : (pvFrac > 0.33 ? '' : 'warn');
+    // Market price cards — one per tariff (server already computed the blended price)
+    document.getElementById('marketKpis').innerHTML = Object.entries(status.market_prices || {}).map(([tid, mp]) => {
+        const cap = tid.charAt(0).toUpperCase() + tid.slice(1);
+        return `<div class="card" title="Market price for ${tid} tariff (${mixLabel})">
+            <div class="k">Market (${cap})</div>
+            <div class="v ${mixCls}">${fmt(mp, 4)} \u20ac/kWh</div>
+            <div class="k" style="font-size:.72rem;margin-top:2px">${mixLabel}</div>
+        </div>`;
+    }).join('');
     setText('kDryRun', status.dry_run ? 'YES' : 'NO', status.dry_run ? 'warn' : 'ok');
     document.getElementById('stamp').textContent = 'updated ' + new Date(status.timestamp).toLocaleString();
 
@@ -393,14 +434,59 @@ async function refreshLive() {
                 String(Math.round(Number(sp.setpoint_w || 0)))];
     }));
 
-    // Ledger table
-    tableRows('ledgerTable', (status.ledger || []).map(l => {
-        const stored = Number(l.stored_energy_kwh || 0);
-        const cap    = Number(l.capacity_kwh || 1);
-        const soc    = stored / cap * 100;
-        return [l.device_id, fmt(stored, 2), fmt(soc, 1) + ' %', fmt(cap, 2),
-                fmt(l.cost_basis_eur_per_kwh, 4)];
-    }));
+    // Ledger table + manual basis override controls.
+    // Keep focus stable: while the user edits a basis field, do not rebuild
+    // the ledger table on periodic refresh ticks.
+    const activeEl = document.activeElement;
+    const editingLedgerBasis = Boolean(
+        activeEl && activeEl.classList && activeEl.classList.contains('ledger-basis-input')
+    );
+    if (!editingLedgerBasis) {
+        tableRows('ledgerTable', (status.ledger || []).map(l => {
+            const stored = Number(l.stored_energy_kwh || 0);
+            const cap    = Number(l.capacity_kwh || 1);
+            const soc    = stored / cap * 100;
+            const basis = Number(l.cost_basis_eur_per_kwh || 0);
+            const basisEditor =
+                `<div style="display:flex; gap:6px; align-items:center;">
+                    <input class="ledger-basis-input" type="number" min="0" step="0.0001"
+                           value="${fmt(basis, 4)}" style="width:92px" />
+                    <button class="range-btn ledger-basis-set" data-device="${l.device_id}">Set</button>
+                </div>`;
+            return [l.device_id, fmt(stored, 2), fmt(soc, 1) + ' %', fmt(cap, 2), basisEditor];
+        }));
+
+        document.querySelectorAll('.ledger-basis-set').forEach(btn => {
+            btn.onclick = async () => {
+                const deviceId = btn.dataset.device || '';
+                const wrap = btn.parentElement;
+                const input = wrap ? wrap.querySelector('.ledger-basis-input') : null;
+                const value = Number(input ? input.value : NaN);
+                if (!Number.isFinite(value) || value < 0) {
+                    alert('Please enter a non-negative basis value.');
+                    return;
+                }
+                const oldLabel = btn.textContent;
+                btn.textContent = 'Saving…';
+                btn.disabled = true;
+                try {
+                    const url = `api/ledger/set_basis?device_id=${encodeURIComponent(deviceId)}` +
+                        `&cost_basis_eur_per_kwh=${encodeURIComponent(String(value))}`;
+                    const res = await fetch(url, {method:'POST'});
+                    if (!res.ok) {
+                        const txt = await res.text();
+                        throw new Error(txt || 'request failed');
+                    }
+                    await refreshLive();
+                } catch (err) {
+                    alert('Failed to update ledger basis: ' + (err && err.message ? err.message : err));
+                } finally {
+                    btn.textContent = oldLabel;
+                    btn.disabled = false;
+                }
+            };
+        });
+    }
 }
 
 // ── PLAN tab ──────────────────────────────────────────────────────────────────
@@ -415,8 +501,10 @@ async function refreshPlan() {
     const intents  = plan.intents || [];
     const ts       = fc.timestamps || [];
     const prices   = fc.prices || [];
+    const priceIsEstimated = fc.price_is_estimated || [];
     const epPrices = fc.export_prices || [];
     const pvKw     = fc.pv_kw || [];
+    const pvIsEstimated = fc.pv_is_estimated || [];
     const consKw   = fc.consumption_kw || [];
     const stepH    = (Number(fc.step_minutes) || 60) / 60;
     const stCap    = fc.storage_capacity || {};
@@ -481,6 +569,19 @@ async function refreshPlan() {
     // Convert UTC plan timestamps to local time once (Plotly displays tz-naive strings as local)
     const tsLocal = localTs(ts);
 
+    function splitEstimated(values, flags) {
+        const actual = [];
+        const estimated = [];
+        for (let i = 0; i < values.length; i++) {
+            const est = Boolean(flags[i]);
+            actual.push(est ? null : values[i]);
+            estimated.push(est ? values[i] : null);
+        }
+        return {actual, estimated};
+    }
+    const pvSplit = splitEstimated(pvKw, pvIsEstimated);
+    const priceSplit = splitEstimated(prices, priceIsEstimated);
+
     // ── Panel 1: Energy flow stacked bars ─────────────────────────────────────
     const flowTraces = [
         {name:'PV',       type:'bar', x:tsLocal, y:pvKw,           marker:{color:'#f0c040'}, hovertemplate:'%{y:.2f} kW'},
@@ -496,7 +597,9 @@ async function refreshPlan() {
 
     // ── Panel 2: Forecast ─────────────────────────────────────────────────────
     const fcTraces = [
-        {name:'PV forecast',   mode:'lines', x:tsLocal, y:pvKw,   line:{color:'#f0c040'}, hovertemplate:'%{y:.2f} kW'},
+        {name:'PV forecast',   mode:'lines', x:tsLocal, y:pvSplit.actual,   line:{color:'#f0c040'}, hovertemplate:'%{y:.2f} kW'},
+        {name:'PV forecast (estimated)', mode:'lines', x:tsLocal, y:pvSplit.estimated,
+            line:{color:'#f0c040', dash:'dot'}, hovertemplate:'%{y:.2f} kW (estimated)'},
         {name:'Consumption fc',mode:'lines', x:tsLocal, y:consKw, line:{color:'#6b7bb5'}, hovertemplate:'%{y:.2f} kW'},
     ];
     Plotly.newPlot('chartForecast', fcTraces,
@@ -504,11 +607,19 @@ async function refreshPlan() {
 
     // ── Panel 3: Prices ───────────────────────────────────────────────────────
     const priceTraces = [
-        {name:'Import price', mode:'lines', x:tsLocal, y:prices,   line:{color:'#e07070', dash:'solid'}},
+        {name:'Import price', mode:'lines', x:tsLocal, y:priceSplit.actual,   line:{color:'#e07070', dash:'solid'}},
+        {name:'Import price (estimated)', mode:'lines', x:tsLocal, y:priceSplit.estimated,
+            line:{color:'#e07070', dash:'dot'}},
         {name:'Export price', mode:'lines', x:tsLocal, y:epPrices, line:{color:'#4caf7d', dash:'dot'}},
     ];
     Plotly.newPlot('chartPrices', priceTraces,
         mkLayout({yaxis:{title:'€/kWh'}, xaxis:{}}), PLT_OPT);
+
+    const estCount = priceIsEstimated.filter(Boolean).length + pvIsEstimated.filter(Boolean).length;
+    if (estCount > 0) {
+        document.getElementById('planMeta').textContent +=
+            `  ·  dotted segments are repeated estimates (${estCount} points)`;
+    }
 
     // ── Panel 4: Per-step saving ──────────────────────────────────────────────
     const savingTraces = [{
@@ -677,7 +788,7 @@ refreshLive().catch(console.error);
 setInterval(() => {
     const tab = activeTab();
     if (tab === 'live') refreshLive().catch(console.error);
-}, 10000);
+}, 3000);
 setInterval(() => {
     const tab = activeTab();
     if (tab === 'plan') refreshPlan().catch(console.error);
@@ -742,28 +853,188 @@ def _infer_effective_horizon(
     step_minutes: int,
     cap: timedelta,
 ) -> timedelta:
-    """Cap the planning horizon at the latest timestamp in live data forecasts.
+    """Cap the planning horizon at the shortest available live data forecast.
 
     Only PRICE and PV_GENERATION forecasts are used as limits — CONSUMPTION
     is typically a static profile that extends indefinitely, so including it
-    would not reflect actual data availability.  This prevents the optimizer
-    from seeing a price array where the tail is padded with the last-known
-    value (nearest-neighbour artefact), which corrupts the p70 terminal-value
-    calculation.
+    would not reflect actual data availability.
+
+    The horizon is clipped to the **minimum** last-timestamp across all
+    available data sources.  If Tibber only has today's prices (e.g. tomorrow's
+    not yet published), the optimizer stops there rather than running into a
+    zero-padded tail that makes grid electricity appear free.
     """
     now = datetime.now(timezone.utc)
-    latest = now
+    limits: list[datetime] = []
     for quantity in (ForecastQuantity.PRICE, ForecastQuantity.PV_GENERATION):
         pts = forecasts.get(quantity, [])
         if pts:
-            candidate = max(p.timestamp for p in pts)
-            if candidate > latest:
-                latest = candidate
+            limits.append(max(p.timestamp for p in pts))
+    latest = min(limits) if limits else now + cap
     raw_delta = latest - now
     capped = min(raw_delta, cap)
     step_td = timedelta(minutes=step_minutes)
     n_steps = max(1, int(capped.total_seconds() / step_td.total_seconds()))
     return step_td * n_steps
+
+
+def _extend_forecast_points_with_daily_repeat(
+    points: list[ForecastPoint],
+    horizon: timedelta,
+) -> tuple[list[ForecastPoint], set[datetime]]:
+    """Extend a forecast by repeating its latest day profile.
+
+    Extension is capped to the smaller of:
+    - one native prediction span (derived from source data), and
+    - 48 hours.
+    """
+    if not points:
+        return [], set()
+
+    pts = sorted(points, key=lambda p: p.timestamp)
+    if len(pts) < 2:
+        return pts, set()
+
+    diffs = [
+        b.timestamp - a.timestamp
+        for a, b in zip(pts, pts[1:])
+        if b.timestamp > a.timestamp
+    ]
+    if not diffs:
+        return pts, set()
+    step = min(diffs)
+    if step.total_seconds() <= 0:
+        return pts, set()
+
+    native_span = max(step, (pts[-1].timestamp - pts[0].timestamp) + step)
+    extension_cap = min(native_span, timedelta(hours=48))
+    if extension_cap <= timedelta(0):
+        return pts, set()
+
+    now = datetime.now(timezone.utc)
+    target_end = min(now + horizon, pts[-1].timestamp + extension_cap)
+    if pts[-1].timestamp >= target_end:
+        return pts, set()
+
+    tz = pts[-1].timestamp.tzinfo or timezone.utc
+    by_day: dict[date, list[ForecastPoint]] = defaultdict(list)
+    for p in pts:
+        by_day[p.timestamp.astimezone(tz).date()].append(p)
+    template_day = max(by_day.items(), key=lambda kv: (len(kv[1]), kv[0]))[0]
+    template = by_day.get(template_day, [])
+    template = sorted(template, key=lambda p: p.timestamp)
+    if not template:
+        return pts, set()
+
+    def _tod_seconds(ts: datetime) -> int:
+        lt = ts.astimezone(tz)
+        return lt.hour * 3600 + lt.minute * 60 + lt.second
+
+    template_by_tod = sorted(
+        [(_tod_seconds(p.timestamp), float(p.value)) for p in template],
+        key=lambda x: x[0],
+    )
+    first_sec = template_by_tod[0][0]
+    last_sec = template_by_tod[-1][0]
+
+    def _pv_value_for_tod(sec_of_day: int) -> float:
+        # PV should be 0 outside the observed daylight window.
+        if sec_of_day < first_sec or sec_of_day > last_sec:
+            return 0.0
+        prev_val = 0.0
+        for sec, val in template_by_tod:
+            if sec > sec_of_day:
+                break
+            prev_val = val
+        return prev_val
+
+    out = list(pts)
+    estimated_ts: set[datetime] = set()
+    cursor = pts[-1].timestamp + step
+    while cursor <= target_end:
+        sec = _tod_seconds(cursor)
+        out.append(ForecastPoint(timestamp=cursor, value=_pv_value_for_tod(sec)))
+        estimated_ts.add(cursor)
+        cursor += step
+
+    return out, estimated_ts
+
+
+def _extend_tariff_schedule_with_daily_repeat(
+    schedule: list[TariffPoint],
+    horizon: timedelta,
+) -> tuple[list[TariffPoint], set[datetime]]:
+    """Extend a tariff schedule by repeating its latest day profile.
+
+    Extension is capped to the smaller of:
+    - one native prediction span (derived from source data), and
+    - 48 hours.
+    """
+    if not schedule:
+        return [], set()
+
+    pts = sorted(schedule, key=lambda p: p.timestamp)
+    if len(pts) < 2:
+        return pts, set()
+
+    diffs = [
+        b.timestamp - a.timestamp
+        for a, b in zip(pts, pts[1:])
+        if b.timestamp > a.timestamp
+    ]
+    if not diffs:
+        return pts, set()
+    step = min(diffs)
+    if step.total_seconds() <= 0:
+        return pts, set()
+
+    native_span = max(step, (pts[-1].timestamp - pts[0].timestamp) + step)
+    extension_cap = min(native_span, timedelta(hours=48))
+    if extension_cap <= timedelta(0):
+        return pts, set()
+
+    now = datetime.now(timezone.utc)
+    target_end = min(now + horizon, pts[-1].timestamp + extension_cap)
+    if pts[-1].timestamp >= target_end:
+        return pts, set()
+
+    tz = pts[-1].timestamp.tzinfo or timezone.utc
+    by_day: dict[date, list[TariffPoint]] = defaultdict(list)
+    for p in pts:
+        by_day[p.timestamp.astimezone(tz).date()].append(p)
+    template_day = max(by_day.items(), key=lambda kv: (len(kv[1]), kv[0]))[0]
+    template = by_day.get(template_day, [])
+    template = sorted(template, key=lambda p: p.timestamp)
+    if not template:
+        return pts, set()
+
+    def _tod_seconds(ts: datetime) -> int:
+        lt = ts.astimezone(tz)
+        return lt.hour * 3600 + lt.minute * 60 + lt.second
+
+    template_by_tod = sorted(
+        [(_tod_seconds(p.timestamp), float(p.price_eur_per_kwh)) for p in template],
+        key=lambda x: x[0],
+    )
+
+    def _nearest_value_for_tod(sec_of_day: int) -> float:
+        best_sec, best_val = min(
+            template_by_tod,
+            key=lambda it: min(abs(it[0] - sec_of_day), 86400 - abs(it[0] - sec_of_day)),
+        )
+        _ = best_sec
+        return best_val
+
+    out = list(pts)
+    estimated_ts: set[datetime] = set()
+    cursor = pts[-1].timestamp + step
+    while cursor <= target_end:
+        sec = _tod_seconds(cursor)
+        out.append(TariffPoint(timestamp=cursor, price_eur_per_kwh=_nearest_value_for_tod(sec)))
+        estimated_ts.add(cursor)
+        cursor += step
+
+    return out, estimated_ts
 
 
 async def _collect_forecasts(
@@ -848,6 +1119,7 @@ class Application:
 
         # Set by start()
         self._cfg: AppConfig
+        self._build_ctx: BuildContext
         self._registry: DeviceRegistry
         self._tariffs: dict[str, TariffModel]
         self._topology: TopologyNode | None
@@ -863,7 +1135,10 @@ class Application:
         self._pv_opportunity_price: float
         self._horizon: timedelta
         self._last_forecast_pts: dict[ForecastQuantity, list[ForecastPoint]] = {}
+        self._last_price_estimated_by_ts: dict[datetime, bool] = {}
+        self._last_pv_estimated_by_ts: dict[datetime, bool] = {}
         self._plan_interval_s: float
+        self._poll_interval_s: float
         self._control_interval_s: float
         self._dry_run: bool
         self._first_poll_done: asyncio.Event
@@ -884,12 +1159,14 @@ class Application:
         ctl = self._cfg.controller
         self._plan_interval_s = float(ctl.get("plan_interval_s", 3600))
         self._control_interval_s = float(ctl.get("control_interval_s", 30))
+        self._poll_interval_s = float(ctl.get("poll_interval_s", self._control_interval_s))
         self._dry_run = bool(ctl.get("dry_run", False))
         horizon_h = int(opt.get("horizon_hours", 24))
         self._horizon = timedelta(hours=horizon_h)
 
         # 2 — Build devices / tariffs / topology (shared connection pool)
         ctx = make_build_context(self._cfg)
+        self._build_ctx = ctx
         self._registry, self._tariffs, self._topology = build(self._cfg, ctx=ctx)
         _log.info("Loaded %d devices, %d tariffs", len(self._registry), len(self._tariffs))
 
@@ -936,6 +1213,12 @@ class Application:
             None,
         )
         self._pv_opportunity_price = 0.0  # refreshed on first planning cycle
+        self._tariff_zones = self._build_tariff_zones()
+        _log.info(
+            "Tariff zones: %s",
+            {zid: (len(z.meter_ids), len(z.producer_ids), len(z.storage_ids))
+             for zid, z in self._tariff_zones.items()},
+        )
         self._first_poll_done = asyncio.Event()
 
         if self._dry_run:
@@ -1010,7 +1293,7 @@ class Application:
                 first_tick = False
                 self._first_poll_done.set()  # unblock planning and control loops
 
-            await asyncio.sleep(self._control_interval_s)
+            await asyncio.sleep(self._poll_interval_s)
 
     # ------------------------------------------------------------------
     # Planning loop
@@ -1037,7 +1320,15 @@ class Application:
 
         forecasts = await _collect_forecasts(self._forecast_providers, self._horizon)
 
-        # Inject tariff prices if no ForecastProvider produces PRICE data.
+        # Build a tariff-weighted import-price curve from per-consumer load
+        # forecasts. This keeps MILP discharge economics aligned with mixed
+        # household/heatpump demand instead of a single tariff price.
+        weighted_prices, price_estimated_by_ts = await self._build_tariff_weighted_price_forecast()
+        if weighted_prices:
+            forecasts[ForecastQuantity.PRICE] = weighted_prices
+        self._last_price_estimated_by_ts = price_estimated_by_ts
+
+        # Fallback: inject a single tariff curve if we still have no PRICE data.
         # The MILP fetches prices from tariffs internally, but the cached forecasts
         # dict is used by /api/forecast for the UI — it needs prices too.
         if not forecasts.get(ForecastQuantity.PRICE):
@@ -1045,13 +1336,22 @@ class Application:
                 try:
                     sched = await tariff.price_schedule(self._horizon)
                     if sched and any(tp.price_eur_per_kwh > 0.001 for tp in sched):
+                        ext, est_ts = _extend_tariff_schedule_with_daily_repeat(sched, self._horizon)
                         forecasts[ForecastQuantity.PRICE] = [
                             ForecastPoint(timestamp=tp.timestamp, value=tp.price_eur_per_kwh)
-                            for tp in sched
+                            for tp in ext
                         ]
+                        self._last_price_estimated_by_ts = {ts: True for ts in est_ts}
                         break
                 except Exception:  # noqa: BLE001
                     pass
+
+        # Extend PV generation forecast with capped daily-repeat extrapolation.
+        pv_points = forecasts.get(ForecastQuantity.PV_GENERATION, [])
+        pv_ext, pv_est_ts = _extend_forecast_points_with_daily_repeat(pv_points, self._horizon)
+        if pv_ext:
+            forecasts[ForecastQuantity.PV_GENERATION] = pv_ext
+        self._last_pv_estimated_by_ts = {ts: True for ts in pv_est_ts}
 
         self._last_forecast_pts = forecasts  # cache for /api/forecast
 
@@ -1138,6 +1438,8 @@ class Application:
             current_price_eur_per_kwh=current_price,
             pv_opportunity_price_eur_per_kwh=self._pv_opportunity_price,
             pv_power_w=pv_power_w,
+            storage_cost_bases=self._ledger.all_cost_bases(),
+            default_zone_grid_power_w=self._default_zone_grid_power_w(device_states),
         )
 
         self._sync_ledger_stored_energy_from_soc()
@@ -1255,6 +1557,8 @@ class Application:
                 if (st := self._registry.latest_state(d.device_id)) is not None
             }
 
+            tariff_prices_status = await self._fetch_tariff_prices(now)
+
             live = LiveSituation(
                 timestamp=now,
                 grid_power_w=grid_power_w,
@@ -1262,6 +1566,15 @@ class Application:
                 device_states=device_states_map,
                 current_price_eur_per_kwh=current_price,
                 pv_opportunity_price_eur_per_kwh=self._pv_opportunity_price,
+                pv_power_w=(
+                    abs(ps.power_w)
+                    if self._pv_device_id
+                    and (ps := self._registry.latest_state(self._pv_device_id)) is not None
+                    and ps.power_w is not None
+                    else 0.0
+                ),
+                storage_cost_bases=self._ledger.all_cost_bases(),
+                default_zone_grid_power_w=self._default_zone_grid_power_w(device_states_map),
             )
 
             devices_payload = []
@@ -1299,6 +1612,7 @@ class Application:
                     }
                     for sc in self._storage_constraints
                 ],
+                "market_prices": self._compute_zone_market_prices(tariff_prices_status, device_states_map),
             }
 
         @api.get("/api/plan")
@@ -1340,6 +1654,48 @@ class Application:
                 for sc in self._storage_constraints
             ]
 
+        @api.post("/api/ledger/set_basis")
+        async def set_ledger_basis(
+            device_id: str,
+            cost_basis_eur_per_kwh: float,
+        ) -> dict:
+            """Override battery ledger basis from the UI and persist it."""
+            if cost_basis_eur_per_kwh < 0.0:
+                raise HTTPException(status_code=400, detail="cost_basis_eur_per_kwh must be >= 0")
+
+            sc = next((x for x in self._storage_constraints if x.device_id == device_id), None)
+            if sc is None:
+                raise HTTPException(status_code=404, detail=f"unknown storage device: {device_id}")
+
+            # Keep stored energy aligned with live SoC before overriding basis.
+            self._sync_ledger_stored_energy_from_soc()
+            stored = float(self._ledger.stored_energy(device_id) or 0.0)
+            self._ledger.initialise(
+                device_id,
+                stored_energy_kwh=stored,
+                cost_basis_eur_per_kwh=float(cost_basis_eur_per_kwh),
+            )
+
+            now = datetime.now(timezone.utc)
+            await self._storage.save_ledger_state(
+                device_id,
+                cost_basis=float(cost_basis_eur_per_kwh),
+                stored_energy_kwh=stored,
+            )
+            await self._storage.append_ledger_history(
+                device_id,
+                cost_basis=float(cost_basis_eur_per_kwh),
+                stored_energy_kwh=stored,
+                timestamp=now,
+            )
+
+            return {
+                "device_id": device_id,
+                "cost_basis_eur_per_kwh": float(cost_basis_eur_per_kwh),
+                "stored_energy_kwh": stored,
+                "updated_at": now.isoformat(),
+            }
+
         @api.get("/api/forecast")
         async def get_forecast() -> dict:
             """Last forecast snapshot aligned to the active plan timesteps."""
@@ -1363,6 +1719,34 @@ class Application:
                 best = min(pts, key=lambda p: abs((p.timestamp - ts).total_seconds()))
                 return float(best.value)
 
+            def ff_value(pts: list[ForecastPoint], ts: datetime) -> float:
+                """Forward-fill value at *ts* (piecewise-constant, left-hold).
+
+                For PV this avoids nearest-neighbour artefacts around night gaps
+                (e.g. midnight accidentally snapping to sunrise values).
+                """
+                if not pts:
+                    return 0.0
+                if ts < pts[0].timestamp:
+                    return 0.0
+                prev = pts[0]
+                for p in pts:
+                    if p.timestamp > ts:
+                        break
+                    prev = p
+                return float(prev.value)
+
+            def nn_flag(flags_by_ts: dict[datetime, bool], ts: datetime) -> bool:
+                """Nearest-timestamp mapping for estimated flags.
+
+                Plan timestamps are often 15-min while source schedules may be
+                hourly, so exact dict lookup can miss flags and hide dashed lines.
+                """
+                if not flags_by_ts:
+                    return False
+                nearest_ts = min(flags_by_ts.keys(), key=lambda t: abs((t - ts).total_seconds()))
+                return bool(flags_by_ts.get(nearest_ts, False))
+
             # Consumption: multiple providers produce duplicate timestamps — sum them.
             # Strategy: group all raw points by their original timestamp, sum across
             # providers, then nearest-neighbour interpolate onto plan timestamps.
@@ -1383,7 +1767,6 @@ class Application:
             ep_pts: list[ForecastPoint] = []
             for tariff in self._tariffs.values():
                 try:
-                    from ..core.models import TariffPoint
                     sched: list[TariffPoint] = await tariff.export_price_schedule(self._horizon)
                     if sched and any(tp.price_eur_per_kwh > 0.001 for tp in sched):
                         ep_pts = sorted(
@@ -1403,8 +1786,10 @@ class Application:
             return {
                 "timestamps":    [t.isoformat() for t in timestamps],
                 "prices":        [nn_value(pts_price, t) for t in timestamps],
+                "price_is_estimated": [nn_flag(self._last_price_estimated_by_ts, t) for t in timestamps],
                 "export_prices": [ep_value(t) for t in timestamps],
-                "pv_kw":         [nn_value(pts_pv,    t) for t in timestamps],
+                "pv_kw":         [ff_value(pts_pv, t) for t in timestamps],
+                "pv_is_estimated": [nn_flag(self._last_pv_estimated_by_ts, t) for t in timestamps],
                 "consumption_kw": [nn_value(cons_pts_summed, t) for t in timestamps],
                 "step_minutes":  self._optimizer._step_min,
                 "storage_capacity": {
@@ -1579,3 +1964,440 @@ class Application:
                 continue
             stored_kwh = sc.capacity_kwh * float(state.soc_pct) / 100.0
             self._ledger.set_stored_energy(sc.device_id, stored_kwh)
+
+    # ------------------------------------------------------------------
+    # Tariff-zone helpers
+    # ------------------------------------------------------------------
+
+    def _build_tariff_zones(self) -> "dict[str, _TariffZone]":
+        """Build per-zone circuit maps driven by the topology tree.
+
+        The topology is the authoritative source for zone meters: only
+        METER-role devices that appear as *non-root* topology nodes become
+        zone meters.  Their subtrees define which PRODUCER and STORAGE
+        devices belong to that zone.
+
+        Any PRODUCER or STORAGE device that does not appear in the topology
+        falls back to its ``tariff`` config key (or the site-wide default
+        tariff) so that devices wired outside the explicitly modelled tree
+        are still attributed correctly.
+
+        The topology root (Z1) is excluded from zone building — it is the
+        site-level measurement point, not a price zone.
+        """
+        default_tariff = self._cfg.default_tariff_id or ""
+        zones: dict[str, _TariffZone] = {}
+        claimed: set[str] = set()
+
+        if self._topology:
+            # Exclude root from zone building (Z1 = site meter, not a price zone)
+            claimed.add(self._topology.device_id)
+            for child_node in self._topology.children:
+                self._collect_zone_from_node(child_node, zones, claimed, default_tariff)
+
+        # Fallback: PRODUCER/STORAGE devices not captured by topology subtrees
+        for device in self._registry.all():
+            if device.device_id in claimed:
+                continue
+            dev_cfg = self._cfg.devices.get(device.device_id, {})
+            tariff_id = dev_cfg.get("tariff") or default_tariff
+            if not tariff_id:
+                continue
+            zone = zones.setdefault(tariff_id, _TariffZone(tariff_id))
+            if device.role == DeviceRole.PRODUCER:
+                zone.producer_ids.append(device.device_id)
+            elif device.role == DeviceRole.STORAGE:
+                zone.storage_ids.append(device.device_id)
+
+        # Differential consumers: heatpump = Z1 − Z2.
+        # Build a zone that knows its minuend (Z1) and subtrahend (Z2) so
+        # _compute_zone_market_prices can blend the flat grid rate with any
+        # Z2 feedback (household PV/battery surplus flowing into heatpump).
+        for device in self._registry.all():
+            if device.role != DeviceRole.CONSUMER:
+                continue
+            dev_cfg = self._cfg.devices.get(device.device_id, {})
+            if dev_cfg.get("type") != "differential":
+                continue
+            tariff_id = dev_cfg.get("tariff") or default_tariff
+            if not tariff_id:
+                continue
+            minuend_id = dev_cfg.get("minuend")
+            subtrahend_id = dev_cfg.get("subtrahend")
+            if not minuend_id or not subtrahend_id:
+                continue
+            zone = zones.setdefault(tariff_id, _TariffZone(tariff_id))
+            zone.diff_minuend_id = minuend_id
+            zone.diff_subtrahend_id = subtrahend_id
+
+        return zones
+
+    def _collect_zone_from_node(
+        self,
+        node: TopologyNode,
+        zones: "dict[str, _TariffZone]",
+        claimed: "set[str]",
+        default_tariff: str,
+    ) -> None:
+        """Recursively walk a topology sub-tree and assign devices to zones.
+
+        A METER-role node defines the zone: it becomes that zone's grid
+        reference and owns all PRODUCER/STORAGE devices in its subtree.
+        A non-METER node (e.g. a derived consumer) is skipped but its
+        children are still traversed so nested sub-circuits are found.
+        """
+        device = self._registry.get(node.device_id)
+        if device is None:
+            for child in node.children:
+                self._collect_zone_from_node(child, zones, claimed, default_tariff)
+            return
+
+        claimed.add(node.device_id)
+
+        if device.role == DeviceRole.METER:
+            dev_cfg = self._cfg.devices.get(device.device_id, {})
+            tariff_id = dev_cfg.get("tariff") or default_tariff
+            if tariff_id:
+                zone = zones.setdefault(tariff_id, _TariffZone(tariff_id))
+                zone.meter_ids.append(device.device_id)
+                for child in node.children:
+                    self._collect_subtree_for_zone(child, zone, claimed)
+        else:
+            # Non-meter node (consumer, etc.) — recurse for nested sub-zones
+            for child in node.children:
+                self._collect_zone_from_node(child, zones, claimed, default_tariff)
+
+    def _collect_subtree_for_zone(
+        self,
+        node: TopologyNode,
+        zone: "_TariffZone",
+        claimed: "set[str]",
+    ) -> None:
+        """Add all PRODUCER/STORAGE devices in *node*'s subtree to *zone*.
+
+        Stops recursing into nested METER nodes — those define their own zones.
+        """
+        device = self._registry.get(node.device_id)
+        claimed.add(node.device_id)
+        if device is not None:
+            if device.role == DeviceRole.PRODUCER:
+                zone.producer_ids.append(device.device_id)
+            elif device.role == DeviceRole.STORAGE:
+                zone.storage_ids.append(device.device_id)
+            elif device.role == DeviceRole.METER:
+                # Nested meter — will be its own zone; don't claim for parent
+                claimed.discard(node.device_id)
+                return
+        for child in node.children:
+            self._collect_subtree_for_zone(child, zone, claimed)
+
+    def _compute_zone_market_prices(
+        self,
+        tariff_prices: dict[str, float],
+        device_states: "dict[str, Any]",
+    ) -> dict[str, float]:
+        """Compute blended market price per tariff zone (€/kWh).
+
+        Two-pass approach:
+
+        **Pass 1 — direct zones** (own meter + local PV + batteries):
+        Each zone uses only its own meter reading (Z2), its own PV, and
+        its own batteries to compute a blended price.
+
+        **Pass 2 — differential zones** (e.g. heatpump = Z1 − Z2):
+        The zone has no local renewables but may receive surplus from a
+        direct zone when that zone's meter is exporting (Z2 < 0 → feedback
+        into the heatpump circuit).  The blended price is:
+
+        .. code::
+
+            hp_power = Z1_power - Z2_power   (total heatpump load)
+            z2_feedback = max(0, -Z2_power)  (household surplus flowing in)
+            z1_grid     = hp_power - z2_feedback
+
+            price = (z1_grid / hp_power) × flat_rate
+                  + (z2_feedback / hp_power) × household_market_price
+        """
+        result: dict[str, float] = {}
+        cost_bases = self._ledger.all_cost_bases()
+
+        # ── Pass 1: direct zones ──────────────────────────────────────────────
+        for tariff_id, import_price in tariff_prices.items():
+            if import_price <= 0.0:
+                continue
+            zone = self._tariff_zones.get(tariff_id)
+
+            # No zone object (or zone with no local renewables/storage) →
+            # may be a pure differential zone, handled in pass 2.
+            if zone is None:
+                continue
+            if zone.diff_minuend_id is not None and not zone.meter_ids:
+                # Purely differential — skip to pass 2
+                continue
+
+            if not zone.producer_ids and not zone.storage_ids:
+                # Direct zone but no renewables → always 100 % grid rate
+                result[tariff_id] = import_price
+                continue
+
+            # Clamped grid import for this zone's sub-meter
+            grid_w = max(0.0, sum(
+                (s.power_w or 0.0)
+                for did in zone.meter_ids
+                if (s := device_states.get(did)) is not None and s.power_w is not None
+            ))
+
+            pv_w = sum(
+                abs(s.power_w)
+                for did in zone.producer_ids
+                if (s := device_states.get(did)) is not None and s.power_w is not None
+            )
+
+            bat_w = 0.0
+            bat_cost = 0.0
+            for did in zone.storage_ids:
+                s = device_states.get(did)
+                if s is not None and s.power_w is not None and s.power_w < 0.0:
+                    dw = abs(s.power_w)
+                    bat_w += dw
+                    bat_cost += dw * cost_bases.get(did, 0.0)
+
+            total_w = pv_w + grid_w + bat_w
+            if total_w <= 0.0:
+                result[tariff_id] = import_price
+                continue
+
+            bat_basis = bat_cost / bat_w if bat_w > 0.0 else 0.0
+            result[tariff_id] = (
+                (pv_w  / total_w) * self._pv_opportunity_price
+                + (grid_w / total_w) * import_price
+                + (bat_w  / total_w) * bat_basis
+            )
+
+        # ── Pass 2: differential zones ────────────────────────────────────────
+        for tariff_id, import_price in tariff_prices.items():
+            if import_price <= 0.0 or tariff_id in result:
+                continue
+            zone = self._tariff_zones.get(tariff_id)
+            if zone is None or zone.diff_minuend_id is None:
+                # No zone or not a differential zone → flat rate
+                result[tariff_id] = import_price
+                continue
+
+            minuend_state = device_states.get(zone.diff_minuend_id)
+            subtrahend_state = device_states.get(zone.diff_subtrahend_id) if zone.diff_subtrahend_id else None
+
+            z1_w = (minuend_state.power_w or 0.0) if minuend_state else 0.0
+            z2_w = (subtrahend_state.power_w or 0.0) if subtrahend_state else 0.0
+
+            # Differential load (e.g. heatpump = Z1 - Z2), clamped to ≥ 0
+            diff_w = max(0.0, z1_w - z2_w)
+            if diff_w <= 0.0:
+                result[tariff_id] = import_price
+                continue
+
+            # Z2 exporting (negative) → that surplus flows into this circuit
+            z2_feedback_w = max(0.0, -z2_w)
+            # Remainder is served by direct grid via Z1
+            z1_grid_w = max(0.0, diff_w - z2_feedback_w)
+
+            if z2_feedback_w > 0.0 and zone.diff_subtrahend_id:
+                # The exported energy came from PV / batteries — NOT from the grid.
+                # Compute the actual source cost of Z2's local generation, ignoring
+                # the household import-tariff rate entirely.
+                subtrahend_zone = next(
+                    (z for z in self._tariff_zones.values()
+                     if zone.diff_subtrahend_id in z.meter_ids),
+                    None,
+                )
+                if subtrahend_zone is not None:
+                    sz_pv_w = sum(
+                        abs(s.power_w)
+                        for did in subtrahend_zone.producer_ids
+                        if (s := device_states.get(did)) is not None and s.power_w is not None
+                    )
+                    sz_bat_w = 0.0
+                    sz_bat_cost = 0.0
+                    for did in subtrahend_zone.storage_ids:
+                        s = device_states.get(did)
+                        if s is not None and s.power_w is not None and s.power_w < 0.0:
+                            dw = abs(s.power_w)
+                            sz_bat_w += dw
+                            sz_bat_cost += dw * cost_bases.get(did, 0.0)
+                    sz_source_w = sz_pv_w + sz_bat_w
+                    if sz_source_w > 0.0:
+                        sz_bat_basis = sz_bat_cost / sz_bat_w if sz_bat_w > 0.0 else 0.0
+                        feedback_price = (
+                            (sz_pv_w  / sz_source_w) * self._pv_opportunity_price
+                            + (sz_bat_w / sz_source_w) * sz_bat_basis
+                        )
+                    else:
+                        feedback_price = self._pv_opportunity_price
+                else:
+                    feedback_price = self._pv_opportunity_price
+            else:
+                feedback_price = import_price
+
+            result[tariff_id] = (
+                (z1_grid_w     / diff_w) * import_price
+                + (z2_feedback_w / diff_w) * feedback_price
+            )
+
+        return result
+
+    def _default_zone_grid_power_w(self, device_states: "dict[str, Any]") -> float | None:
+        """Return grid import power (W) for the default tariff zone's sub-meter.
+
+        In Messkonzept 8 this is the household meter (Z2, Tibber), which
+        measures only the household circuit — not the heatpump circuit.
+        Returns ``None`` when the default tariff zone has no meter devices.
+        """
+        default_tariff = self._cfg.default_tariff_id or ""
+        zone = self._tariff_zones.get(default_tariff)
+        if zone is None or not zone.meter_ids:
+            return None
+        vals = [
+            s.power_w
+            for did in zone.meter_ids
+            if (s := device_states.get(did)) is not None and s.power_w is not None
+        ]
+        return sum(vals) if vals else None
+
+    async def _fetch_tariff_prices(self, now: datetime) -> dict[str, float]:
+        """Return current import price for every tariff that has one (> 0 €/kWh).
+
+        Export-only tariffs (e.g. the ``grid`` feed-in tariff whose import
+        price is 0.0) are skipped so the market-price cards only show
+        metering zones where the import price is meaningful.
+        """
+        prices: dict[str, float] = {}
+        for tariff_id, tariff in self._tariffs.items():
+            try:
+                p = await tariff.price_at(now)
+                if p > 0.0:
+                    prices[tariff_id] = p
+            except Exception:  # noqa: BLE001
+                pass
+        return prices
+
+    async def _build_tariff_weighted_price_forecast(self) -> tuple[list[ForecastPoint], dict[datetime, bool]]:
+        """Return hourly import-price points weighted by per-tariff load share.
+
+        The current MILP is single-node (one import variable), so we cannot yet
+        optimise true multi-zone power flows. This helper provides a pragmatic
+        approximation: blend tariff prices by forecast consumption per tariff.
+
+        Example: if a timestep has 25% household load (Tibber) and 75% heatpump
+        load (flat rate), the optimizer sees
+
+            p_eff = 0.25 * p_household + 0.75 * p_heatpump
+
+        which prevents over-valuing battery discharge during heatpump-dominated
+        periods.
+        """
+        # Aggregate consumption forecasts by effective tariff.
+        load_by_tariff: dict[str, dict[datetime, float]] = defaultdict(dict)
+        all_timestamps: set[datetime] = set()
+
+        for device_id, cfg in self._cfg.devices.items():
+            device = self._registry.get(device_id)
+            if device is None or device.role != DeviceRole.CONSUMER:
+                continue
+            fc_cfg = cfg.get("forecast")
+            if not isinstance(fc_cfg, dict):
+                continue
+
+            tariff_id = cfg.get("tariff") or self._cfg.default_tariff_id
+            if not tariff_id or tariff_id not in self._tariffs:
+                continue
+
+            try:
+                provider = plugin_registry.build_forecast(
+                    f"{device_id}_weighted_price_forecast",
+                    fc_cfg,
+                    self._build_ctx,
+                )
+                if provider is None or provider.quantity != ForecastQuantity.CONSUMPTION:
+                    continue
+                pts = await provider.get_forecast(self._horizon)
+            except Exception as exc:  # noqa: BLE001
+                _log.debug("Could not build forecast for %s: %s", device_id, exc)
+                continue
+
+            bucket = load_by_tariff[tariff_id]
+            for pt in pts:
+                ts = pt.timestamp
+                bucket[ts] = bucket.get(ts, 0.0) + float(pt.value)
+                all_timestamps.add(ts)
+
+        if not all_timestamps:
+            return [], {}
+
+        # Load each tariff's schedule once — this is the authoritative source of
+        # both prices AND the real data horizon.  ``price_at()`` returns 0.0 for
+        # hours where the tariff has no data (e.g. Tibber tomorrow-prices not yet
+        # published), which would create misleadingly low blended prices.  Loading
+        # the schedule directly lets us (a) do a single API call per tariff and (b)
+        # know exactly where real data ends so we can clip the timestamps.
+        tariff_schedules: dict[str, list[TariffPoint]] = {}
+        tariff_estimated_ts: dict[str, set[datetime]] = {}
+        for tariff_id in load_by_tariff:
+            tariff = self._tariffs.get(tariff_id)
+            if tariff is None:
+                continue
+            try:
+                sched = await tariff.price_schedule(self._horizon)
+                if sched:
+                    ext, est_ts = _extend_tariff_schedule_with_daily_repeat(sched, self._horizon)
+                    tariff_schedules[tariff_id] = sorted(ext, key=lambda p: p.timestamp)
+                    tariff_estimated_ts[tariff_id] = est_ts
+            except Exception:  # noqa: BLE001
+                pass
+
+        if not tariff_schedules:
+            return [], {}
+
+        timestamps = sorted(all_timestamps)
+        if not timestamps:
+            return [], {}
+
+        def _schedule_price_and_flag(
+            sched: list[TariffPoint],
+            estimated_ts: set[datetime],
+            ts: datetime,
+        ) -> tuple[float, bool]:
+            """Nearest-neighbour price lookup + estimated-source flag."""
+            best = min(sched, key=lambda p: abs((p.timestamp - ts).total_seconds()))
+            return float(best.price_eur_per_kwh), (best.timestamp in estimated_ts)
+
+        price_and_flag_by_tariff: dict[str, dict[datetime, tuple[float, bool]]] = {}
+        for tariff_id, sched in tariff_schedules.items():
+            est_set = tariff_estimated_ts.get(tariff_id, set())
+            per_ts: dict[datetime, tuple[float, bool]] = {}
+            for ts in timestamps:
+                per_ts[ts] = _schedule_price_and_flag(sched, est_set, ts)
+            price_and_flag_by_tariff[tariff_id] = per_ts
+
+        weighted: list[ForecastPoint] = []
+        weighted_estimated_by_ts: dict[datetime, bool] = {}
+        for ts in timestamps:
+            total_kw = 0.0
+            weighted_sum = 0.0
+            has_estimated_component = False
+            for tariff_id, loads in load_by_tariff.items():
+                load_kw = float(loads.get(ts, 0.0))
+                if load_kw <= 0.0:
+                    continue
+                price, from_estimated = price_and_flag_by_tariff.get(tariff_id, {}).get(
+                    ts, (0.0, False)
+                )
+                total_kw += load_kw
+                weighted_sum += load_kw * price
+                if from_estimated:
+                    has_estimated_component = True
+
+            if total_kw > 0.0:
+                weighted.append(ForecastPoint(timestamp=ts, value=weighted_sum / total_kw))
+                weighted_estimated_by_ts[ts] = has_estimated_component
+
+        return weighted, weighted_estimated_by_ts

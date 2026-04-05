@@ -79,6 +79,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from .ledger import BatteryCostLedger
 from .models import ControlIntent, DeviceCommand, EnergyPlan, DeviceState, StorageConstraints
+from .realtime_slice_optimizer import StorageSliceInput, optimize_storage_slice
 
 if TYPE_CHECKING:
     from .registry import DeviceRegistry
@@ -140,29 +141,66 @@ class LiveSituation:
     when no PV device is available.
     """
 
+    storage_cost_bases: dict[str, float] = field(default_factory=dict)
+    """Cost basis (€/kWh) per storage device, from the BatteryCostLedger.
+
+    Keyed by ``device_id``.  Used by ``market_price_eur_per_kwh`` to include
+    the opportunity cost of discharging batteries as a third supply source.
+    """
+
+    default_zone_grid_power_w: float | None = None
+    """Grid import power (W) for the default tariff zone, if known.
+
+    When set (typically to the reading of the sub-meter for the default tariff,
+    e.g. ``household_meter`` / Z2 in Messkonzept 8), ``market_price_eur_per_kwh``
+    uses this value instead of the site-level ``grid_power_w`` (Z1).
+
+    This matters when different circuits are billed under different tariffs
+    (e.g. heatpump on flat rate, household on Tibber spot): using Z1 for the
+    household battery charge price would inflate the grid fraction when the
+    heatpump is running, even though the household circuit may be fully PV-powered.
+    """
+
     @property
     def market_price_eur_per_kwh(self) -> float:
-        """Blended price for energy consumed at this site right now (€/kWh).
+        """Blended market price for the default (household) tariff (€/kWh).
 
-        Every device at this site draws from the same mix of PV and grid:
+        Three supply sources are considered:
 
-            total_w     = pv_power_w + max(0, grid_power_w)
-            pv_fraction = pv_power_w / total_w   (clamped to [0, 1])
-            market_price = pv_fraction × feed_in + (1 − pv_fraction) × tibber
+        1. **PV** (opportunity cost = feed-in price)
+        2. **Grid import** (cost = default import tariff, e.g. Tibber spot)
+        3. **Battery discharge** (cost = weighted-average ledger cost basis)
 
-        Examples
-        --------
-        * PV 750W, grid 250W (import): total=1000W, pv_frac=0.75 → 75 % feed-in
-        * PV 500W, grid −100W (export): total=500W, pv_frac=1.0 → 100 % feed-in
-        * PV 0W, grid 1000W: total=1000W, pv_frac=0.0 → 100 % tibber
+        Uses ``default_zone_grid_power_w`` (e.g. Z2 / household sub-meter)
+        when available, falling back to the site-level ``grid_power_w`` (Z1).
+        This avoids inflating the grid fraction when another tariff zone
+        (e.g. heatpump) happens to be drawing from the grid simultaneously.
         """
-        total_w = self.pv_power_w + max(0.0, self.grid_power_w)
+        bat_w_total = 0.0
+        bat_cost_total = 0.0
+        for dev_id, basis in self.storage_cost_bases.items():
+            state = self.device_states.get(dev_id)
+            if state is not None and state.power_w is not None and state.power_w < 0.0:
+                discharge_w = abs(state.power_w)
+                bat_w_total += discharge_w
+                bat_cost_total += discharge_w * basis
+
+        pv_w = self.pv_power_w
+        grid_ref = self.default_zone_grid_power_w if self.default_zone_grid_power_w is not None else self.grid_power_w
+        grid_w = max(0.0, grid_ref)
+        total_w = pv_w + grid_w + bat_w_total
         if total_w <= 0.0:
             return self.current_price_eur_per_kwh
-        pv_fraction = min(1.0, self.pv_power_w / total_w)
+
+        pv_frac   = min(1.0, pv_w / total_w)
+        grid_frac = grid_w / total_w
+        bat_frac  = bat_w_total / total_w
+        bat_basis = bat_cost_total / bat_w_total if bat_w_total > 0.0 else 0.0
+
         return (
-            pv_fraction * self.pv_opportunity_price_eur_per_kwh
-            + (1.0 - pv_fraction) * self.current_price_eur_per_kwh
+            pv_frac   * self.pv_opportunity_price_eur_per_kwh
+            + grid_frac * self.current_price_eur_per_kwh
+            + bat_frac  * bat_basis
         )
 
 
@@ -365,6 +403,7 @@ class ControlLoop:
         self._ledger = ledger
         self._contributors: list[ControlContributor] = list(contributors or [])
         self._active_plan: EnergyPlan | None = None
+        self._last_storage_setpoints_w: dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # Plan management
@@ -534,20 +573,26 @@ class ControlLoop:
         self,
         live: LiveSituation,
     ) -> list[tuple[str, float | None, str, ControlIntent | None]]:
-        """Resolve and cap setpoints for all contributors.
+        """Resolve setpoints for all contributors.
 
-        Discharge setpoints are processed sequentially.  Each contributor
-        may only discharge as much as the remaining grid import demand,
-        preventing total discharge from exceeding house consumption and
-        accidentally feeding energy back to the grid at a poor export price.
+        First tries a one-step realtime MILP for storage contributors using
+        current live conditions plus the active plan slice. If that fails,
+        falls back to the legacy sequential capping logic.
 
         Returns ``(device_id, setpoint_w, mode, intent)`` for every contributor.
         """
-        # Available headroom for battery discharge = grid import + whatever the
-        # batteries are already contributing.  If the batteries are currently
-        # supplying 1 kW and the heat pump is using 2 kW, grid import is only
-        # 1 kW — but the house load is 3 kW, so we can safely discharge up to
-        # 3 kW total without pushing anything back to the grid.
+        intents: dict[str, ControlIntent | None] = {
+            c.device_id: self._find_intent(c.device_id, live.timestamp)
+            for c in self._contributors
+        }
+        grid_ref_w = (
+            live.default_zone_grid_power_w
+            if live.default_zone_grid_power_w is not None
+            else live.grid_power_w
+        )
+        # Recover controllable demand headroom by adding battery discharge that
+        # is already happening right now; otherwise a discharge command can
+        # self-cancel to zero on the next tick when grid import briefly hits 0.
         current_discharge_w = sum(
             -live.device_states[c.device_id].power_w
             for c in self._contributors
@@ -555,13 +600,79 @@ class ControlLoop:
             and live.device_states[c.device_id].power_w is not None
             and live.device_states[c.device_id].power_w < 0
         )
-        remaining_import_w = max(0.0, live.grid_power_w + current_discharge_w)
+        effective_grid_w = grid_ref_w + current_discharge_w
+
+        storage_inputs: list[StorageSliceInput] = []
+        for contributor in self._contributors:
+            if not isinstance(contributor, StorageControlContributor):
+                continue
+            intent = intents[contributor.device_id]
+            planned_w = 0.0
+            if intent is not None:
+                if intent.planned_kw is not None:
+                    planned_w = intent.planned_kw * 1000.0
+                elif intent.mode == "grid_fill":
+                    planned_w = max(0.0, intent.max_power_w or 0.0)
+                elif intent.mode == "discharge":
+                    planned_w = min(0.0, intent.min_power_w or 0.0)
+
+                # Soften discharge tracking when live PV surplus exists so the
+                # realtime layer may absorb otherwise-exported PV.
+                if intent.mode == "discharge" and live.grid_power_w < -1.0:
+                    planned_w = min(planned_w, 0.0)
+                    planned_w = 0.0
+            storage_inputs.append(
+                StorageSliceInput(
+                    device_id=contributor.device_id,
+                    max_charge_w=contributor._constraints.max_charge_kw * 1000.0,
+                    max_discharge_w=contributor._constraints.max_discharge_kw * 1000.0,
+                    no_grid_charge=contributor._constraints.no_grid_charge,
+                    mode=intent.mode if intent is not None else "no_plan",
+                    planned_w=planned_w,
+                    reserved_kwh=(intent.reserved_kwh if intent is not None and intent.reserved_kwh is not None else 0.0),
+                    charge_policy=(intent.charge_policy if intent is not None else "auto") or "auto",
+                    discharge_policy=(intent.discharge_policy if intent is not None else "meet_load_only") or "meet_load_only",
+                    prev_setpoint_w=self._last_storage_setpoints_w.get(contributor.device_id, 0.0),
+                )
+            )
+
+        optimized_storage = None
+        if storage_inputs:
+            optimized_storage = optimize_storage_slice(
+                storage_inputs,
+                grid_power_w=effective_grid_w,
+                pv_surplus_w=max(0.0, -effective_grid_w),
+                dt_hours=max(1e-6, live.dt_hours),
+                import_price_eur_per_kwh=live.current_price_eur_per_kwh,
+                export_price_eur_per_kwh=live.pv_opportunity_price_eur_per_kwh,
+                cost_basis_eur_per_kwh=self._ledger.all_cost_bases(),
+            )
+            if optimized_storage is None:
+                _log.warning("ControlLoop: realtime slice optimizer infeasible — using legacy capping")
+
+        # Available headroom for battery discharge = grid import + whatever the
+        # batteries are already contributing.  If the batteries are currently
+        # supplying 1 kW and the heat pump is using 2 kW, grid import is only
+        # 1 kW — but the house load is 3 kW, so we can safely discharge up to
+        # 3 kW total without pushing anything back to the grid.
+        remaining_import_w = max(0.0, grid_ref_w + current_discharge_w)
+
         result: list[tuple[str, float | None, str, ControlIntent | None]] = []
         for contributor in self._contributors:
-            intent = self._find_intent(contributor.device_id, live.timestamp)
-            raw_w = contributor.desired_setpoint_w(intent, live)
+            intent = intents[contributor.device_id]
             mode = intent.mode if intent is not None else "no_plan"
 
+            if (
+                optimized_storage is not None
+                and isinstance(contributor, StorageControlContributor)
+                and contributor.device_id in optimized_storage
+            ):
+                setpoint_w = optimized_storage[contributor.device_id]
+                self._last_storage_setpoints_w[contributor.device_id] = setpoint_w
+                result.append((contributor.device_id, setpoint_w, mode, intent))
+                continue
+
+            raw_w = contributor.desired_setpoint_w(intent, live)
             if raw_w is not None and raw_w < 0:
                 discharge_policy = (
                     (intent.discharge_policy if intent is not None else "meet_load_only")
@@ -577,12 +688,15 @@ class ControlLoop:
                         _log.info(
                             "ControlLoop: discharge capped  %s  %.0f → %.0f W"
                             "  (grid_import=%.0f W)",
-                            contributor.device_id, raw_w, capped, live.grid_power_w,
+                            contributor.device_id, raw_w, capped, grid_ref_w,
                         )
                     remaining_import_w = max(0.0, remaining_import_w + capped)
                     setpoint_w = capped
             else:
                 setpoint_w = raw_w
+
+            if isinstance(contributor, StorageControlContributor) and setpoint_w is not None:
+                self._last_storage_setpoints_w[contributor.device_id] = setpoint_w
 
             result.append((contributor.device_id, setpoint_w, mode, intent))
         return result

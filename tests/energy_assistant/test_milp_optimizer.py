@@ -347,6 +347,61 @@ class TestMilpHigsOptimizerIntentValues:
         assert charge_intents
         assert all(i.charge_policy == "pv_only" for i in charge_intents)
 
+    async def test_pv_surplus_prefers_no_grid_charge_battery(self) -> None:
+        """In PV-surplus hours, no-grid-charge batteries should be prioritized.
+
+        Scenario: SMA (pv_only) and Zendure (grid-capable) are both empty.
+        Early hours have limited PV surplus (only enough for one battery at full
+        rate). The long-horizon model should allocate more of that surplus to SMA,
+        preserving Zendure's flexibility to grid-charge later if needed.
+        """
+        optimizer = MilpHigsOptimizer(step_minutes=60)
+        now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+
+        prices = [0.20] * 24
+        pv = [
+            ForecastPoint(timestamp=now + timedelta(hours=h), value=3.0 if h < 3 else 0.0)
+            for h in range(24)
+        ]
+        consumption = [
+            ForecastPoint(timestamp=now + timedelta(hours=h), value=2.0 if 6 <= h < 12 else 0.0)
+            for h in range(24)
+        ]
+
+        sma = _battery("sma", capacity_kwh=8.0, max_charge_kw=3.0, max_discharge_kw=3.0)
+        sma.no_grid_charge = True
+        zendure = _battery("zendure", capacity_kwh=8.0, max_charge_kw=3.0, max_discharge_kw=3.0)
+
+        ctx = OptimizationContext(
+            device_states={
+                "sma": _state("sma", soc_pct=10.0),
+                "zendure": _state("zendure", soc_pct=10.0),
+            },
+            storage_constraints=[sma, zendure],
+            forecasts={
+                ForecastQuantity.PRICE: _hourly_prices(now, prices),
+                ForecastQuantity.PV_GENERATION: pv,
+                ForecastQuantity.CONSUMPTION: consumption,
+            },
+            horizon=timedelta(hours=24),
+        )
+
+        plan = await optimizer.optimize(ctx)
+
+        first_pv_window = now + timedelta(hours=3)
+        sma_charge_kwh = sum(
+            i.reserved_kwh or 0.0
+            for i in plan.intents
+            if i.device_id == "sma" and i.mode == "grid_fill" and i.timestep < first_pv_window
+        )
+        zendure_charge_kwh = sum(
+            i.reserved_kwh or 0.0
+            for i in plan.intents
+            if i.device_id == "zendure" and i.mode == "grid_fill" and i.timestep < first_pv_window
+        )
+
+        assert sma_charge_kwh > zendure_charge_kwh
+
 
 class TestMilpHigsOptimizerTimeResolution:
     """Verify the optimizer handles sub-hourly time steps correctly."""
