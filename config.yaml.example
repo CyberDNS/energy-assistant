@@ -87,6 +87,8 @@ milp:
 # ---------------------------------------------------------------------------
 
 controller:
+  # How often device states are polled from backends (seconds).
+  poll_interval_s: 5
   # How often the control setpoint is sent to devices (seconds).
   control_interval_s: 15
   # How often the MILP plan is re-solved (seconds). 3600 = once per hour.

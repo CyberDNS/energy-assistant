@@ -290,7 +290,31 @@ class MilpHigsOptimizer:
         else:
             priority_tiebreak = 0
 
-        prob += grid_cost + degradation_cost + priority_tiebreak - terminal_value, "total_cost"
+        # PV-first charging tiebreak for mixed battery capabilities:
+        # when there is PV surplus in a step and at least one battery is
+        # ``no_grid_charge`` (e.g. SMA) while others may charge from grid
+        # (e.g. Zendure), prefer allocating that surplus to the constrained
+        # batteries first. This keeps flexible batteries available for later
+        # grid charging windows.
+        no_grid_ids = [sc.device_id for sc in batteries if sc.no_grid_charge]
+        flexible_ids = [sc.device_id for sc in batteries if not sc.no_grid_charge]
+        if no_grid_ids and flexible_ids:
+            pv_priority_tiebreak = 1e-4 * pulp.lpSum(
+                pulp.lpSum(c[(b, t)] for b in flexible_ids)
+                - pulp.lpSum(c[(b, t)] for b in no_grid_ids)
+                for t in T
+                if net_load[t] < 0.0
+            )
+        else:
+            pv_priority_tiebreak = 0
+
+        prob += (
+            grid_cost
+            + degradation_cost
+            + priority_tiebreak
+            + pv_priority_tiebreak
+            - terminal_value
+        ), "total_cost"
 
         # ── Constraints ───────────────────────────────────────────────
         for t in T:
