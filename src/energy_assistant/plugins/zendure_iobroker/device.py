@@ -18,8 +18,11 @@ Key read OIDs
 
 Key control OIDs
 ----------------
+``control.autoModel``
+    Must be set to ``0`` before any manual limit write (disables automatic mode).
+
 ``control.acMode``
-    1 = charge from grid/AC, 2 = discharge to home.
+    1 = AC input (charge from grid), 2 = AC output (discharge to home).
 
 ``control.setInputLimit``
     Charge power limit in W (grid → battery).  Set alongside ``acMode = 1``.
@@ -200,9 +203,14 @@ class ZendureIoBrokerDevice:
             Target net power in W using platform sign convention:
             positive = charge, negative = discharge, 0 = idle.
 
-            Written to ``control.setDeviceAutomationInOutLimit`` (W) which the
-            adapter defines as: negative = charging, positive = feed-in.
-            The sign is therefore inverted relative to the platform convention.
+            Control sequence:
+            1. ``control.autoModel = 0``  (switch to manual mode)
+            2a. Charging  (power_w > 0): ``control.acMode = 1``,
+                ``control.setInputLimit = power_w``, ``control.setOutputLimit = 0``
+            2b. Discharging (power_w < 0): ``control.acMode = 2``,
+                ``control.setOutputLimit = |power_w|``, ``control.setInputLimit = 0``
+            2c. Idle (power_w == 0): ``control.setInputLimit = 0``,
+                ``control.setOutputLimit = 0``
 
         ``set_charge_limit``
             Upper SoC limit in percent (0–100).
@@ -214,30 +222,40 @@ class ZendureIoBrokerDevice:
 
         if command.command == "set_power_w":
             power_w = float(command.value)
-            # The adapter requires autoMode = 0 (manual / "setDeviceAutomationInOutLimit"
-            # mode) before it will accept the limit write.  The OID may not be directly
-            # settable via the simple-api on all adapter versions, so we attempt it but
-            # do not abort when it fails.
+            # Step 1: switch to manual mode so the adapter accepts limit writes.
             try:
-                await self._client.set_value(f"{p}.autoModel", 0)
+                await self._client.set_value(f"{p}.control.autoModel", 0)
             except Exception as exc:
                 _log.warning(
                     "ZendureIoBrokerDevice %r: could not set autoModel=0 (%s); "
                     "proceeding — ensure the device is already in manual mode.",
                     self._device_id, exc,
                 )
-            # OID sign convention: negative = charging, positive = feed-in.
-            # Platform sign convention: positive = charging, negative = discharging.
-            # → negate before writing.
-            oid_value = int(-power_w)
-            await self._client.set_value(
-                f"{p}.control.setDeviceAutomationInOutLimit", oid_value
-            )
-            _log.debug(
-                "ZendureIoBrokerDevice %r: setDeviceAutomationInOutLimit = %d W"
-                " (requested %.0f W)",
-                self._device_id, oid_value, power_w,
-            )
+
+            if power_w > 0:
+                # Charging: AC input mode, set input limit, clear output limit.
+                await self._client.set_value(f"{p}.control.acMode", 1)
+                await self._client.set_value(f"{p}.control.setInputLimit", int(power_w))
+                await self._client.set_value(f"{p}.control.setOutputLimit", 0)
+                _log.debug(
+                    "ZendureIoBrokerDevice %r: charge %.0f W (acMode=1, setInputLimit=%d)",
+                    self._device_id, power_w, int(power_w),
+                )
+            elif power_w < 0:
+                # Discharging: AC output mode, set output limit, clear input limit.
+                discharge_w = int(-power_w)
+                await self._client.set_value(f"{p}.control.acMode", 2)
+                await self._client.set_value(f"{p}.control.setOutputLimit", discharge_w)
+                await self._client.set_value(f"{p}.control.setInputLimit", 0)
+                _log.debug(
+                    "ZendureIoBrokerDevice %r: discharge %.0f W (acMode=2, setOutputLimit=%d)",
+                    self._device_id, -power_w, discharge_w,
+                )
+            else:
+                # Idle: clear both limits.
+                await self._client.set_value(f"{p}.control.setInputLimit", 0)
+                await self._client.set_value(f"{p}.control.setOutputLimit", 0)
+                _log.debug("ZendureIoBrokerDevice %r: idle (both limits cleared)", self._device_id)
 
         elif command.command == "set_charge_limit":
             await self._client.set_value(f"{p}.control.chargeLimit", int(command.value))

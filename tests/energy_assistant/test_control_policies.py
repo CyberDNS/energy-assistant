@@ -167,3 +167,262 @@ async def test_discharge_export_allowed_when_profitable() -> None:
 
     assert dev.commands
     assert dev.commands[-1].value == -3000.0
+
+
+@pytest.mark.asyncio
+async def test_discharge_mode_may_absorb_pv_surplus() -> None:
+    now = datetime.now(timezone.utc)
+    ledger = BatteryCostLedger()
+    loop = ControlLoop(ledger=ledger)
+    loop.register_contributor(StorageControlContributor(_constraints("bat")))
+
+    loop.update_plan(
+        EnergyPlan(
+            intents=[
+                ControlIntent(
+                    device_id="bat",
+                    timestep=now,
+                    mode="discharge",
+                    min_power_w=-3000.0,
+                    max_power_w=0.0,
+                    planned_kw=-3.0,
+                    discharge_policy="meet_load_only",
+                )
+            ]
+        )
+    )
+
+    registry = DeviceRegistry()
+    dev = _FakeStorageDevice("bat")
+    registry.register(dev)
+
+    live = LiveSituation(
+        timestamp=now,
+        grid_power_w=-900.0,  # exporting PV surplus
+        dt_hours=5.0 / 3600.0,
+        device_states={"bat": DeviceState(device_id="bat", power_w=0.0)},
+        current_price_eur_per_kwh=0.35,
+        pv_opportunity_price_eur_per_kwh=0.08,
+    )
+
+    await loop.tick(live, registry)
+
+    assert dev.commands
+    # Planner says discharge, but realtime layer may opportunistically charge on PV surplus.
+    assert dev.commands[-1].value > 0.0
+
+
+def test_describe_setpoints_discharge_with_zero_dt() -> None:
+    """Status-preview path (dt=0) should still suggest discharge under import."""
+    now = datetime.now(timezone.utc)
+    ledger = BatteryCostLedger()
+    loop = ControlLoop(ledger=ledger)
+    loop.register_contributor(StorageControlContributor(_constraints("bat")))
+
+    loop.update_plan(
+        EnergyPlan(
+            intents=[
+                ControlIntent(
+                    device_id="bat",
+                    timestep=now,
+                    mode="discharge",
+                    min_power_w=-3000.0,
+                    max_power_w=0.0,
+                    discharge_policy="meet_load_only",
+                )
+            ]
+        )
+    )
+
+    live = LiveSituation(
+        timestamp=now,
+        grid_power_w=350.0,
+        dt_hours=0.0,
+        device_states={"bat": DeviceState(device_id="bat", power_w=0.0)},
+        current_price_eur_per_kwh=0.22,
+        pv_opportunity_price_eur_per_kwh=0.08,
+    )
+
+    rows = loop.describe_setpoints(live)
+    assert rows
+    _did, setpoint_w, _mode = rows[0]
+    assert setpoint_w is not None
+    assert setpoint_w < 0.0
+
+
+def test_describe_setpoints_uses_default_zone_grid_reference() -> None:
+    now = datetime.now(timezone.utc)
+    ledger = BatteryCostLedger()
+    loop = ControlLoop(ledger=ledger)
+    loop.register_contributor(StorageControlContributor(_constraints("bat")))
+
+    loop.update_plan(
+        EnergyPlan(
+            intents=[
+                ControlIntent(
+                    device_id="bat",
+                    timestep=now,
+                    mode="discharge",
+                    min_power_w=-3000.0,
+                    max_power_w=0.0,
+                    discharge_policy="meet_load_only",
+                )
+            ]
+        )
+    )
+
+    live = LiveSituation(
+        timestamp=now,
+        grid_power_w=250.0,
+        default_zone_grid_power_w=600.0,
+        dt_hours=0.0,
+        device_states={"bat": DeviceState(device_id="bat", power_w=0.0)},
+        current_price_eur_per_kwh=0.22,
+        pv_opportunity_price_eur_per_kwh=0.08,
+    )
+
+    rows = loop.describe_setpoints(live)
+    assert rows
+    _did, setpoint_w, _mode = rows[0]
+    assert setpoint_w is not None
+    assert setpoint_w <= -550.0
+
+
+def test_describe_setpoints_uses_existing_discharge_headroom() -> None:
+    now = datetime.now(timezone.utc)
+    ledger = BatteryCostLedger()
+    loop = ControlLoop(ledger=ledger)
+    loop.register_contributor(StorageControlContributor(_constraints("bat")))
+
+    loop.update_plan(
+        EnergyPlan(
+            intents=[
+                ControlIntent(
+                    device_id="bat",
+                    timestep=now,
+                    mode="discharge",
+                    min_power_w=-3000.0,
+                    max_power_w=0.0,
+                    discharge_policy="meet_load_only",
+                )
+            ]
+        )
+    )
+
+    live = LiveSituation(
+        timestamp=now,
+        grid_power_w=0.0,
+        dt_hours=0.0,
+        device_states={"bat": DeviceState(device_id="bat", power_w=-300.0)},
+        current_price_eur_per_kwh=0.22,
+        pv_opportunity_price_eur_per_kwh=0.08,
+    )
+
+    rows = loop.describe_setpoints(live)
+    assert rows
+    _did, setpoint_w, _mode = rows[0]
+    assert setpoint_w is not None
+    assert setpoint_w < 0.0
+
+
+def test_describe_setpoints_discharge_scales_with_import() -> None:
+    now = datetime.now(timezone.utc)
+    ledger = BatteryCostLedger()
+    loop = ControlLoop(ledger=ledger)
+    loop.register_contributor(StorageControlContributor(_constraints("bat")))
+
+    loop.update_plan(
+        EnergyPlan(
+            intents=[
+                ControlIntent(
+                    device_id="bat",
+                    timestep=now,
+                    mode="discharge",
+                    min_power_w=-3000.0,
+                    max_power_w=0.0,
+                    planned_kw=-0.2,
+                    discharge_policy="meet_load_only",
+                )
+            ]
+        )
+    )
+
+    live_low = LiveSituation(
+        timestamp=now,
+        grid_power_w=250.0,
+        dt_hours=0.0,
+        device_states={"bat": DeviceState(device_id="bat", power_w=0.0)},
+        current_price_eur_per_kwh=0.22,
+        pv_opportunity_price_eur_per_kwh=0.08,
+    )
+    low_rows = loop.describe_setpoints(live_low)
+    low_sp = float(low_rows[0][1] or 0.0)
+
+    live_high = LiveSituation(
+        timestamp=now,
+        grid_power_w=700.0,
+        dt_hours=0.0,
+        device_states={"bat": DeviceState(device_id="bat", power_w=0.0)},
+        current_price_eur_per_kwh=0.22,
+        pv_opportunity_price_eur_per_kwh=0.08,
+    )
+    high_rows = loop.describe_setpoints(live_high)
+    high_sp = float(high_rows[0][1] or 0.0)
+
+    assert low_sp < 0.0
+    assert high_sp < low_sp
+
+
+@pytest.mark.asyncio
+async def test_discharge_does_not_jojo_to_zero_on_next_tick() -> None:
+    now = datetime.now(timezone.utc)
+    ledger = BatteryCostLedger()
+    loop = ControlLoop(ledger=ledger)
+    loop.register_contributor(StorageControlContributor(_constraints("bat")))
+
+    loop.update_plan(
+        EnergyPlan(
+            intents=[
+                ControlIntent(
+                    device_id="bat",
+                    timestep=now,
+                    mode="discharge",
+                    min_power_w=-3000.0,
+                    max_power_w=0.0,
+                    discharge_policy="meet_load_only",
+                )
+            ]
+        )
+    )
+
+    registry = DeviceRegistry()
+    dev = _FakeStorageDevice("bat")
+    registry.register(dev)
+
+    # Tick 1: clear import, expect discharge command.
+    live1 = LiveSituation(
+        timestamp=now,
+        grid_power_w=300.0,
+        dt_hours=5.0 / 3600.0,
+        device_states={"bat": DeviceState(device_id="bat", power_w=0.0)},
+        current_price_eur_per_kwh=0.22,
+        pv_opportunity_price_eur_per_kwh=0.08,
+    )
+    await loop.tick(live1, registry)
+    first = float(dev.commands[-1].value)
+    assert first < 0.0
+
+    # Tick 2: import measured near zero should not force immediate 0W hold.
+    live2 = LiveSituation(
+        timestamp=now,
+        grid_power_w=0.0,
+        dt_hours=5.0 / 3600.0,
+        device_states={"bat": DeviceState(device_id="bat", power_w=0.0)},
+        current_price_eur_per_kwh=0.22,
+        pv_opportunity_price_eur_per_kwh=0.08,
+    )
+    await loop.tick(live2, registry)
+    second = float(dev.commands[-1].value)
+    assert second < 0.0
+
+
