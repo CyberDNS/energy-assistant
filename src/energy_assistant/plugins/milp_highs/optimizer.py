@@ -52,9 +52,10 @@ Output
 An ``EnergyPlan`` whose ``intents`` contain one ``ControlIntent`` per
 (device, timestep) pair.  Modes used:
 
-* ``"grid_fill"``  — charge from grid/PV at up to ``max_power_w`` W.
-* ``"discharge"``  — discharge to home at up to ``−min_power_w`` W.
-* ``"idle"``       — no action requested.
+* ``"charge_from_pv"``   — absorb PV surplus only; never increase grid import.
+* ``"charge_from_grid"`` — charge at planned power; grid import is allowed.
+* ``"discharge"``        — reduce import at site level; no export crossing.
+* ``"grid_feed_in"``     — actively push stored energy into the grid.
 """
 
 from __future__ import annotations
@@ -521,6 +522,7 @@ def _extract_intents(
     """Convert solver values into ``ControlIntent`` objects."""
     c = variables["c"]
     d = variables["d"]
+    g_exp = variables["g_exp"]
     intents: list[ControlIntent] = []
 
     for sc in batteries:
@@ -533,45 +535,56 @@ def _extract_intents(
             d_w = d_kwh / step_h * 1000.0
 
             if c_w > 1.0:
-                # Platform sign: positive power = charging
-                charge_policy = "pv_only" if sc.no_grid_charge else "grid_allowed"
+                # charge_from_pv: battery is constrained to PV-only sources.
+                # charge_from_grid: battery may also draw from grid import.
+                if sc.no_grid_charge:
+                    mode = "charge_from_pv"
+                    charge_policy = "pv_only"   # informational
+                else:
+                    mode = "charge_from_grid"
+                    charge_policy = "grid_allowed"  # informational
                 intents.append(
                     ControlIntent(
                         device_id=b,
                         timestep=ts,
-                        mode="grid_fill",
+                        mode=mode,
                         min_power_w=0.0,
                         max_power_w=round(c_w, 1),
                         planned_kw=round(c_w / 1000.0, 4),
                         reserved_kwh=round(c_kwh, 4),
                         charge_policy=charge_policy,
-                        discharge_policy="meet_load_only",
                     )
                 )
             elif d_w > 1.0:
-                # Platform sign: negative power = discharging
+                # grid_feed_in when the site is net-exporting this step;
+                # otherwise discharge (reduce import, no export crossing).
+                g_exp_kwh = pulp.value(g_exp[t]) or 0.0
+                is_feed_in = g_exp_kwh > 0.001  # ~1 W average threshold
+                mode = "grid_feed_in" if is_feed_in else "discharge"
                 intents.append(
                     ControlIntent(
                         device_id=b,
                         timestep=ts,
-                        mode="discharge",
+                        mode=mode,
+                        zone_id=None,   # site-level; zone assignment is future
                         min_power_w=round(-d_w, 1),
                         max_power_w=0.0,
                         planned_kw=round(-d_w / 1000.0, 4),
                         reserved_kwh=round(-d_kwh, 4),
-                        discharge_policy="meet_load_only",
                     )
                 )
             else:
+                # No optimizer action planned: default resting mode is
+                # charge_from_pv — absorb whatever PV surplus arrives.
+                # planned_kw=0 signals "nothing reserved; follow physics."
                 intents.append(
                     ControlIntent(
                         device_id=b,
                         timestep=ts,
-                        mode="idle",
+                        mode="charge_from_pv",
                         planned_kw=0.0,
                         reserved_kwh=0.0,
-                        charge_policy="auto",
-                        discharge_policy="meet_load_only",
+                        charge_policy="pv_only",  # informational
                     )
                 )
 

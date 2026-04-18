@@ -57,10 +57,9 @@ async def test_pv_only_charge_is_capped_to_live_surplus() -> None:
                 ControlIntent(
                     device_id="bat",
                     timestep=now,
-                    mode="grid_fill",
+                    mode="charge_from_pv",
                     min_power_w=0.0,
                     max_power_w=3000.0,
-                    charge_policy="pv_only",
                 )
             ]
         )
@@ -210,6 +209,47 @@ async def test_discharge_mode_may_absorb_pv_surplus() -> None:
     assert dev.commands
     # Planner says discharge, but realtime layer may opportunistically charge on PV surplus.
     assert dev.commands[-1].value > 0.0
+
+
+@pytest.mark.asyncio
+async def test_idle_auto_absorbs_pv_surplus() -> None:
+    now = datetime.now(timezone.utc)
+    ledger = BatteryCostLedger()
+    loop = ControlLoop(ledger=ledger)
+    loop.register_contributor(StorageControlContributor(_constraints("bat")))
+
+    loop.update_plan(
+        EnergyPlan(
+            intents=[
+                ControlIntent(
+                    device_id="bat",
+                    timestep=now,
+                    mode="charge_from_pv",
+                    min_power_w=0.0,
+                    max_power_w=0.0,
+                    charge_policy="auto",
+                )
+            ]
+        )
+    )
+
+    registry = DeviceRegistry()
+    dev = _FakeStorageDevice("bat")
+    registry.register(dev)
+
+    live = LiveSituation(
+        timestamp=now,
+        grid_power_w=-800.0,
+        dt_hours=5.0 / 3600.0,
+        device_states={"bat": DeviceState(device_id="bat", power_w=0.0)},
+        current_price_eur_per_kwh=0.25,
+        pv_opportunity_price_eur_per_kwh=0.08,
+    )
+
+    await loop.tick(live, registry)
+
+    assert dev.commands
+    assert float(dev.commands[-1].value) > 0.0
 
 
 def test_describe_setpoints_discharge_with_zero_dt() -> None:
@@ -426,3 +466,86 @@ async def test_discharge_does_not_jojo_to_zero_on_next_tick() -> None:
     assert second < 0.0
 
 
+@pytest.mark.asyncio
+async def test_charge_from_grid_follows_planned_power() -> None:
+    """charge_from_grid mode should command the full planned power (may draw from grid)."""
+    now = datetime.now(timezone.utc)
+    ledger = BatteryCostLedger()
+    loop = ControlLoop(ledger=ledger)
+    loop.register_contributor(StorageControlContributor(_constraints("bat")))
+
+    loop.update_plan(
+        EnergyPlan(
+            intents=[
+                ControlIntent(
+                    device_id="bat",
+                    timestep=now,
+                    mode="charge_from_grid",
+                    min_power_w=0.0,
+                    max_power_w=2000.0,
+                    planned_kw=2.0,
+                )
+            ]
+        )
+    )
+
+    registry = DeviceRegistry()
+    dev = _FakeStorageDevice("bat")
+    registry.register(dev)
+
+    live = LiveSituation(
+        timestamp=now,
+        grid_power_w=500.0,   # importing: no PV surplus, grid covers the rest
+        dt_hours=5.0 / 3600.0,
+        device_states={"bat": DeviceState(device_id="bat", power_w=0.0)},
+        current_price_eur_per_kwh=0.10,
+        pv_opportunity_price_eur_per_kwh=0.08,
+    )
+
+    await loop.tick(live, registry)
+
+    assert dev.commands
+    assert dev.commands[-1].value > 0.0
+
+
+@pytest.mark.asyncio
+async def test_grid_feed_in_allows_export() -> None:
+    """grid_feed_in mode should permit discharge past zero (export to grid)."""
+    now = datetime.now(timezone.utc)
+    ledger = BatteryCostLedger()
+    ledger.initialise("bat", stored_energy_kwh=5.0, cost_basis_eur_per_kwh=0.05)
+    loop = ControlLoop(ledger=ledger)
+    loop.register_contributor(StorageControlContributor(_constraints("bat")))
+
+    loop.update_plan(
+        EnergyPlan(
+            intents=[
+                ControlIntent(
+                    device_id="bat",
+                    timestep=now,
+                    mode="grid_feed_in",
+                    min_power_w=-2000.0,
+                    max_power_w=0.0,
+                    planned_kw=-2.0,
+                )
+            ]
+        )
+    )
+
+    registry = DeviceRegistry()
+    dev = _FakeStorageDevice("bat")
+    registry.register(dev)
+
+    live = LiveSituation(
+        timestamp=now,
+        grid_power_w=-200.0,  # already slightly exporting PV — battery adds to it
+        dt_hours=5.0 / 3600.0,
+        device_states={"bat": DeviceState(device_id="bat", power_w=0.0)},
+        current_price_eur_per_kwh=0.25,
+        pv_opportunity_price_eur_per_kwh=0.08,
+    )
+
+    await loop.tick(live, registry)
+
+    assert dev.commands
+    assert dev.commands[-1].value < 0.0   # discharging — pushing energy to grid
