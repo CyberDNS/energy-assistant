@@ -2,13 +2,13 @@
 
 Required ioBroker objects
 --------------------------
-- ``tibberlink.0.Homes.<HOME_ID>.CurrentPrice.total``   (current hour, single float)
+- ``tibberlink.0.Homes.<HOME_ID>.CurrentPrice.total``   (current hour, app-aligned)
 - ``tibberlink.0.Homes.<HOME_ID>.PricesToday.json``     (full day schedule)
 - ``tibberlink.0.Homes.<HOME_ID>.PricesTomorrow.json``  (optional, next day)
 
-``price_at()`` uses ``CurrentPrice.total`` for the current hour — a single
-lightweight OID read.  ``price_schedule()`` parses the JSON arrays for future
-hours, as used by the optimizer.
+``price_at()`` prefers ``CurrentPrice.total`` for the current hour — a
+single lightweight OID read. ``price_schedule()`` parses the JSON arrays and
+uses each entry's ``total`` value.
 
 Fallback
 --------
@@ -64,8 +64,8 @@ class TibberIoBrokerTariff:
     async def price_at(self, dt: datetime) -> float:
         """Return the Tibber price in EUR/kWh at *dt*.
 
-        For the **current hour** uses the lightweight ``CurrentPrice.total`` OID
-        (a single float) instead of parsing the full JSON schedule.
+        For the **current hour** prefers the lightweight ``CurrentPrice.total``
+        OID (a single float) instead of parsing the full JSON schedule.
         Falls back to the JSON schedule when ``dt`` is in the future, or if the
         OID read fails.
         """
@@ -79,7 +79,7 @@ class TibberIoBrokerTariff:
                 if raw is not None:
                     return float(raw)
             except Exception:
-                _log.warning("Failed to read CurrentPrice from %r — falling back to schedule", oid)
+                _log.warning("Failed to read CurrentPrice from %r — falling back", oid)
 
         # Fall back to full schedule (future hours or CurrentPrice unavailable)
         schedule = await self.price_schedule(timedelta(hours=48))

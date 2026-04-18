@@ -153,9 +153,9 @@ class TestMilpHigsOptimizerEconomics:
             i for i in plan.intents if i.timestep >= now + timedelta(hours=3)
         ]
         # The battery should be charging (or at least not discharging) during cheap hours
-        assert all(i.mode != "discharge" for i in cheap_intents)
+        assert all(i.mode not in ("discharge", "grid_feed_in") for i in cheap_intents)
         # During expensive hours with a loaded battery the optimizer may discharge
-        assert any(i.mode == "discharge" for i in expensive_intents)
+        assert any(i.mode in ("discharge", "grid_feed_in") for i in expensive_intents)
 
     async def test_discharges_at_expensive_hours(self) -> None:
         """With a full battery and expensive afternoon prices, expect discharge."""
@@ -175,7 +175,7 @@ class TestMilpHigsOptimizerEconomics:
             horizon=timedelta(hours=24),
         )
         plan = await optimizer.optimize(ctx)
-        assert any(i.mode == "discharge" for i in plan.intents)
+        assert any(i.mode in ("discharge", "grid_feed_in") for i in plan.intents)
 
     async def test_idle_when_soc_pinned(self) -> None:
         """When min_soc_pct == max_soc_pct == initial SoC the battery cannot move."""
@@ -191,8 +191,8 @@ class TestMilpHigsOptimizerEconomics:
             horizon=timedelta(hours=24),
         )
         plan = await optimizer.optimize(ctx)
-        # SoC bounds prevent any charge or discharge — every intent must be idle
-        assert all(i.mode == "idle" for i in plan.intents)
+        # SoC bounds prevent any charge or discharge — every intent must be charge_from_pv at 0
+        assert all(i.mode == "charge_from_pv" for i in plan.intents)
 
     async def test_stores_pv_for_expensive_evening(self) -> None:
         """PV surplus at moderate price should be stored for a more expensive evening.
@@ -239,8 +239,8 @@ class TestMilpHigsOptimizerEconomics:
         evening_intents = [
             i for i in plan.intents if now + timedelta(hours=16) <= i.timestep
         ]
-        assert any(i.mode == "grid_fill" for i in midday_intents), "expected charging during midday"
-        assert any(i.mode == "discharge" for i in evening_intents), "expected discharging in the evening"
+        assert any(i.mode == "charge_from_grid" for i in midday_intents), "expected charging during midday"
+        assert any(i.mode in ("discharge", "grid_feed_in") for i in evening_intents), "expected discharging in the evening"
 
 
 class TestMilpHigsOptimizerIntentValues:
@@ -265,7 +265,7 @@ class TestMilpHigsOptimizerIntentValues:
             horizon=timedelta(hours=24),
         )
         plan = await optimizer.optimize(ctx)
-        charge_intents = [i for i in plan.intents if i.mode == "grid_fill"]
+        charge_intents = [i for i in plan.intents if i.mode == "charge_from_grid"]
         assert charge_intents, "Expected at least one charge intent"
         for intent in charge_intents:
             assert intent.max_power_w is not None
@@ -289,7 +289,7 @@ class TestMilpHigsOptimizerIntentValues:
             horizon=timedelta(hours=24),
         )
         plan = await optimizer.optimize(ctx)
-        discharge_intents = [i for i in plan.intents if i.mode == "discharge"]
+        discharge_intents = [i for i in plan.intents if i.mode in ("discharge", "grid_feed_in")]
         assert discharge_intents, "Expected at least one discharge intent"
         for intent in discharge_intents:
             assert intent.min_power_w is not None
@@ -314,7 +314,7 @@ class TestMilpHigsOptimizerIntentValues:
             horizon=timedelta(hours=24),
         )
         plan = await optimizer.optimize(ctx)
-        charge_intents = [i for i in plan.intents if i.mode == "grid_fill"]
+        charge_intents = [i for i in plan.intents if i.mode == "charge_from_grid"]
         assert charge_intents
         assert all(i.charge_policy == "grid_allowed" for i in charge_intents)
 
@@ -343,7 +343,7 @@ class TestMilpHigsOptimizerIntentValues:
             horizon=timedelta(hours=24),
         )
         plan = await optimizer.optimize(ctx)
-        charge_intents = [i for i in plan.intents if i.mode == "grid_fill"]
+        charge_intents = [i for i in plan.intents if i.mode == "charge_from_pv"]
         assert charge_intents
         assert all(i.charge_policy == "pv_only" for i in charge_intents)
 
@@ -392,12 +392,12 @@ class TestMilpHigsOptimizerIntentValues:
         sma_charge_kwh = sum(
             i.reserved_kwh or 0.0
             for i in plan.intents
-            if i.device_id == "sma" and i.mode == "grid_fill" and i.timestep < first_pv_window
+            if i.device_id == "sma" and i.mode in ("charge_from_pv", "charge_from_grid") and i.timestep < first_pv_window
         )
         zendure_charge_kwh = sum(
             i.reserved_kwh or 0.0
             for i in plan.intents
-            if i.device_id == "zendure" and i.mode == "grid_fill" and i.timestep < first_pv_window
+            if i.device_id == "zendure" and i.mode in ("charge_from_pv", "charge_from_grid") and i.timestep < first_pv_window
         )
 
         assert sma_charge_kwh > zendure_charge_kwh
@@ -445,7 +445,7 @@ class TestMilpHigsOptimizerTimeResolution:
         # Power during cheap steps must not exceed max_charge_kw
         cheap_intents = [
             i for i in plan.intents
-            if i.timestep < now + timedelta(hours=1) and i.mode == "grid_fill"
+            if i.timestep < now + timedelta(hours=1) and i.mode == "charge_from_grid"
         ]
         for intent in cheap_intents:
             assert intent.max_power_w is not None
@@ -527,7 +527,7 @@ class TestMilpHigsOptimizerExportPrice:
             i for i in plan.intents if i.timestep < now + timedelta(hours=12)
         ]
         # Battery should charge during PV surplus hours (not just export everything)
-        assert any(i.mode == "grid_fill" for i in morning_intents), (
+        assert any(i.mode in ("charge_from_grid", "charge_from_pv") for i in morning_intents), (
             "Expected battery to charge from PV surplus rather than exporting at low feed-in price"
         )
 
@@ -586,7 +586,7 @@ class TestMilpHigsOptimizerTerminalValue:
         )
         plan = await optimizer.optimize(ctx)
         # Export price (0.082) < cost_basis (0.25) → no discharge should occur
-        discharge_intents = [i for i in plan.intents if i.mode == "discharge"]
+        discharge_intents = [i for i in plan.intents if i.mode in ("discharge", "grid_feed_in")]
         assert not discharge_intents, (
             "Optimizer discharged battery to export at 0.082 €/kWh "
             "even though stored energy cost 0.25 €/kWh"
@@ -617,5 +617,5 @@ class TestMilpHigsOptimizerTerminalValue:
         )
         plan = await optimizer.optimize(ctx)
         # With zero basis, discharging to serve load or export is always profitable
-        discharge_intents = [i for i in plan.intents if i.mode == "discharge"]
+        discharge_intents = [i for i in plan.intents if i.mode in ("discharge", "grid_feed_in")]
         assert discharge_intents, "Expected discharge when stored energy was free"

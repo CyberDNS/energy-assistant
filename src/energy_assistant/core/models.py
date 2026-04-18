@@ -148,18 +148,35 @@ class ControlIntent(BaseModel):
     Describes *what* a device should do and within *what* power bounds.
     The fast control loop resolves these bounds against live measurements.
 
-    Charge modes
-    ------------
-    ``idle``          Do nothing, send no command.
-    ``pv_overflow``   Track live PV surplus; stay within [min_power_w, max_power_w].
-    ``grid_fill``     Draw from grid at planned power; stay within bounds.
-    ``target_soc``    Distribute remaining energy over remaining time to deadline.
-    ``discharge``     Feed stored energy into the home; track live deficit.
+    Canonical modes (emitted by the MILP optimizer)
+    ------------------------------------------------
+    ``charge_from_pv``    Absorb PV surplus only; never increase grid import.
+                          ``planned_kw`` is the optimizer's forecast allocation
+                          for this battery (0 = absorb whatever arrives).
+    ``charge_from_grid``  Charge at ``planned_kw``; grid import is allowed.
+    ``discharge``         Reduce import on the ``zone_id`` meter up to
+                          ``planned_kw``.  No export permitted.
+    ``grid_feed_in``      Actively push stored energy past the site boundary
+                          into the grid.  Zone context is irrelevant.
+
+    Deprecated aliases (still accepted by the controller for backward-compat)
+    --------------------------------------------------------------------------
+    ``idle``       → treated as ``charge_from_pv`` at 0 planned kW.
+    ``grid_fill``  → treated as ``charge_from_grid`` (or ``charge_from_pv``
+                      when ``charge_policy == "pv_only"`` or device has
+                      ``no_grid_charge``).
     """
 
     device_id: str
     timestep: datetime
     mode: str
+    zone_id: str | None = None
+    """Zone / meter context for ``discharge`` intents.
+
+    Identifies which sub-meter the optimizer targets when requesting discharge.
+    ``None`` in ``charge_from_pv``, ``charge_from_grid``, and ``grid_feed_in``
+    intents (zone is irrelevant for those modes).
+    """
     min_power_w: float | None = None
     max_power_w: float | None = None
     planned_kw: float | None = None
@@ -179,25 +196,31 @@ class ControlIntent(BaseModel):
     """
 
     charge_policy: str = "auto"
-    """Charging source policy for this timestep.
+    """Charging source policy — informational / backward-compat for legacy modes.
 
-    Values:
-    - ``auto``: let contributor defaults decide (typically grid-allowed unless
-        constrained by device capabilities such as ``no_grid_charge``).
-    - ``pv_only``: charge only from live PV surplus, never from grid import.
-    - ``grid_allowed``: follow planned charge power even if it draws from grid.
-    - ``grid_only``: charge from grid demand explicitly.
+    When ``mode`` is one of the canonical values (``charge_from_pv``,
+    ``charge_from_grid``, ``discharge``, ``grid_feed_in``) the mode itself fully
+    encodes the charge source and this field is only kept for observability.
+
+    For legacy ``grid_fill`` / ``idle`` intents the controller still reads this:
+    - ``auto``          → resolve from device capability (``no_grid_charge`` flag).
+    - ``pv_only``       → charge only from live PV surplus.
+    - ``grid_allowed``  → allow grid import to meet the planned power.
+    - ``grid_only``     → grid source explicit (best-effort; source separation
+                          is difficult to enforce in AC-coupled systems).
     """
 
     discharge_policy: str = "meet_load_only"
-    """Discharge/export policy for this timestep.
+    """Discharge/export policy — informational / backward-compat for legacy modes.
 
-    Values:
-    - ``meet_load_only``: cap discharge to live import demand (no export).
-    - ``forbid_export``: strict no-export cap (same as meet_load_only).
-    - ``allow_export_if_profitable``: permit export only when battery basis is
-        below or equal to the current export opportunity price.
-    - ``auto``: currently treated as ``meet_load_only`` for safety.
+    When ``mode`` is one of the canonical values the mode itself encodes export
+    intent (``discharge`` = no export; ``grid_feed_in`` = export allowed).
+
+    For legacy ``discharge`` intents the controller still reads this:
+    - ``meet_load_only``             → cap to live import demand (no export).
+    - ``forbid_export``              → identical to ``meet_load_only``.
+    - ``allow_export_if_profitable`` → export when battery basis ≤ export price.
+    - ``auto``                       → treated as ``meet_load_only`` for safety.
     """
 
 

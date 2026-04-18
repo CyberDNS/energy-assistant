@@ -304,26 +304,44 @@ class StorageControlContributor:
         intent: ControlIntent | None,
         live: LiveSituation,
     ) -> float | None:
-        mode = intent.mode if intent is not None else "idle"
-        charge_policy = self._resolve_charge_policy(intent)
+        mode = intent.mode if intent is not None else "charge_from_pv"
 
-        if mode == "grid_fill":
+        # ── Canonical new modes ──────────────────────────────────────
+        if mode == "charge_from_pv":
+            # Absorb PV surplus up to device max; never draws from grid.
+            surplus_w = max(0.0, -live.grid_power_w)
+            if surplus_w > 1.0:
+                max_charge_w = self._constraints.max_charge_kw * 1000.0
+                return min(surplus_w, max_charge_w)
+            return 0.0
+
+        if mode == "charge_from_grid":
             if intent is None or intent.max_power_w is None:
                 return None
-            planned_w = max(0.0, intent.max_power_w)
-            if charge_policy == "pv_only":
-                # Follow plan, but only up to currently available surplus.
-                surplus_w = max(0.0, -live.grid_power_w)
-                return min(planned_w, surplus_w)
-            # grid_allowed / grid_only: follow optimizer setpoint.
-            return planned_w
+            return max(0.0, intent.max_power_w)
 
         if mode == "discharge":
-            # Discharge at the optimizer-planned lower bound (≤ 0 W).
             return intent.min_power_w if intent is not None else None
 
-        # idle (or unknown mode): opportunistic PV absorption
-        surplus_w = -live.grid_power_w  # positive when grid is exporting
+        if mode == "grid_feed_in":
+            # Actively export — honour planned discharge power.
+            return intent.min_power_w if intent is not None else None
+
+        # ── Legacy backward-compat aliases ───────────────────────────
+        if mode == "grid_fill":
+            charge_policy = self._resolve_charge_policy(intent)
+            if charge_policy == "pv_only":
+                if intent is None or intent.max_power_w is None:
+                    return None
+                planned_w = max(0.0, intent.max_power_w)
+                surplus_w = max(0.0, -live.grid_power_w)
+                return min(planned_w, surplus_w)
+            if intent is None or intent.max_power_w is None:
+                return None
+            return max(0.0, intent.max_power_w)
+
+        # idle / no_plan / unknown → charge_from_pv behaviour
+        surplus_w = -live.grid_power_w
         if surplus_w > 1.0:
             max_charge_w = self._constraints.max_charge_kw * 1000.0
             return min(surplus_w, max_charge_w)
@@ -611,27 +629,49 @@ class ControlLoop:
             if intent is not None:
                 if intent.planned_kw is not None:
                     planned_w = intent.planned_kw * 1000.0
-                elif intent.mode == "grid_fill":
+                elif intent.mode in ("grid_fill", "charge_from_grid"):
                     planned_w = max(0.0, intent.max_power_w or 0.0)
-                elif intent.mode == "discharge":
+                elif intent.mode in ("discharge", "grid_feed_in"):
                     planned_w = min(0.0, intent.min_power_w or 0.0)
+                # charge_from_pv / idle → planned_w stays 0 (surplus-driven)
 
-                # Soften discharge tracking when live PV surplus exists so the
-                # realtime layer may absorb otherwise-exported PV.
-                if intent.mode == "discharge" and live.grid_power_w < -1.0:
-                    planned_w = min(planned_w, 0.0)
+                # Soften discharge/feed_in tracking when live PV surplus exists
+                # so the realtime layer may absorb otherwise-exported PV.
+                if intent.mode in ("discharge", "grid_feed_in") and live.grid_power_w < -1.0:
                     planned_w = 0.0
+
+            # Derive effective charge/discharge policies for the realtime slicer.
+            # For new canonical modes the mode itself encodes the source/export
+            # intent; for legacy modes fall back to the intent's policy fields.
+            intent_mode = intent.mode if intent is not None else "no_plan"
+            if intent_mode == "charge_from_pv":
+                effective_charge_policy = "pv_only"
+            elif intent_mode == "charge_from_grid":
+                effective_charge_policy = "grid_allowed"
+            else:
+                effective_charge_policy = (
+                    (intent.charge_policy if intent is not None else "auto") or "auto"
+                )
+
+            if intent_mode == "grid_feed_in":
+                effective_discharge_policy = "allow_export_if_profitable"
+            else:
+                effective_discharge_policy = (
+                    (intent.discharge_policy if intent is not None else "meet_load_only")
+                    or "meet_load_only"
+                )
+
             storage_inputs.append(
                 StorageSliceInput(
                     device_id=contributor.device_id,
                     max_charge_w=contributor._constraints.max_charge_kw * 1000.0,
                     max_discharge_w=contributor._constraints.max_discharge_kw * 1000.0,
                     no_grid_charge=contributor._constraints.no_grid_charge,
-                    mode=intent.mode if intent is not None else "no_plan",
+                    mode=intent_mode,
                     planned_w=planned_w,
                     reserved_kwh=(intent.reserved_kwh if intent is not None and intent.reserved_kwh is not None else 0.0),
-                    charge_policy=(intent.charge_policy if intent is not None else "auto") or "auto",
-                    discharge_policy=(intent.discharge_policy if intent is not None else "meet_load_only") or "meet_load_only",
+                    charge_policy=effective_charge_policy,
+                    discharge_policy=effective_discharge_policy,
                     prev_setpoint_w=self._last_storage_setpoints_w.get(contributor.device_id, 0.0),
                 )
             )
