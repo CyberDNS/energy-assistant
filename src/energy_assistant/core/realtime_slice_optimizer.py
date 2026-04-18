@@ -117,9 +117,10 @@ def optimize_storage_slice(
             min_follow_w = min(inp.max_charge_w, 0.6 * inp.planned_w)
             prob += c[did] >= min_follow_w, f"grid_fill_anchor__{did}"
 
-        # If the long-term plan says discharge/feed_in but we currently export PV,
-        # absorb that surplus instead of forcing a rigid discharge lock.
-        if inp.mode in ("discharge", "grid_feed_in") and surplus_w > 1.0 and inp.charge_policy != "grid_only":
+        # If the long-term plan says discharge (meet-load mode) but we
+        # currently export PV, absorb that surplus instead of forcing a rigid
+        # discharge lock. For explicit grid_feed_in mode we keep export intent.
+        if inp.mode == "discharge" and surplus_w > 1.0 and inp.charge_policy != "grid_only":
             pv_absorb_w = min(inp.max_charge_w, surplus_w)
             prob += c[did] >= pv_absorb_w, f"discharge_pv_absorb__{did}"
 
