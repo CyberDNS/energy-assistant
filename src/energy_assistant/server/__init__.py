@@ -372,28 +372,20 @@ async function refreshLive() {
     setText('kPv', Math.round(pvW) + ' W', pvW > 50 ? 'ok' : '');
     setText('kPrice', fmt(status.current_price_eur_per_kwh, 4) + ' €/kWh');
     setText('kExport', fmt(status.pv_opportunity_price_eur_per_kwh, 4) + ' €/kWh');
-    // Source mix fractions (shared across all market price cards)
-    const gridImport = Math.max(0, gp);
-    const ledgerMap = {};
-    for (const l of (status.ledger || [])) ledgerMap[l.device_id] = l.cost_basis_eur_per_kwh || 0;
-    let batW = 0;
-    for (const d of (status.devices || [])) {
-        const pw = Number(d.power_w || 0);
-        if (pw < 0 && ledgerMap[d.device_id] !== undefined) batW += Math.abs(pw);
-    }
-    const totalW = pvW + gridImport + batW;
-    const pvFrac   = totalW > 0 ? Math.min(1, pvW / totalW) : 0;
-    const gridFrac = totalW > 0 ? gridImport / totalW : 0;
-    const batFrac  = totalW > 0 ? batW / totalW : 0;
-    const mixParts = [];
-    if (pvFrac > 0.01)   mixParts.push(Math.round(pvFrac * 100) + '% PV');
-    if (gridFrac > 0.01) mixParts.push(Math.round(gridFrac * 100) + '% Grid');
-    if (batFrac > 0.01)  mixParts.push(Math.round(batFrac * 100) + '% Bat');
-    const mixLabel = mixParts.join(' \u00b7 ') || '\u2014';
-    const mixCls = pvFrac > 0.66 ? 'ok' : (pvFrac > 0.33 ? '' : 'warn');
+    const marketBreakdown = status.market_price_breakdown || {};
     // Market price cards — one per tariff (server already computed the blended price)
     document.getElementById('marketKpis').innerHTML = Object.entries(status.market_prices || {}).map(([tid, mp]) => {
         const cap = tid.charAt(0).toUpperCase() + tid.slice(1);
+        const parts = marketBreakdown[tid] || {};
+        const pvFrac = Number(parts.pv_frac || 0);
+        const gridFrac = Number(parts.grid_frac || 0);
+        const batFrac = Number(parts.bat_frac || 0);
+        const mixParts = [];
+        if (gridFrac > 0.01) mixParts.push(Math.round(gridFrac * 100) + '% Grid');
+        if (pvFrac > 0.01)   mixParts.push(Math.round(pvFrac * 100) + '% PV');
+        if (batFrac > 0.01)  mixParts.push(Math.round(batFrac * 100) + '% Bat');
+        const mixLabel = mixParts.join(' \u00b7 ') || '\u2014';
+        const mixCls = pvFrac > 0.66 ? 'ok' : (pvFrac > 0.33 ? '' : 'warn');
         return `<div class="card" title="Market price for ${tid} tariff (${mixLabel})">
             <div class="k">Market (${cap})</div>
             <div class="v ${mixCls}">${fmt(mp, 4)} \u20ac/kWh</div>
@@ -1576,6 +1568,10 @@ class Application:
             }
 
             tariff_prices_status = await self._fetch_tariff_prices(now)
+            market_breakdown = self._compute_zone_market_breakdown(
+                tariff_prices_status,
+                device_states_map,
+            )
 
             live = LiveSituation(
                 timestamp=now,
@@ -1630,7 +1626,11 @@ class Application:
                     }
                     for sc in self._storage_constraints
                 ],
-                "market_prices": self._compute_zone_market_prices(tariff_prices_status, device_states_map),
+                "market_prices": {
+                    tid: float(parts.get("price_eur_per_kwh", 0.0))
+                    for tid, parts in market_breakdown.items()
+                },
+                "market_price_breakdown": market_breakdown,
             }
 
         @api.get("/api/plan")
@@ -2119,29 +2119,52 @@ class Application:
         tariff_prices: dict[str, float],
         device_states: "dict[str, Any]",
     ) -> dict[str, float]:
-        """Compute blended market price per tariff zone (€/kWh).
+        """Compute blended market price per tariff zone (€/kWh)."""
+        breakdown = self._compute_zone_market_breakdown(tariff_prices, device_states)
+        return {
+            tariff_id: float(parts.get("price_eur_per_kwh", 0.0))
+            for tariff_id, parts in breakdown.items()
+        }
 
-        Two-pass approach:
+    def _compute_zone_market_breakdown(
+        self,
+        tariff_prices: dict[str, float],
+        device_states: "dict[str, Any]",
+    ) -> dict[str, dict[str, float]]:
+        """Compute per-zone market-price components for UI diagnostics.
 
-        **Pass 1 — direct zones** (own meter + local PV + batteries):
-        Each zone uses only its own meter reading (Z2), its own PV, and
-        its own batteries to compute a blended price.
+        Returns, per tariff ID:
 
-        **Pass 2 — differential zones** (e.g. heatpump = Z1 − Z2):
-        The zone has no local renewables but may receive surplus from a
-        direct zone when that zone's meter is exporting (Z2 < 0 → feedback
-        into the heatpump circuit).  The blended price is:
+        - ``price_eur_per_kwh``
+        - ``grid_frac`` / ``pv_frac`` / ``bat_frac``
+        - ``grid_w`` / ``pv_w`` / ``bat_w``
 
-        .. code::
-
-            hp_power = Z1_power - Z2_power   (total heatpump load)
-            z2_feedback = max(0, -Z2_power)  (household surplus flowing in)
-            z1_grid     = hp_power - z2_feedback
-
-            price = (z1_grid / hp_power) × flat_rate
-                  + (z2_feedback / hp_power) × household_market_price
+        Fractions always sum to approximately 1.0 when total power is > 0.
         """
+
+        def _parts(price: float, grid_w: float, pv_w: float, bat_w: float) -> dict[str, float]:
+            total_w = max(0.0, grid_w) + max(0.0, pv_w) + max(0.0, bat_w)
+            if total_w <= 0.0:
+                return {
+                    "price_eur_per_kwh": float(price),
+                    "grid_frac": 1.0,
+                    "pv_frac": 0.0,
+                    "bat_frac": 0.0,
+                    "grid_w": max(0.0, grid_w),
+                    "pv_w": max(0.0, pv_w),
+                    "bat_w": max(0.0, bat_w),
+                }
+            return {
+                "price_eur_per_kwh": float(price),
+                "grid_frac": max(0.0, grid_w) / total_w,
+                "pv_frac": max(0.0, pv_w) / total_w,
+                "bat_frac": max(0.0, bat_w) / total_w,
+                "grid_w": max(0.0, grid_w),
+                "pv_w": max(0.0, pv_w),
+                "bat_w": max(0.0, bat_w),
+            }
         result: dict[str, float] = {}
+        breakdown: dict[str, dict[str, float]] = {}
         cost_bases = self._ledger.all_cost_bases()
 
         # ── Pass 1: direct zones ──────────────────────────────────────────────
@@ -2161,6 +2184,7 @@ class Application:
             if not zone.producer_ids and not zone.storage_ids:
                 # Direct zone but no renewables → always 100 % grid rate
                 result[tariff_id] = import_price
+                breakdown[tariff_id] = _parts(import_price, grid_w=1.0, pv_w=0.0, bat_w=0.0)
                 continue
 
             # Clamped grid import for this zone's sub-meter
@@ -2188,14 +2212,17 @@ class Application:
             total_w = pv_w + grid_w + bat_w
             if total_w <= 0.0:
                 result[tariff_id] = import_price
+                breakdown[tariff_id] = _parts(import_price, grid_w=1.0, pv_w=0.0, bat_w=0.0)
                 continue
 
             bat_basis = bat_cost / bat_w if bat_w > 0.0 else 0.0
-            result[tariff_id] = (
+            price = (
                 (pv_w  / total_w) * self._pv_opportunity_price
                 + (grid_w / total_w) * import_price
                 + (bat_w  / total_w) * bat_basis
             )
+            result[tariff_id] = price
+            breakdown[tariff_id] = _parts(price, grid_w=grid_w, pv_w=pv_w, bat_w=bat_w)
 
         # ── Pass 2: differential zones ────────────────────────────────────────
         for tariff_id, import_price in tariff_prices.items():
@@ -2205,6 +2232,7 @@ class Application:
             if zone is None or zone.diff_minuend_id is None:
                 # No zone or not a differential zone → flat rate
                 result[tariff_id] = import_price
+                breakdown[tariff_id] = _parts(import_price, grid_w=1.0, pv_w=0.0, bat_w=0.0)
                 continue
 
             minuend_state = device_states.get(zone.diff_minuend_id)
@@ -2217,12 +2245,17 @@ class Application:
             diff_w = max(0.0, z1_w - z2_w)
             if diff_w <= 0.0:
                 result[tariff_id] = import_price
+                breakdown[tariff_id] = _parts(import_price, grid_w=1.0, pv_w=0.0, bat_w=0.0)
                 continue
 
-            # Z2 exporting (negative) → that surplus flows into this circuit
-            z2_feedback_w = max(0.0, -z2_w)
+            # Z2 exporting (negative) → that surplus can flow into this circuit,
+            # but never more than the differential load itself.
+            z2_feedback_w = min(diff_w, max(0.0, -z2_w))
             # Remainder is served by direct grid via Z1
             z1_grid_w = max(0.0, diff_w - z2_feedback_w)
+
+            feedback_pv_w = z2_feedback_w
+            feedback_bat_w = 0.0
 
             if z2_feedback_w > 0.0 and zone.diff_subtrahend_id:
                 # The exported energy came from PV / batteries — NOT from the grid.
@@ -2250,23 +2283,38 @@ class Application:
                     sz_source_w = sz_pv_w + sz_bat_w
                     if sz_source_w > 0.0:
                         sz_bat_basis = sz_bat_cost / sz_bat_w if sz_bat_w > 0.0 else 0.0
+                        feedback_pv_w = z2_feedback_w * (sz_pv_w / sz_source_w)
+                        feedback_bat_w = z2_feedback_w * (sz_bat_w / sz_source_w)
                         feedback_price = (
                             (sz_pv_w  / sz_source_w) * self._pv_opportunity_price
                             + (sz_bat_w / sz_source_w) * sz_bat_basis
                         )
                     else:
+                        feedback_pv_w = z2_feedback_w
+                        feedback_bat_w = 0.0
                         feedback_price = self._pv_opportunity_price
                 else:
+                    feedback_pv_w = z2_feedback_w
+                    feedback_bat_w = 0.0
                     feedback_price = self._pv_opportunity_price
             else:
                 feedback_price = import_price
+                feedback_pv_w = 0.0
+                feedback_bat_w = 0.0
 
-            result[tariff_id] = (
+            price = (
                 (z1_grid_w     / diff_w) * import_price
                 + (z2_feedback_w / diff_w) * feedback_price
             )
+            result[tariff_id] = price
+            breakdown[tariff_id] = _parts(
+                price,
+                grid_w=z1_grid_w,
+                pv_w=feedback_pv_w,
+                bat_w=feedback_bat_w,
+            )
 
-        return result
+        return breakdown
 
     def _default_zone_grid_power_w(self, device_states: "dict[str, Any]") -> float | None:
         """Return grid import power (W) for the default tariff zone's sub-meter.
