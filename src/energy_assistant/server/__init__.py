@@ -502,6 +502,11 @@ async function refreshPlan() {
     const ts       = fc.timestamps || [];
     const prices   = fc.prices || [];
     const priceIsEstimated = fc.price_is_estimated || [];
+    const varPrices = (fc.variable_prices && fc.variable_prices.length) ? fc.variable_prices : prices;
+    const varPriceIsEstimated =
+        (fc.variable_price_is_estimated && fc.variable_price_is_estimated.length)
+            ? fc.variable_price_is_estimated
+            : priceIsEstimated;
     const epPrices = fc.export_prices || [];
     const pvKw     = fc.pv_kw || [];
     const pvIsEstimated = fc.pv_is_estimated || [];
@@ -580,7 +585,7 @@ async function refreshPlan() {
         return {actual, estimated};
     }
     const pvSplit = splitEstimated(pvKw, pvIsEstimated);
-    const priceSplit = splitEstimated(prices, priceIsEstimated);
+    const priceSplit = splitEstimated(varPrices, varPriceIsEstimated);
 
     // ── Panel 1: Energy flow stacked bars ─────────────────────────────────────
     const flowTraces = [
@@ -1136,6 +1141,8 @@ class Application:
         self._horizon: timedelta
         self._last_forecast_pts: dict[ForecastQuantity, list[ForecastPoint]] = {}
         self._last_price_estimated_by_ts: dict[datetime, bool] = {}
+        self._last_variable_price_pts: list[ForecastPoint] = []
+        self._last_variable_price_estimated_by_ts: dict[datetime, bool] = {}
         self._last_pv_estimated_by_ts: dict[datetime, bool] = {}
         self._plan_interval_s: float
         self._poll_interval_s: float
@@ -1328,6 +1335,13 @@ class Application:
             forecasts[ForecastQuantity.PRICE] = weighted_prices
         self._last_price_estimated_by_ts = price_estimated_by_ts
 
+        # UI chart series: keep a dedicated variable-only import price curve
+        # (e.g. Tibber spot) so the chart is not blended with flat tariffs.
+        (
+            self._last_variable_price_pts,
+            self._last_variable_price_estimated_by_ts,
+        ) = await self._build_ui_variable_price_forecast()
+
         # Fallback: inject a single tariff curve if we still have no PRICE data.
         # The MILP fetches prices from tariffs internally, but the cached forecasts
         # dict is used by /api/forecast for the UI — it needs prices too.
@@ -1341,7 +1355,9 @@ class Application:
                             ForecastPoint(timestamp=tp.timestamp, value=tp.price_eur_per_kwh)
                             for tp in ext
                         ]
-                        self._last_price_estimated_by_ts = {ts: True for ts in est_ts}
+                        self._last_price_estimated_by_ts = {
+                            tp.timestamp: (tp.timestamp in est_ts) for tp in ext
+                        }
                         break
                 except Exception:  # noqa: BLE001
                     pass
@@ -1351,7 +1367,9 @@ class Application:
         pv_ext, pv_est_ts = _extend_forecast_points_with_daily_repeat(pv_points, self._horizon)
         if pv_ext:
             forecasts[ForecastQuantity.PV_GENERATION] = pv_ext
-        self._last_pv_estimated_by_ts = {ts: True for ts in pv_est_ts}
+        self._last_pv_estimated_by_ts = {
+            p.timestamp: (p.timestamp in pv_est_ts) for p in pv_ext
+        }
 
         self._last_forecast_pts = forecasts  # cache for /api/forecast
 
@@ -1709,6 +1727,7 @@ class Application:
             timestamps = sorted({i.timestep for i in plan.intents})
             pts_price = sorted(self._last_forecast_pts.get(ForecastQuantity.PRICE, []),
                                key=lambda p: p.timestamp)
+            pts_var_price = sorted(self._last_variable_price_pts, key=lambda p: p.timestamp)
             pts_pv    = sorted(self._last_forecast_pts.get(ForecastQuantity.PV_GENERATION, []),
                                key=lambda p: p.timestamp)
             pts_cons_raw = self._last_forecast_pts.get(ForecastQuantity.CONSUMPTION, [])
@@ -1787,6 +1806,10 @@ class Application:
                 "timestamps":    [t.isoformat() for t in timestamps],
                 "prices":        [nn_value(pts_price, t) for t in timestamps],
                 "price_is_estimated": [nn_flag(self._last_price_estimated_by_ts, t) for t in timestamps],
+                "variable_prices": [nn_value(pts_var_price, t) for t in timestamps],
+                "variable_price_is_estimated": [
+                    nn_flag(self._last_variable_price_estimated_by_ts, t) for t in timestamps
+                ],
                 "export_prices": [ep_value(t) for t in timestamps],
                 "pv_kw":         [ff_value(pts_pv, t) for t in timestamps],
                 "pv_is_estimated": [nn_flag(self._last_pv_estimated_by_ts, t) for t in timestamps],
@@ -2401,3 +2424,52 @@ class Application:
                 weighted_estimated_by_ts[ts] = has_estimated_component
 
         return weighted, weighted_estimated_by_ts
+
+    def _pick_ui_variable_tariff_id(self) -> str | None:
+        """Select a tariff ID suitable for variable-price charting.
+
+        Prefer the configured default tariff if it is variable, otherwise the
+        first configured variable tariff. Flat-rate tariffs are excluded.
+        """
+
+        def is_variable(tariff_cfg: dict[str, Any] | None) -> bool:
+            if not isinstance(tariff_cfg, dict):
+                return False
+            return str(tariff_cfg.get("type") or "").strip().lower() != "flat_rate"
+
+        default_id = self._cfg.default_tariff_id
+        if default_id and is_variable(self._cfg.tariffs.get(default_id)):
+            return default_id
+
+        for tariff_id, tariff_cfg in self._cfg.tariffs.items():
+            if is_variable(tariff_cfg):
+                return tariff_id
+
+        return None
+
+    async def _build_ui_variable_price_forecast(self) -> tuple[list[ForecastPoint], dict[datetime, bool]]:
+        """Return a variable-only import-price series for UI rendering.
+
+        This keeps the plan chart aligned with user expectations (spot/variable
+        tariff only) while the optimizer can still use a blended effective price.
+        """
+        tariff_id = self._pick_ui_variable_tariff_id()
+        if not tariff_id:
+            return [], {}
+
+        tariff = self._tariffs.get(tariff_id)
+        if tariff is None:
+            return [], {}
+
+        try:
+            sched = await tariff.price_schedule(self._horizon)
+            if not sched:
+                return [], {}
+            ext, est_ts = _extend_tariff_schedule_with_daily_repeat(sched, self._horizon)
+            pts = [
+                ForecastPoint(timestamp=tp.timestamp, value=tp.price_eur_per_kwh)
+                for tp in ext
+            ]
+            return pts, {tp.timestamp: (tp.timestamp in est_ts) for tp in ext}
+        except Exception:  # noqa: BLE001
+            return [], {}
