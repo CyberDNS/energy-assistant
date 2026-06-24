@@ -661,11 +661,24 @@ class ControlLoop:
                     or "meet_load_only"
                 )
 
+            # Clamp discharge capacity to 0 when the battery is at or below
+            # min_soc so the slice optimizer doesn't allocate load-coverage to
+            # a battery that physically cannot discharge.
+            live_state = live.device_states.get(contributor.device_id)
+            live_soc_pct = live_state.soc_pct if live_state is not None else None
+            at_min_soc = (
+                live_soc_pct is not None
+                and live_soc_pct <= contributor._constraints.min_soc_pct
+            )
+            effective_max_discharge_w = (
+                0.0 if at_min_soc else contributor._constraints.max_discharge_kw * 1000.0
+            )
+
             storage_inputs.append(
                 StorageSliceInput(
                     device_id=contributor.device_id,
                     max_charge_w=contributor._constraints.max_charge_kw * 1000.0,
-                    max_discharge_w=contributor._constraints.max_discharge_kw * 1000.0,
+                    max_discharge_w=effective_max_discharge_w,
                     no_grid_charge=contributor._constraints.no_grid_charge,
                     mode=intent_mode,
                     planned_w=planned_w,
