@@ -306,9 +306,16 @@ class StorageControlContributor:
     ) -> float | None:
         mode = intent.mode if intent is not None else "charge_from_pv"
 
+        # Respect SoC limits before any charging decision.
+        live_state = live.device_states.get(self.device_id)
+        live_soc = live_state.soc_pct if live_state is not None else None
+        at_max_soc = live_soc is not None and live_soc >= self._constraints.max_soc_pct
+        at_min_soc = live_soc is not None and live_soc <= self._constraints.min_soc_pct
+
         # ── Canonical new modes ──────────────────────────────────────
         if mode == "charge_from_pv":
-            # Absorb PV surplus up to device max; never draws from grid.
+            if at_max_soc:
+                return 0.0
             surplus_w = max(0.0, -live.grid_power_w)
             if surplus_w > 1.0:
                 max_charge_w = self._constraints.max_charge_kw * 1000.0
@@ -316,19 +323,26 @@ class StorageControlContributor:
             return 0.0
 
         if mode == "charge_from_grid":
+            if at_max_soc:
+                return 0.0
             if intent is None or intent.max_power_w is None:
                 return None
             return max(0.0, intent.max_power_w)
 
         if mode == "discharge":
+            if at_min_soc:
+                return 0.0
             return intent.min_power_w if intent is not None else None
 
         if mode == "grid_feed_in":
-            # Actively export — honour planned discharge power.
+            if at_min_soc:
+                return 0.0
             return intent.min_power_w if intent is not None else None
 
         # ── Legacy backward-compat aliases ───────────────────────────
         if mode == "grid_fill":
+            if at_max_soc:
+                return 0.0
             charge_policy = self._resolve_charge_policy(intent)
             if charge_policy == "pv_only":
                 if intent is None or intent.max_power_w is None:
@@ -341,6 +355,8 @@ class StorageControlContributor:
             return max(0.0, intent.max_power_w)
 
         # idle / no_plan / unknown → charge_from_pv behaviour
+        if at_max_soc:
+            return 0.0
         surplus_w = -live.grid_power_w
         if surplus_w > 1.0:
             max_charge_w = self._constraints.max_charge_kw * 1000.0
@@ -608,9 +624,13 @@ class ControlLoop:
             if live.default_zone_grid_power_w is not None
             else live.grid_power_w
         )
-        # Recover controllable demand headroom by adding battery discharge that
-        # is already happening right now; otherwise a discharge command can
-        # self-cancel to zero on the next tick when grid import briefly hits 0.
+        # Recover the true base grid power by removing the current battery
+        # contribution from the live meter reading.
+        # Discharge: grid import appears lower than real demand — add it back so
+        #   the optimizer doesn't self-cancel to zero on the next tick.
+        # Charge: grid export appears lower than real PV surplus — subtract it
+        #   back so the optimizer sees the full surplus available for charging
+        #   (e.g. -1000 W grid + 789 W battery charge → -1789 W true base).
         current_discharge_w = sum(
             -live.device_states[c.device_id].power_w
             for c in self._contributors
@@ -618,7 +638,14 @@ class ControlLoop:
             and live.device_states[c.device_id].power_w is not None
             and live.device_states[c.device_id].power_w < 0
         )
-        effective_grid_w = grid_ref_w + current_discharge_w
+        current_charge_w = sum(
+            live.device_states[c.device_id].power_w
+            for c in self._contributors
+            if c.device_id in live.device_states
+            and live.device_states[c.device_id].power_w is not None
+            and live.device_states[c.device_id].power_w > 0
+        )
+        effective_grid_w = grid_ref_w + current_discharge_w - current_charge_w
 
         storage_inputs: list[StorageSliceInput] = []
         for contributor in self._contributors:
@@ -661,14 +688,21 @@ class ControlLoop:
                     or "meet_load_only"
                 )
 
-            # Clamp discharge capacity to 0 when the battery is at or below
-            # min_soc so the slice optimizer doesn't allocate load-coverage to
-            # a battery that physically cannot discharge.
+            # Clamp charge/discharge capacity to 0 when the battery is at its
+            # SoC limits so the slice optimizer doesn't assign power to a
+            # battery that physically cannot accept or deliver it.
             live_state = live.device_states.get(contributor.device_id)
             live_soc_pct = live_state.soc_pct if live_state is not None else None
             at_min_soc = (
                 live_soc_pct is not None
                 and live_soc_pct <= contributor._constraints.min_soc_pct
+            )
+            at_max_soc = (
+                live_soc_pct is not None
+                and live_soc_pct >= contributor._constraints.max_soc_pct
+            )
+            effective_max_charge_w = (
+                0.0 if at_max_soc else contributor._constraints.max_charge_kw * 1000.0
             )
             effective_max_discharge_w = (
                 0.0 if at_min_soc else contributor._constraints.max_discharge_kw * 1000.0
@@ -677,7 +711,7 @@ class ControlLoop:
             storage_inputs.append(
                 StorageSliceInput(
                     device_id=contributor.device_id,
-                    max_charge_w=contributor._constraints.max_charge_kw * 1000.0,
+                    max_charge_w=effective_max_charge_w,
                     max_discharge_w=effective_max_discharge_w,
                     no_grid_charge=contributor._constraints.no_grid_charge,
                     mode=intent_mode,
