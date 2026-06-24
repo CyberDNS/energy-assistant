@@ -37,6 +37,7 @@ import asyncio
 import dataclasses
 from collections import defaultdict
 import logging
+import os
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -1159,7 +1160,7 @@ class Application:
         self._plan_interval_s = float(ctl.get("plan_interval_s", 3600))
         self._control_interval_s = float(ctl.get("control_interval_s", 30))
         self._poll_interval_s = float(ctl.get("poll_interval_s", self._control_interval_s))
-        self._dry_run = bool(ctl.get("dry_run", False))
+        self._dry_run = bool(ctl.get("dry_run", False)) or os.environ.get("ENERGY_ASSISTANT_DRY_RUN", "") == "1"
         horizon_h = int(opt.get("horizon_hours", 24))
         self._horizon = timedelta(hours=horizon_h)
 
@@ -1225,8 +1226,9 @@ class Application:
 
         # 10 — Build API + launch loops
         self._api = self._build_api()
-        port = int(self._cfg.server.get("port", 8088))
+        port = int(os.environ.get("ENERGY_ASSISTANT_PORT", "") or self._cfg.server.get("port", 8088))
         _log.info("API listening on http://0.0.0.0:%d", port)
+        _log.info("Web UI available at http://localhost:%d", port)
         self.tasks = [
             asyncio.create_task(self._polling_loop(), name="polling"),
             asyncio.create_task(self._planning_loop(), name="planning"),
