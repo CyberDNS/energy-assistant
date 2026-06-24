@@ -135,7 +135,7 @@ def optimize_storage_slice(
             and inp.charge_policy != "pv_only"
             and not inp.no_grid_charge
         ):
-            pv_absorb_w = min(inp.max_charge_w, surplus_w, inp.planned_w)
+            pv_absorb_w = min(inp.max_charge_w, surplus_w)
             prob += c[did] >= pv_absorb_w, f"charge_grid_pv_absorb__{did}"
 
     # Preserve legacy idle behavior: absorb currently-exported PV surplus.
