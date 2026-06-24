@@ -124,6 +124,20 @@ def optimize_storage_slice(
             pv_absorb_w = min(inp.max_charge_w, surplus_w)
             prob += c[did] >= pv_absorb_w, f"discharge_pv_absorb__{did}"
 
+        # In charge_from_grid / grid_fill mode with PV surplus, absorb that
+        # surplus first (up to planned_w) before drawing from the grid.
+        # Without this, the optimizer prefers exporting PV (earns exp_p revenue)
+        # while only meeting the 60 % anchor floor, leaving PV on the table.
+        if (
+            inp.mode in ("grid_fill", "charge_from_grid")
+            and surplus_w > 1.0
+            and inp.planned_w > 1.0
+            and inp.charge_policy != "pv_only"
+            and not inp.no_grid_charge
+        ):
+            pv_absorb_w = min(inp.max_charge_w, surplus_w, inp.planned_w)
+            prob += c[did] >= pv_absorb_w, f"charge_grid_pv_absorb__{did}"
+
     # Preserve legacy idle behavior: absorb currently-exported PV surplus.
     # This keeps idle/auto intuitive at runtime (exporting while battery idles
     # would otherwise look like a broken mode decision).
