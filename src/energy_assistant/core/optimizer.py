@@ -11,6 +11,7 @@ from .models import DeviceState, EnergyPlan, ForecastPoint, ForecastQuantity, St
 if TYPE_CHECKING:
     from .constraint import Constraint
     from .tariff import TariffModel
+    from ..assets.ev import EvChargingGoal
 
 
 @dataclass
@@ -46,6 +47,20 @@ class OptimizationContext:
     constraints: list["Constraint"] = field(default_factory=list)
     horizon: timedelta = field(default_factory=lambda: timedelta(hours=24))
     battery_cost_basis: dict[str, float] = field(default_factory=dict)
+    ev_charging_goals: list["EvChargingGoal"] = field(default_factory=list)
+    producer_device_ids: set[str] = field(default_factory=set)
+    """Device IDs with role=producer (PV panels).
+
+    When non-empty, the live-PV floor in the MILP reads ONLY these devices.
+    Without this, bidirectional meters reporting negative power (exporting)
+    would be mistakenly counted as PV production.
+    """
+    """Active EV charging goals (one per connected chargepoint with a target).
+
+    Each goal carries the current SoC, deadline, phase1/phase2 energy split,
+    and charge-curve data.  The MILP optimizer uses these to schedule grid
+    charging slots while respecting the departure deadline.
+    """
     """Cost basis (€/kWh) per storage device, supplied by BatteryCostLedger.
 
     Used by the MILP as a terminal value: stored energy left at the end of the
