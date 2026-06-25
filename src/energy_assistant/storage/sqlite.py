@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import aiosqlite
@@ -83,6 +83,46 @@ _CREATE_INDEX = """
 CREATE INDEX IF NOT EXISTS idx_device_timestamp
     ON measurements (device_id, timestamp)
 """
+
+_CREATE_EV_TARGETS_TABLE = """
+CREATE TABLE IF NOT EXISTS ev_targets (
+    asset_id       TEXT PRIMARY KEY,
+    target_soc_pct REAL NOT NULL,
+    target_by      TEXT NOT NULL,
+    created_at     TEXT NOT NULL
+)
+"""
+
+_UPSERT_EV_TARGET = """
+INSERT INTO ev_targets (asset_id, target_soc_pct, target_by, created_at)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(asset_id) DO UPDATE SET
+    target_soc_pct = excluded.target_soc_pct,
+    target_by      = excluded.target_by,
+    created_at     = excluded.created_at
+"""
+
+_DELETE_EV_TARGET = "DELETE FROM ev_targets WHERE asset_id = ?"
+
+_LOAD_EV_TARGET = "SELECT target_soc_pct, target_by FROM ev_targets WHERE asset_id = ?"
+
+_LOAD_ALL_EV_TARGETS = "SELECT asset_id, target_soc_pct, target_by FROM ev_targets"
+
+_CREATE_EV_DISABLED_TABLE = """
+CREATE TABLE IF NOT EXISTS ev_disabled (
+    asset_id   TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL
+)
+"""
+
+_UPSERT_EV_DISABLED = """
+INSERT INTO ev_disabled (asset_id, created_at) VALUES (?, ?)
+ON CONFLICT(asset_id) DO NOTHING
+"""
+
+_DELETE_EV_DISABLED = "DELETE FROM ev_disabled WHERE asset_id = ?"
+
+_LOAD_ALL_EV_DISABLED = "SELECT asset_id FROM ev_disabled"
 
 _UPSERT_LEDGER = """
 INSERT INTO ledger_state (device_id, cost_basis, stored_energy_kwh, updated_at)
@@ -145,6 +185,8 @@ class SqliteStorageBackend:
         await self._db.execute(_CREATE_TABLE)
         await self._db.execute(_CREATE_LEDGER_TABLE)
         await self._db.execute(_CREATE_LEDGER_HISTORY_TABLE)
+        await self._db.execute(_CREATE_EV_TARGETS_TABLE)
+        await self._db.execute(_CREATE_EV_DISABLED_TABLE)
         await self._db.execute(_CREATE_INDEX)
         await self._db.execute(_CREATE_LEDGER_HISTORY_INDEX)
         await self._db.commit()
@@ -273,3 +315,56 @@ class SqliteStorageBackend:
         if row is None:
             return None
         return float(row[0]), float(row[1])
+
+    # ------------------------------------------------------------------
+    # EV charging target overrides
+    # ------------------------------------------------------------------
+
+    async def set_ev_target(
+        self,
+        asset_id: str,
+        target_soc_pct: float,
+        target_by: datetime,
+    ) -> None:
+        """Persist a UI charging-target override for *asset_id*."""
+        assert self._db is not None, "Call start() before set_ev_target()"
+        now = datetime.now(timezone.utc).isoformat()
+        await self._db.execute(
+            _UPSERT_EV_TARGET,
+            (asset_id, target_soc_pct, target_by.isoformat(), now),
+        )
+        await self._db.commit()
+
+    async def clear_ev_target(self, asset_id: str) -> None:
+        """Remove any UI override for *asset_id*."""
+        assert self._db is not None, "Call start() before clear_ev_target()"
+        await self._db.execute(_DELETE_EV_TARGET, (asset_id,))
+        await self._db.commit()
+
+    async def set_ev_disabled(self, asset_id: str) -> None:
+        assert self._db is not None
+        now = datetime.now(timezone.utc).isoformat()
+        await self._db.execute(_UPSERT_EV_DISABLED, (asset_id, now))
+        await self._db.commit()
+
+    async def clear_ev_disabled(self, asset_id: str) -> None:
+        assert self._db is not None
+        await self._db.execute(_DELETE_EV_DISABLED, (asset_id,))
+        await self._db.commit()
+
+    async def load_all_ev_disabled(self) -> set[str]:
+        assert self._db is not None
+        async with self._db.execute(_LOAD_ALL_EV_DISABLED) as cursor:
+            rows = await cursor.fetchall()
+        return {row[0] for row in rows}
+
+    async def load_all_ev_targets(self) -> dict[str, tuple[float, datetime]]:
+        """Return all stored overrides as ``{asset_id: (target_soc_pct, target_by_utc)}``."""
+        assert self._db is not None, "Call start() before load_all_ev_targets()"
+        async with self._db.execute(_LOAD_ALL_EV_TARGETS) as cursor:
+            rows = await cursor.fetchall()
+        result: dict[str, tuple[float, datetime]] = {}
+        for row in rows:
+            asset_id, soc, ts_str = row
+            result[asset_id] = (float(soc), datetime.fromisoformat(ts_str))
+        return result

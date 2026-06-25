@@ -47,6 +47,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 import uvicorn
 
+from ..assets.ev import EvChargerContributor, EvChargingAsset, EvChargingGoal
+from ..assets.loader import parse_ev_assets, resolve_active_goals
 from ..config.yaml import YamlConfigLoader
 from ..core.config import AppConfig
 from ..core.control import ControlLoop, LiveSituation, StorageControlContributor
@@ -160,9 +162,24 @@ def _web_ui_html() -> str:
         .range-btns { display:flex; gap:6px; margin-bottom:8px; }
         .range-btn { padding:4px 12px; border:1px solid var(--line); background:var(--card); border-radius:6px; cursor:pointer; font-size:.82rem; }
         .range-btn.active { background:var(--tab-active); color:#fff; border-color:var(--tab-active); }
+        /* ── EV cards ── */
+        .ev-card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:10px 14px; }
+        .ev-card h3 { font-size:.85rem; font-weight:700; margin-bottom:8px; }
+        .ev-soc-bar { height:8px; background:var(--line); border-radius:4px; margin:6px 0; overflow:hidden; }
+        .ev-soc-fill { height:100%; border-radius:4px; background:var(--ok); transition:width .4s; }
+        .ev-soc-limit { position:relative; }
+        .ev-field { display:flex; justify-content:space-between; font-size:.82rem; margin:3px 0; }
+        .ev-field .lbl { color:var(--muted); }
+        .ev-override { margin-top:10px; display:grid; grid-template-columns:1fr 1fr auto; gap:6px; align-items:end; }
+        .ev-override label { font-size:.75rem; color:var(--muted); }
+        .ev-override input { width:100%; padding:4px 6px; border:1px solid var(--line); border-radius:5px; font-size:.83rem; }
+        .ev-btn { padding:5px 12px; border:none; border-radius:5px; cursor:pointer; font-size:.82rem; font-weight:600; }
+        .ev-btn-set { background:var(--accent); color:#fff; }
+        .ev-btn-clear { background:var(--line); color:var(--ink); }
         /* ── responsive ── */
         @media(max-width:900px) {
             .row2,.row2-eq,.row3 { grid-template-columns:1fr; }
+            .ev-override { grid-template-columns:1fr 1fr; }
         }
     </style>
 </head>
@@ -225,6 +242,13 @@ def _web_ui_html() -> str:
     <!-- ══ TAB: Plan ══════════════════════════════════════════════════════════ -->
     <div id=\"tab-plan\" class=\"tab-pane\">
         <div id=\"planMeta\" class=\"footnote\" style=\"margin-bottom:8px\"></div>
+        <!-- EV Charging Targets -->
+        <div id=\"evSection\" style=\"display:none; margin-bottom:10px\">
+            <div class=\"panel\">
+                <h2>EV Charging</h2>
+                <div id=\"evCards\" style=\"display:grid; grid-template-columns:repeat(auto-fill,minmax(320px,1fr)); gap:10px\"></div>
+            </div>
+        </div>
         <div class=\"full panel\">
             <h2>Energy Flow &mdash; Supply &amp; Demand</h2>
             <div id=\"chartFlow\" style=\"height:280px\"></div>
@@ -484,12 +508,13 @@ async function refreshLive() {
 
 // ── PLAN tab ──────────────────────────────────────────────────────────────────
 async function refreshPlan() {
-    const [pR, fR, sR] = await Promise.all([
-        fetch('api/plan'), fetch('api/forecast'), fetch('api/status'),
+    const [pR, fR, sR, evR] = await Promise.all([
+        fetch('api/plan'), fetch('api/forecast'), fetch('api/status'), fetch('api/ev'),
     ]);
     const plan     = await pR.json();
     const fc       = await fR.json();
     const status   = await sR.json();
+    const evList   = evR.ok ? await evR.json() : [];
 
     const intents  = plan.intents || [];
     const ts       = fc.timestamps || [];
@@ -525,32 +550,48 @@ async function refreshPlan() {
         return bi;
     }
 
+    // Separate EV device IDs from stationary storage
+    const evDeviceIds = new Set(evList.map(e => e.device_id));
     const chargeByDev   = {};
     const dischargeByDev = {};
-    const storageDevs   = [...new Set(intents.map(i => i.device_id))];
+    const evChargeByDev  = {};
+    const allDevs   = [...new Set(intents.map(i => i.device_id))];
+    const storageDevs = allDevs.filter(d => !evDeviceIds.has(d));
+    const evDevs      = allDevs.filter(d => evDeviceIds.has(d));
 
-    for (const dev of storageDevs) {
+    for (const dev of allDevs) {
         chargeByDev[dev]    = new Array(ts.length).fill(0);
         dischargeByDev[dev] = new Array(ts.length).fill(0);
+    }
+    for (const dev of evDevs) {
+        evChargeByDev[dev] = new Array(ts.length).fill(0);
     }
     for (const i of intents) {
         const idx = nearestIdx(i.timestep);
         const kw = Number(i.planned_kw || 0);
-        if (kw > 0) chargeByDev[i.device_id][idx]    += kw;
-        else        dischargeByDev[i.device_id][idx]  += -kw;
+        if (evDeviceIds.has(i.device_id)) {
+            if (kw > 0) evChargeByDev[i.device_id][idx] += kw;
+        } else {
+            if (kw > 0) chargeByDev[i.device_id][idx]    += kw;
+            else        dischargeByDev[i.device_id][idx]  += -kw;
+        }
     }
 
     const totalChargeKw    = ts.map((_,i) => storageDevs.reduce((s,d) => s + chargeByDev[d][i],    0));
     const totalDischargeKw = ts.map((_,i) => storageDevs.reduce((s,d) => s + dischargeByDev[d][i], 0));
+    const totalEvChargeKw  = ts.map((_,i) => evDevs.reduce((s,d) => s + evChargeByDev[d][i], 0));
 
-    const gridImportKw = ts.map((_,i) => Math.max(0, consKw[i] + totalChargeKw[i] - pvKw[i] - totalDischargeKw[i]));
-    const gridExportKw = ts.map((_,i) => Math.max(0, pvKw[i] + totalDischargeKw[i] - consKw[i] - totalChargeKw[i]));
+    const gridImportKw = ts.map((_,i) => Math.max(0, consKw[i] + totalChargeKw[i] + totalEvChargeKw[i] - pvKw[i] - totalDischargeKw[i]));
+    const gridExportKw = ts.map((_,i) => Math.max(0, pvKw[i] + totalDischargeKw[i] - consKw[i] - totalChargeKw[i] - totalEvChargeKw[i]));
 
     // Cost metrics
+    // Baseline = same loads (consumption + EV) met directly from grid/PV, no battery.
+    // EV charging is included so it doesn't distort the saving — the saving reflects
+    // only the benefit from battery arbitrage and PV-timed EV charging.
     const baselineCost = ts.map((_,i) => {
-        const net = consKw[i] - pvKw[i];
+        const net = consKw[i] + totalEvChargeKw[i] - pvKw[i];
         return net > 0 ? net * stepH * prices[i]
-                       : net * stepH * epPrices[i];  // net<0 → exporting pv
+                       : net * stepH * epPrices[i];  // net<0 → exporting pv surplus
     });
     const optCost = ts.map((_,i) =>
         prices[i] * gridImportKw[i] * stepH - epPrices[i] * gridExportKw[i] * stepH
@@ -587,6 +628,7 @@ async function refreshPlan() {
         {name:'Grid imp', type:'bar', x:tsLocal, y:gridImportKw,    marker:{color:'#e07070'}, hovertemplate:'%{y:.2f} kW'},
         {name:'Consumption',type:'bar',x:tsLocal,y:consKw.map(v=>-v),marker:{color:'#6b7bb5'}, hovertemplate:'%{y:.2f} kW'},
         {name:'Charge',   type:'bar', x:tsLocal, y:totalChargeKw.map(v=>-v),marker:{color:'#3a9ad9'}, hovertemplate:'%{y:.2f} kW'},
+        {name:'EV Charging',type:'bar',x:tsLocal,y:totalEvChargeKw.map(v=>-v),marker:{color:'#00acc1'}, hovertemplate:'%{y:.2f} kW'},
         {name:'Grid exp', type:'bar', x:tsLocal, y:gridExportKw.map(v=>-v), marker:{color:'#b07030'}, hovertemplate:'%{y:.2f} kW'},
     ];
     Plotly.newPlot('chartFlow', flowTraces,
@@ -662,6 +704,113 @@ async function refreshPlan() {
     }
     Plotly.newPlot('chartSoc', socTraces,
         mkLayout({yaxis:{title:'SoC %', range:[0,105]}, xaxis:{}}), PLT_OPT);
+
+    // ── EV cards ─────────────────────────────────────────────────────────────
+    const evSection = document.getElementById('evSection');
+    const evCards   = document.getElementById('evCards');
+    if (evList.length > 0) {
+        evSection.style.display = '';
+        evCards.innerHTML = '';
+        for (const ev of evList) {
+            const soc     = ev.soc_pct != null ? Number(ev.soc_pct) : null;
+            const limit   = Number(ev.charge_limit_soc_pct || 100);
+            const goal    = ev.goal;
+            const over    = ev.override;
+            const connected = ev.connected;
+            const targetSoc  = goal ? Number(goal.target_soc_pct) : limit;
+            const targetBy   = goal ? new Date(goal.target_by).toLocaleString() : '—';
+            const phase2Start = goal ? new Date(goal.phase2_start).toLocaleString() : '—';
+            const p1kwh  = goal ? fmt(goal.phase1_kwh, 1) : '—';
+            const p2kwh  = goal ? fmt(goal.phase2_kwh, 1) : '—';
+            const isOverride = !!over;
+            const isDisabled = !!ev.disabled;
+
+            const socBar = soc != null
+                ? `<div class=\"ev-soc-bar\">
+                     <div class=\"ev-soc-fill\" style=\"width:${Math.min(soc,100)}%; background:${soc>=targetSoc?'var(--ok)':soc<30?'var(--bad)':'var(--accent)'}\"></div>
+                   </div>`
+                : '';
+
+            const card = document.createElement('div');
+            card.className = 'ev-card';
+            card.dataset.assetId = ev.asset_id;
+            card.innerHTML = `
+                <h3>${ev.label} <span style=\"font-weight:400;color:var(--muted);font-size:.8em\">(${ev.device_id})</span></h3>
+                <div class=\"ev-field\"><span class=\"lbl\">Connected</span><span>${connected ? '&#128268; Yes' : '&#8722; No'}</span></div>
+                <div class=\"ev-field\"><span class=\"lbl\">SoC</span><span><b>${soc != null ? fmt(soc,0)+'%' : '—'}</b> / limit ${fmt(limit,0)}%</span></div>
+                ${socBar}
+                <div class=\"ev-field\"><span class=\"lbl\">Target</span><span>${fmt(targetSoc,0)}% by ${targetBy}${isOverride?' <b style=\"color:var(--warn)\">[override]</b>':''}${isDisabled?' <b style=\"color:var(--bad)\">[disabled]</b>':''}</span></div>
+                ${goal ? `
+                <div class=\"ev-field\"><span class=\"lbl\">Phase 1 (opt.)</span><span>${p1kwh} kWh → ${fmt(limit,0)}%</span></div>
+                <div class=\"ev-field\"><span class=\"lbl\">Phase 2 (top-off)</span><span>${p2kwh} kWh from ${phase2Start}</span></div>
+                ` : '<div class=\"ev-field\"><span class=\"lbl\">No active goal</span><span>PV charging only</span></div>'}
+                <div class=\"ev-override\">
+                    <div>
+                        <label>Override target %</label>
+                        <input type=\"number\" id=\"ev-soc-${ev.asset_id}\" min=\"0\" max=\"100\" step=\"1\" value=\"${fmt(targetSoc,0)}\">
+                    </div>
+                    <div>
+                        <label>By (local time)</label>
+                        <input type=\"datetime-local\" id=\"ev-by-${ev.asset_id}\" value=\"${_defaultEvTime()}\">
+                    </div>
+                    <div style=\"display:flex;gap:4px;padding-bottom:1px\">
+                        <button class=\"ev-btn ev-btn-set\" onclick=\"evSetTarget('${ev.asset_id}')\" ${isDisabled?'disabled':''}>Set</button>
+                        ${isOverride ? `<button class=\"ev-btn ev-btn-clear\" onclick=\"evClearTarget('${ev.asset_id}')\" ${isDisabled?'disabled':''}>Clear</button>` : ''}
+                        ${isDisabled
+                            ? `<button class=\"ev-btn\" style=\"background:var(--ok);color:#fff\" onclick=\"evEnableChargepoint('${ev.asset_id}')\">Enable</button>`
+                            : `<button class=\"ev-btn\" style=\"background:var(--bad);color:#fff\" onclick=\"evDisableChargepoint('${ev.asset_id}')\">Disable</button>`}
+                    </div>
+                </div>`;
+            evCards.appendChild(card);
+        }
+    } else {
+        evSection.style.display = 'none';
+    }
+}
+
+function _defaultEvTime() {
+    const d = new Date();
+    d.setDate(d.getDate() + 1);
+    d.setHours(7, 30, 0, 0);
+    return d.toISOString().slice(0, 16);
+}
+
+async function evSetTarget(assetId) {
+    const socEl = document.getElementById('ev-soc-' + assetId);
+    const byEl  = document.getElementById('ev-by-' + assetId);
+    if (!socEl || !byEl) return;
+    const soc = Number(socEl.value);
+    const by  = new Date(byEl.value).toISOString();
+    const url = `api/ev/${encodeURIComponent(assetId)}/set_target?target_soc_pct=${soc}&target_by=${encodeURIComponent(by)}`;
+    const r = await fetch(url, {method:'POST'});
+    if (!r.ok) { alert('Failed: ' + await r.text()); return; }
+    refreshPlan();  // immediate refresh: updates target display right away
+    await new Promise(res => setTimeout(res, 3000));  // wait for MILP to rerun
+    refreshPlan();  // second refresh: shows the updated plan chart
+}
+
+async function evClearTarget(assetId) {
+    const r = await fetch(`api/ev/${encodeURIComponent(assetId)}/target`, {method:'DELETE'});
+    if (!r.ok) { alert('Failed: ' + await r.text()); return; }
+    refreshPlan();
+    await new Promise(res => setTimeout(res, 3000));
+    refreshPlan();
+}
+
+async function evDisableChargepoint(assetId) {
+    const r = await fetch(`api/ev/${encodeURIComponent(assetId)}/disable`, {method:'POST'});
+    if (!r.ok) { alert('Failed: ' + await r.text()); return; }
+    refreshPlan();
+    await new Promise(res => setTimeout(res, 3000));
+    refreshPlan();
+}
+
+async function evEnableChargepoint(assetId) {
+    const r = await fetch(`api/ev/${encodeURIComponent(assetId)}/disable`, {method:'DELETE'});
+    if (!r.ok) { alert('Failed: ' + await r.text()); return; }
+    refreshPlan();
+    await new Promise(res => setTimeout(res, 3000));
+    refreshPlan();
 }
 
 // ── HISTORY tab ───────────────────────────────────────────────────────────────
@@ -1042,22 +1191,30 @@ async def _collect_forecasts(
     """Call every provider and group points by quantity.
 
     Multiple providers for the same quantity (e.g. several consumption
-    profiles for different devices) have their point lists concatenated.
-    The optimizer's nearest-neighbour interpolation then effectively sums
-    them per timestamp.
+    profiles for different devices) have their values summed per timestamp
+    so the result has exactly one point per timestamp per quantity.
     """
-    result: dict[ForecastQuantity, list[ForecastPoint]] = {}
+    from collections import defaultdict
+
+    buckets: dict[ForecastQuantity, dict[datetime, float]] = {}
     for provider in providers:
         try:
             pts = await provider.get_forecast(horizon)
             q = provider.quantity
-            if q in result:
-                result[q].extend(pts)
-            else:
-                result[q] = list(pts)
+            if q not in buckets:
+                buckets[q] = defaultdict(float)
+            for pt in pts:
+                buckets[q][pt.timestamp] += float(pt.value)
         except Exception as exc:  # noqa: BLE001
             _log.warning("Forecast provider %r failed: %s", getattr(provider, "quantity", "?"), exc)
-    return result
+
+    return {
+        q: sorted(
+            [ForecastPoint(timestamp=ts, value=v) for ts, v in by_ts.items()],
+            key=lambda p: p.timestamp,
+        )
+        for q, by_ts in buckets.items()
+    }
 
 
 async def _virtual_forecast_power_w(device_cfg: dict) -> float | None:
@@ -1143,6 +1300,11 @@ class Application:
         self._dry_run: bool
         self._first_poll_done: asyncio.Event
         self._api: FastAPI
+        self._ev_assets: list[EvChargingAsset] = []
+        self._ev_contributors: list[EvChargerContributor] = []
+        self._ev_overrides: dict[str, tuple[float, datetime]] = {}
+        self._disabled_chargepoints: set[str] = set()
+        self._last_ev_goals: list[EvChargingGoal] = []
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -1194,6 +1356,22 @@ class Application:
         for sc in self._storage_constraints:
             self._control_loop.register_contributor(StorageControlContributor(sc))
         _log.info("Registered %d storage contributors", len(self._storage_constraints))
+
+        # 7b — EV assets + contributors
+        self._ev_assets = parse_ev_assets(self._cfg.assets)
+        self._ev_contributors = [EvChargerContributor(a) for a in self._ev_assets]
+        for contrib in self._ev_contributors:
+            self._control_loop.register_contributor(contrib)
+        # Load persisted overrides and disabled state from SQLite
+        self._ev_overrides = await self._storage.load_all_ev_targets()
+        self._disabled_chargepoints = await self._storage.load_all_ev_disabled()
+        for contrib in self._ev_contributors:
+            asset = next(a for a in self._ev_assets if a.device_id == contrib.device_id)
+            contrib.set_disabled(asset.asset_id in self._disabled_chargepoints)
+        _log.info(
+            "Loaded %d EV assets (%d overrides, %d disabled)",
+            len(self._ev_assets), len(self._ev_overrides), len(self._disabled_chargepoints),
+        )
 
         # 8 — Subscribe control loop to plan updates via event bus
         async def _on_plan_updated(event: PlanUpdatedEvent) -> None:
@@ -1374,6 +1552,22 @@ class Application:
             forecasts, self._optimizer._step_min, self._horizon
         )
 
+        # Compute active EV goals from current SoC + schedule/overrides,
+        # excluding disabled chargepoints from both planning and control.
+        active_assets = [a for a in self._ev_assets if a.asset_id not in self._disabled_chargepoints]
+        ev_goals = resolve_active_goals(active_assets, device_states, self._ev_overrides)
+        self._last_ev_goals = ev_goals
+        # Push updated goals to contributors so the control loop uses them
+        for contrib in self._ev_contributors:
+            goal = next((g for g in ev_goals if g.device_id == contrib.device_id), None)
+            contrib.update_goal(goal)
+        if ev_goals:
+            _log.info(
+                "EV goals: %s",
+                [(g.asset_id, f"{g.current_soc_pct:.0f}%→{g.target_soc_pct:.0f}%",
+                  g.target_by.strftime("%Y-%m-%dT%H:%M")) for g in ev_goals],
+            )
+
         context = OptimizationContext(
             device_states=device_states,
             storage_constraints=self._storage_constraints,
@@ -1381,6 +1575,11 @@ class Application:
             forecasts=forecasts,
             horizon=effective_horizon,
             battery_cost_basis=self._ledger.all_cost_bases(),
+            ev_charging_goals=ev_goals,
+            producer_device_ids={
+                d.device_id for d in self._registry.all()
+                if d.role == DeviceRole.PRODUCER
+            },
         )
 
         try:
@@ -1898,6 +2097,120 @@ class Application:
                     for sc in self._storage_constraints
                 ],
             }
+
+        # ── EV charging targets ────────────────────────────────────────
+
+        @api.get("/api/ev")
+        async def get_ev_status() -> list[dict]:
+            """Active EV charging goals (one per configured chargepoint)."""
+            device_states = {
+                did: state
+                for device in self._registry.all()
+                if (state := self._registry.latest_state(device.device_id)) is not None
+                for did in (device.device_id,)
+            }
+            # Compute fresh goals so target always reflects the current override/schedule,
+            # not the (potentially stale) last plan run.
+            fresh_goals = resolve_active_goals(self._ev_assets, device_states, self._ev_overrides)
+            result = []
+            for asset in self._ev_assets:
+                state = self._registry.latest_state(asset.device_id)
+                goal = next((g for g in fresh_goals if g.asset_id == asset.asset_id), None)
+                # phase1/phase2 kWh come from the last optimizer run (more accurate energy split)
+                planned = next((g for g in self._last_ev_goals if g.asset_id == asset.asset_id), None)
+                override = self._ev_overrides.get(asset.asset_id)
+                result.append({
+                    "asset_id":       asset.asset_id,
+                    "device_id":      asset.device_id,
+                    "label":          asset.label,
+                    "connected":      state.available if state else False,
+                    "soc_pct":        state.soc_pct if state else None,
+                    "charge_limit_soc_pct": asset.charge_limit_soc_pct,
+                    "max_charge_kw":  asset.max_charge_kw,
+                    "goal": {
+                        "target_soc_pct":   goal.target_soc_pct,
+                        "target_by":        goal.target_by.isoformat(),
+                        "phase1_kwh":       round(planned.phase1_required_kwh, 2) if planned else 0.0,
+                        "phase2_kwh":       round(planned.phase2_required_kwh, 2) if planned else 0.0,
+                        "phase2_start":     planned.phase2_start_time.isoformat() if planned else goal.target_by.isoformat(),
+                    } if goal else None,
+                    "override": {
+                        "target_soc_pct": override[0],
+                        "target_by":      override[1].isoformat(),
+                    } if override else None,
+                    "disabled": asset.asset_id in self._disabled_chargepoints,
+                })
+            return result
+
+        @api.post("/api/ev/{asset_id}/set_target")
+        async def set_ev_target(
+            asset_id: str,
+            target_soc_pct: float,
+            target_by: str,
+        ) -> dict:
+            """Set a UI override charging target for the given asset.
+
+            ``target_by`` must be an ISO-8601 datetime string (UTC preferred).
+            """
+            asset = next((a for a in self._ev_assets if a.asset_id == asset_id), None)
+            if asset is None:
+                raise HTTPException(404, f"Unknown EV asset: {asset_id!r}")
+            try:
+                target_dt = datetime.fromisoformat(target_by)
+                if target_dt.tzinfo is None:
+                    target_dt = target_dt.replace(tzinfo=timezone.utc)
+            except ValueError:
+                raise HTTPException(400, f"Invalid target_by datetime: {target_by!r}")
+            if not (0 <= target_soc_pct <= 100):
+                raise HTTPException(400, "target_soc_pct must be 0–100")
+
+            await self._storage.set_ev_target(asset_id, target_soc_pct, target_dt)
+            self._ev_overrides[asset_id] = (target_soc_pct, target_dt)
+            _log.info("EV override set: %r → %.0f%% by %s", asset_id, target_soc_pct, target_dt)
+            asyncio.create_task(self._run_plan())
+            return {"status": "ok", "asset_id": asset_id,
+                    "target_soc_pct": target_soc_pct, "target_by": target_dt.isoformat()}
+
+        @api.delete("/api/ev/{asset_id}/target")
+        async def clear_ev_target(asset_id: str) -> dict:
+            """Remove the UI override for the given asset (reverts to schedule)."""
+            if asset_id not in self._ev_overrides:
+                raise HTTPException(404, f"No override for asset: {asset_id!r}")
+            await self._storage.clear_ev_target(asset_id)
+            self._ev_overrides.pop(asset_id, None)
+            _log.info("EV override cleared: %r", asset_id)
+            asyncio.create_task(self._run_plan())
+            return {"status": "ok", "asset_id": asset_id}
+
+        @api.post("/api/ev/{asset_id}/disable")
+        async def disable_chargepoint(asset_id: str) -> dict:
+            """Exclude this chargepoint from optimizer and control."""
+            if not any(a.asset_id == asset_id for a in self._ev_assets):
+                raise HTTPException(404, f"Unknown EV asset: {asset_id!r}")
+            await self._storage.set_ev_disabled(asset_id)
+            self._disabled_chargepoints.add(asset_id)
+            for contrib in self._ev_contributors:
+                asset = next((a for a in self._ev_assets if a.device_id == contrib.device_id), None)
+                if asset and asset.asset_id == asset_id:
+                    contrib.set_disabled(True)
+            _log.info("Chargepoint disabled: %r", asset_id)
+            asyncio.create_task(self._run_plan())
+            return {"status": "ok", "asset_id": asset_id, "disabled": True}
+
+        @api.delete("/api/ev/{asset_id}/disable")
+        async def enable_chargepoint(asset_id: str) -> dict:
+            """Re-include this chargepoint in optimizer and control."""
+            if not any(a.asset_id == asset_id for a in self._ev_assets):
+                raise HTTPException(404, f"Unknown EV asset: {asset_id!r}")
+            await self._storage.clear_ev_disabled(asset_id)
+            self._disabled_chargepoints.discard(asset_id)
+            for contrib in self._ev_contributors:
+                asset = next((a for a in self._ev_assets if a.device_id == contrib.device_id), None)
+                if asset and asset.asset_id == asset_id:
+                    contrib.set_disabled(False)
+            _log.info("Chargepoint enabled: %r", asset_id)
+            asyncio.create_task(self._run_plan())
+            return {"status": "ok", "asset_id": asset_id, "disabled": False}
 
         return api
 

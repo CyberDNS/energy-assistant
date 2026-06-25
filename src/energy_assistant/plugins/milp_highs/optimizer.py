@@ -65,6 +65,7 @@ from datetime import datetime, timedelta, timezone
 
 import pulp
 
+from ...assets.ev import EvChargingGoal
 from ...core.models import (
     ControlIntent,
     EnergyPlan,
@@ -124,7 +125,50 @@ class MilpHigsOptimizer:
         pv_kw = _interpolate_kw(
             context.forecasts.get(ForecastQuantity.PV_GENERATION, []), timestamps
         )
+
+        # ── Live-PV floor for the first hour ──────────────────────────
+        # Hourly PV forecasts (e.g. pvforecast iobroker) often return 0 for
+        # the current clock-hour because that slot has already partially
+        # elapsed.  Use the live device reading as a floor so the MILP sees
+        # actual production rather than planning a false grid-import for the
+        # first few slots.
+        storage_ids = {sc.device_id for sc in context.storage_constraints}
+        ev_ids = {g.device_id for g in context.ev_charging_goals}
+        producer_ids = context.producer_device_ids
+        live_pv_kw = sum(
+            abs(state.power_w) / 1000.0
+            for device_id, state in context.device_states.items()
+            if state.power_w is not None
+            and state.power_w < -100          # meaningful production (>100 W)
+            and device_id not in storage_ids
+            and device_id not in ev_ids
+            # When the context knows which devices are PV producers, restrict
+            # to those only — bidirectional meters also report negative power
+            # when the site is exporting, which would falsely inflate the floor.
+            and (not producer_ids or device_id in producer_ids)
+        )
+        if live_pv_kw > 0.1:
+            current_hour_end = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+            pv_kw = [
+                max(p, live_pv_kw) if ts < current_hour_end else p
+                for ts, p in zip(timestamps, pv_kw)
+            ]
+
         net_load = [(c - p) * step_h for c, p in zip(consumption_kw, pv_kw)]
+        # Keep a copy of the baseline net_load for EV mode classification later.
+        baseline_net_load = list(net_load)
+
+        # ── EV phase-2 top-off: add mandatory instant-charge load ─────
+        # Phase 2 (charge_limit → target_soc) is scheduled just before the
+        # deadline at max_charge_kw.  Adding it to net_load lets the MILP
+        # plan house batteries and grid around this known demand.
+        ev_goals: list[EvChargingGoal] = context.ev_charging_goals
+        for goal in ev_goals:
+            if not goal.connected or goal.phase2_required_kwh <= 0.01:
+                continue
+            for t, ts in enumerate(timestamps):
+                if goal.phase2_start_time <= ts < goal.target_by:
+                    net_load[t] += goal.max_charge_kw * step_h
 
         # ── Storage devices ────────────────────────────────────────────
         batteries = context.storage_constraints
@@ -155,17 +199,35 @@ class MilpHigsOptimizer:
         # Once the ledger has tracked real charge prices, the basis term
         # prevents selling below cost regardless of the price distribution.
         sorted_prices = sorted(prices)
+        p30 = sorted_prices[int(0.30 * len(sorted_prices))]
         p70 = sorted_prices[int(0.70 * len(sorted_prices))]
         cost_bases = context.battery_cost_basis or {}
-        terminal_value_basis = {
-            sc.device_id: max(
-                cost_bases.get(sc.device_id, 0.0),
-                p70 * max(0.0, sc.discharge_efficiency - 0.01),
-            )
-            for sc in batteries
-        }
+        terminal_value_basis: dict[str, float] = {}
+        for sc in batteries:
+            if sc.no_grid_charge:
+                # PV-only battery: recharges for free from PV every day.
+                # Using p70 over-values stored energy and blocks discharge.
+                # Using export_price under-values it: the battery discharges at
+                # any positive price, depleting itself during cheap daytime EV
+                # slots and leaving nothing for overnight — and won't plan PV
+                # recharging (TV < export + degradation/η_c).
+                #
+                # p30 × (η_d − 0.01) sits between the two: discharge threshold
+                # ≈ p30 (below typical night prices, above typical daytime).
+                # PV recharging is profitable because TV × η_c > export + deg.
+                tv = max(
+                    cost_bases.get(sc.device_id, 0.0),
+                    p30 * max(0.0, sc.discharge_efficiency - 0.01),
+                )
+            else:
+                tv = max(
+                    cost_bases.get(sc.device_id, 0.0),
+                    p70 * max(0.0, sc.discharge_efficiency - 0.01),
+                )
+            terminal_value_basis[sc.device_id] = tv
         _log.debug(
-            "MilpHigsOptimizer: p70=%.4f €/kWh  TV=%s  (from %d price steps)",
+            "MilpHigsOptimizer: p30=%.4f  p70=%.4f €/kWh  TV=%s  (from %d price steps)",
+            p30,
             p70,
             {sc.device_id: round(terminal_value_basis[sc.device_id], 4) for sc in batteries},
             len(prices),
@@ -175,6 +237,7 @@ class MilpHigsOptimizer:
         prob, variables = self._build_model(
             n_steps, step_h, batteries, net_load, prices, export_prices,
             initial_energy, context.battery_cost_basis, terminal_value_basis,
+            ev_goals=ev_goals, timestamps=timestamps,
         )
         status = prob.solve(self._get_solver())
 
@@ -187,7 +250,24 @@ class MilpHigsOptimizer:
 
         # ── Extract schedule → EnergyPlan ─────────────────────────────
         intents = _extract_intents(batteries, variables, timestamps, step_h)
-        return EnergyPlan(horizon_hours=horizon_h, intents=intents)
+        ev_intents = _extract_ev_intents(
+            ev_goals, variables, timestamps, step_h, baseline_net_load
+        )
+        # Phase-2 intents (mandatory top-off slots, handled outside the MILP)
+        for goal in ev_goals:
+            if not goal.connected or goal.phase2_required_kwh <= 0.01:
+                continue
+            for t, ts in enumerate(timestamps):
+                if goal.phase2_start_time <= ts < goal.target_by:
+                    ev_intents.append(ControlIntent(
+                        device_id=goal.device_id,
+                        timestep=ts,
+                        mode="charge_from_grid",
+                        planned_kw=round(goal.max_charge_kw, 4),
+                        reserved_kwh=round(goal.max_charge_kw * step_h, 4),
+                        charge_policy="grid_allowed",
+                    ))
+        return EnergyPlan(horizon_hours=horizon_h, intents=intents + ev_intents)
 
     # ------------------------------------------------------------------
     # Model construction
@@ -204,6 +284,8 @@ class MilpHigsOptimizer:
         initial_energy: dict[str, float],
         battery_cost_basis: dict[str, float] | None = None,
         terminal_value_basis: dict[str, float] | None = None,
+        ev_goals: list[EvChargingGoal] | None = None,
+        timestamps: list[datetime] | None = None,
     ) -> tuple[pulp.LpProblem, dict]:
         """Construct the PuLP problem and return (problem, variables dict).
 
@@ -237,6 +319,24 @@ class MilpHigsOptimizer:
                 d[(b, t)] = pulp.LpVariable(f"d__{b}__{t}", lowBound=0)
                 u[(b, t)] = pulp.LpVariable(f"u__{b}__{t}", cat="Binary")
                 e[(b, t)] = pulp.LpVariable(f"e__{b}__{t}", lowBound=e_min, upBound=e_max)
+
+        # ── EV charging variables ──────────────────────────────────────
+        # ev[asset_id, t] — AC energy charged into the EV in step t (kWh).
+        # Upper bound is 0 for steps at or after phase2_start_time (those
+        # slots are already represented as a fixed load in net_load).
+        ev: dict[tuple[str, int], pulp.LpVariable] = {}
+        active_ev_goals = [g for g in (ev_goals or []) if g.connected]
+        ts_list = timestamps or []
+        for goal in active_ev_goals:
+            for t in T:
+                ts = ts_list[t] if t < len(ts_list) else None
+                if ts is not None and ts < goal.phase2_start_time:
+                    upbound = goal.max_charge_kw * step_h
+                else:
+                    upbound = 0.0
+                ev[(goal.asset_id, t)] = pulp.LpVariable(
+                    f"ev__{goal.asset_id}__{t}", lowBound=0, upBound=upbound
+                )
 
         # Grid energy per step: split into import (≥0) and export (≥0)
         g_imp = {t: pulp.LpVariable(f"g_imp__{t}", lowBound=0) for t in T}
@@ -324,14 +424,33 @@ class MilpHigsOptimizer:
                 g_imp[t] - g_exp[t]
                 == net_load[t]
                 + pulp.lpSum(c[(sc.device_id, t)] for sc in batteries)
-                - pulp.lpSum(d[(sc.device_id, t)] for sc in batteries),
+                - pulp.lpSum(d[(sc.device_id, t)] for sc in batteries)
+                + pulp.lpSum(ev[(goal.asset_id, t)] for goal in active_ev_goals),
                 f"grid_balance__{t}",
+            )
+
+        # ── EV phase-1 deadline constraints ───────────────────────────
+        for goal in active_ev_goals:
+            if goal.phase1_required_kwh <= 0.01:
+                continue
+            phase1_slots = [
+                t for t in T
+                if t < len(ts_list) and ts_list[t] < goal.phase2_start_time
+            ]
+            if not phase1_slots:
+                continue
+            prob += (
+                pulp.lpSum(ev[(goal.asset_id, t)] for t in phase1_slots)
+                >= goal.phase1_required_kwh,
+                f"ev_phase1_deadline__{goal.asset_id}",
             )
 
         # Tight per-step big-M: max possible grid import = consumption surplus + all charging.
         # Used for the no_grid_charge constraint below.
         big_m = [
-            max(0.0, net_load[t]) + sum(s.max_charge_kw * step_h for s in batteries)
+            max(0.0, net_load[t])
+            + sum(s.max_charge_kw * step_h for s in batteries)
+            + sum(g.max_charge_kw * step_h for g in active_ev_goals)
             for t in T
         ]
 
@@ -363,7 +482,7 @@ class MilpHigsOptimizer:
                     f"soc__{b}__{t}",
                 )
 
-        variables = {"c": c, "d": d, "u": u, "e": e, "g_imp": g_imp, "g_exp": g_exp}
+        variables = {"c": c, "d": d, "u": u, "e": e, "g_imp": g_imp, "g_exp": g_exp, "ev": ev}
         return prob, variables
 
     # ------------------------------------------------------------------
@@ -511,6 +630,49 @@ def _interpolate_kw(
         return [0.0] * len(timestamps)
     sorted_pts = sorted(points, key=lambda p: p.timestamp)
     return [_nearest(sorted_pts, ts) for ts in timestamps]
+
+
+def _extract_ev_intents(
+    ev_goals: list[EvChargingGoal],
+    variables: dict,
+    timestamps: list[datetime],
+    step_h: float,
+    baseline_net_load: list[float],
+) -> list[ControlIntent]:
+    """Convert EV solver values into ``ControlIntent`` objects (phase-1 only).
+
+    Phase-2 intents (mandatory top-off) are appended by the caller.
+    Mode is determined by the baseline net_load (pre-EV):
+      net_load < 0 → PV surplus existed → charge_from_pv
+      net_load ≥ 0 → grid needed          → charge_from_grid
+    """
+    ev = variables.get("ev", {})
+    intents: list[ControlIntent] = []
+
+    for goal in ev_goals:
+        if not goal.connected:
+            continue
+        for t, ts in enumerate(timestamps):
+            if ts >= goal.phase2_start_time:
+                continue  # phase2 intents added separately
+            ev_kwh = pulp.value(ev.get((goal.asset_id, t))) or 0.0
+            if ev_kwh > 0.01:
+                # PV slot only when the available surplus fully covers the charge;
+                # if grid import is needed, use charge_from_grid so the charger
+                # isn't limited to PV-only rate.
+                pv_surplus_kwh = max(0.0, -baseline_net_load[t])
+                is_pv_slot = baseline_net_load[t] < 0 and pv_surplus_kwh >= ev_kwh
+                mode = "charge_from_pv" if is_pv_slot else "charge_from_grid"
+                policy = "pv_only" if is_pv_slot else "grid_allowed"
+                intents.append(ControlIntent(
+                    device_id=goal.device_id,
+                    timestep=ts,
+                    mode=mode,
+                    planned_kw=round(ev_kwh / step_h, 4),
+                    reserved_kwh=round(ev_kwh, 4),
+                    charge_policy=policy,
+                ))
+    return intents
 
 
 def _extract_intents(
