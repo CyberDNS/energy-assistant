@@ -15,7 +15,8 @@ export const fetchPlan     = ()           => call('/api/plan')
 export const fetchForecast = ()           => call('/api/forecast')
 export const fetchHistory  = (hours)      => call(`/api/history?hours=${hours}`)
 export const fetchLedger   = ()           => call('/api/ledger')
-export const fetchEv       = ()           => call('/api/ev')
+export const fetchEv           = ()           => call('/api/ev')
+export const fetchControllable = ()           => call('/api/controllable')
 export const fetchConfig   = ()           => call('/api/config')
 
 export function stageEvTarget(assetId, socPct, targetBy) {

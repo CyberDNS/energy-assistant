@@ -49,7 +49,8 @@ from fastapi.staticfiles import StaticFiles
 import uvicorn
 
 from ..assets.ev import EvChargerContributor, EvChargingAsset, EvChargingGoal
-from ..assets.loader import parse_ev_assets, resolve_active_goals
+from ..assets.loader import parse_ev_assets, parse_threshold_assets, resolve_active_goals
+from ..assets.threshold import ThresholdControlContributor
 from ..config.yaml import YamlConfigLoader
 from ..core.config import AppConfig
 from ..core.control import ControlLoop, LiveSituation, StorageControlContributor
@@ -63,6 +64,7 @@ from ..core.models import (
     Measurement,
     StorageConstraints,
     TariffPoint,
+    ThresholdConstraints,
 )
 from ..core.optimizer import OptimizationContext
 from ..core.plugin_registry import BuildContext
@@ -450,6 +452,8 @@ class Application:
         self._api: FastAPI
         self._ev_assets: list[EvChargingAsset] = []
         self._ev_contributors: list[EvChargerContributor] = []
+        self._threshold_constraints: list[ThresholdConstraints] = []
+        self._threshold_contributors: list[ThresholdControlContributor] = []
         self._ev_overrides: dict[str, tuple[float, datetime]] = {}
         self._staged_overrides: dict[str, tuple[float, datetime]] = {}
         self._disabled_chargepoints: set[str] = set()
@@ -524,7 +528,16 @@ class Application:
             len(self._ev_assets), len(self._ev_overrides), len(self._disabled_chargepoints),
         )
 
-        # 7c — MQTT publisher (optional — only started when mqtt: is configured)
+        # 7c — Threshold assets + contributors
+        self._threshold_constraints = parse_threshold_assets(self._cfg.assets)
+        self._threshold_contributors = [
+            ThresholdControlContributor(tc) for tc in self._threshold_constraints
+        ]
+        for contrib in self._threshold_contributors:
+            self._control_loop.register_contributor(contrib)
+        _log.info("Loaded %d threshold assets", len(self._threshold_constraints))
+
+        # 7d — MQTT publisher (optional — only started when mqtt: is configured)
         if self._cfg.backends.mqtt and self._ev_assets:
             self._mqtt_publisher = EvMqttPublisher(
                 cfg=self._cfg.backends.mqtt,
@@ -806,6 +819,7 @@ class Application:
         context = OptimizationContext(
             device_states=device_states,
             storage_constraints=self._storage_constraints,
+            threshold_constraints=self._threshold_constraints,
             tariffs=self._tariffs,
             forecasts=forecasts,
             horizon=effective_horizon,
@@ -1401,6 +1415,172 @@ class Application:
                     "disabled": asset.asset_id in self._disabled_chargepoints,
                 })
             return result
+
+        # ── Controllable devices (EV chargers + storage + threshold loads) ──
+
+        @api.get("/api/controllable")
+        async def get_controllable() -> dict:
+            """Plan data for all controllable devices."""
+            plan = self._control_loop._active_plan
+            now = datetime.now(timezone.utc)
+            step_min: int = self._optimizer._step_min
+
+            def _sorted_intents(device_id: str) -> list:
+                if plan is None:
+                    return []
+                return sorted(
+                    [i for i in plan.intents if i.device_id == device_id],
+                    key=lambda i: i.timestep,
+                )
+
+            def _next_change(future_steps: list) -> dict | None:
+                """Works with both ControlIntent objects and plain step dicts."""
+                if not future_steps:
+                    return None
+                def _mode(s):  return s["mode"] if isinstance(s, dict) else s.mode
+                def _ts(s):    return datetime.fromisoformat(s["ts"]) if isinstance(s, dict) else s.timestep
+                current = _mode(future_steps[0])
+                for step in future_steps[1:]:
+                    m = _mode(step)
+                    if m != current:
+                        delta_min = int((_ts(step) - now).total_seconds() / 60)
+                        return {"mode": m, "in_minutes": max(0, delta_min)}
+                return None
+
+            # All plan timestamps in order (used to fill EV idle gaps)
+            all_plan_ts: list[datetime] = sorted(
+                {i.timestep for i in plan.intents} if plan else []
+            )
+            step_h: float = step_min / 60.0
+
+            devices = []
+
+            # ── EV chargers ─────────────────────────────────────────────
+            for asset in self._ev_assets:
+                state = self._registry.latest_state(asset.device_id)
+                soc_pct = state.soc_pct if state is not None else None
+                power_w = state.power_w if state is not None else None
+                connected = state.available if state is not None else False
+
+                # EV intents are sparse (only charging steps); build a lookup
+                # and walk every plan timestamp to reconstruct the SoC trajectory.
+                intent_by_ts = {i.timestep: i for i in _sorted_intents(asset.device_id)}
+                energy_kwh = (soc_pct or 0.0) / 100.0 * asset.capacity_kwh
+                cap_limit = asset.capacity_kwh * asset.charge_limit_soc_pct / 100.0
+                steps = []
+                for ts in all_plan_ts:
+                    intent = intent_by_ts.get(ts)
+                    mode = intent.mode if intent else "idle"
+                    planned_kw = intent.planned_kw if (intent and intent.planned_kw) else 0.0
+                    if planned_kw > 0:
+                        energy_kwh = min(cap_limit, energy_kwh + planned_kw * step_h)
+                    steps.append({
+                        "ts": ts.isoformat(),
+                        "mode": mode,
+                        "planned_kw": planned_kw,
+                        "soc_pct": round(energy_kwh / asset.capacity_kwh * 100, 1),
+                    })
+
+                future = [s for s in steps if datetime.fromisoformat(s["ts"]) >= now]
+                current_mode = future[0]["mode"] if future else "idle"
+
+                devices.append({
+                    "device_id": asset.device_id,
+                    "label": asset.label,
+                    "type": "ev",
+                    "capacity_kwh": asset.capacity_kwh,
+                    "soc_pct": soc_pct,
+                    "connected": connected,
+                    "power_w": power_w,
+                    "plan": {
+                        "current_mode": current_mode,
+                        "steps": steps,
+                        "next_change": _next_change(future),
+                    },
+                })
+
+            # ── Storage devices ─────────────────────────────────────────
+            for sc in self._storage_constraints:
+                state = self._registry.latest_state(sc.device_id)
+                soc_pct = state.soc_pct if state is not None else None
+                power_w = state.power_w if state is not None else None
+
+                all_intents = _sorted_intents(sc.device_id)
+                future = [i for i in all_intents if i.timestep >= now]
+                current_mode = future[0].mode if future else "idle"
+
+                steps = [
+                    {
+                        "ts": i.timestep.isoformat(),
+                        "mode": i.mode,
+                        "planned_kw": i.planned_kw,
+                        "soc_pct": (
+                            round(i.stored_energy_kwh / sc.capacity_kwh * 100, 1)
+                            if i.stored_energy_kwh is not None else None
+                        ),
+                    }
+                    for i in all_intents
+                ]
+
+                devices.append({
+                    "device_id": sc.device_id,
+                    "label": sc.device_id.replace("_", " ").title(),
+                    "type": "storage",
+                    "capacity_kwh": sc.capacity_kwh,
+                    "min_soc_pct": sc.min_soc_pct,
+                    "max_soc_pct": sc.max_soc_pct,
+                    "soc_pct": soc_pct,
+                    "power_w": power_w,
+                    "plan": {
+                        "current_mode": current_mode,
+                        "steps": steps,
+                        "next_change": _next_change(future),
+                    },
+                })
+
+            # ── Threshold devices ───────────────────────────────────────
+            for tc in self._threshold_constraints:
+                state = self._registry.latest_state(tc.device_id)
+                current_value: float | None = None
+                power_w: float | None = None
+                if state is not None:
+                    raw = state.extra.get("measured_value")
+                    current_value = float(raw) if raw is not None else None
+                    power_w = state.power_w
+
+                all_intents = _sorted_intents(tc.device_id)
+                future = [i for i in all_intents if i.timestep >= now]
+                current_mode = future[0].mode if future else "standby"
+
+                steps = [
+                    {
+                        "ts": i.timestep.isoformat(),
+                        "mode": i.mode,
+                        "planned_kw": tc.rated_power_kw if i.mode == "run" else 0.0,
+                        "predicted_value": i.stored_energy_kwh,
+                    }
+                    for i in all_intents
+                ]
+
+                devices.append({
+                    "device_id": tc.device_id,
+                    "label": tc.label or tc.device_id.replace("_", " ").title(),
+                    "type": "threshold",
+                    "unit": tc.unit,
+                    "bottom_threshold": tc.bottom_threshold,
+                    "top_threshold": tc.top_threshold,
+                    "direction": tc.direction,
+                    "rated_power_kw": tc.rated_power_kw,
+                    "current_value": current_value,
+                    "power_w": power_w,
+                    "plan": {
+                        "current_mode": current_mode,
+                        "steps": steps,
+                        "next_change": _next_change(future),
+                    },
+                })
+
+            return {"devices": devices, "step_minutes": step_min}
 
         def _parse_ev_asset(asset_id: str) -> EvChargingAsset:
             asset = next((a for a in self._ev_assets if a.asset_id == asset_id), None)

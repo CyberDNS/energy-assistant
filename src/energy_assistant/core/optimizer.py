@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING, Protocol
 
-from .models import DeviceState, EnergyPlan, ForecastPoint, ForecastQuantity, StorageConstraints
+from .models import DeviceState, EnergyPlan, ForecastPoint, ForecastQuantity, StorageConstraints, ThresholdConstraints
 
 if TYPE_CHECKING:
     from .constraint import Constraint
@@ -42,6 +42,14 @@ class OptimizationContext:
 
     device_states: dict[str, DeviceState]
     storage_constraints: list[StorageConstraints] = field(default_factory=list)
+    threshold_constraints: list[ThresholdConstraints] = field(default_factory=list)
+    """Physical limits for threshold-controlled devices (coolers, dehumidifiers, …).
+
+    Each entry drives binary on/off scheduling in the MILP: the optimizer
+    plans when to run these devices so the measured value stays within
+    ``[bottom_threshold, top_threshold]`` at minimum energy cost.
+    The current measured value must be in ``device_states[id].extra["measured_value"]``.
+    """
     tariffs: dict[str, "TariffModel"] = field(default_factory=dict)
     forecasts: dict[ForecastQuantity, list[ForecastPoint]] = field(default_factory=dict)
     constraints: list["Constraint"] = field(default_factory=list)
