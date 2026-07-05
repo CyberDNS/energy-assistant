@@ -69,6 +69,7 @@ class OpenWBDevice:
         entity_soc: str,
         entity_power: str | None = None,
         entity_plugged: str | None = None,
+        entity_soc_limit_instant: str | None = None,
         mode_pv: str = "PV Charging",
         mode_instant: str = "Instant Charging",
         mode_stop: str = "Stop",
@@ -79,9 +80,11 @@ class OpenWBDevice:
         self._entity_soc = entity_soc
         self._entity_power = entity_power
         self._entity_plugged = entity_plugged
+        self._entity_soc_limit_instant = entity_soc_limit_instant
         self._mode_pv = mode_pv
         self._mode_instant = mode_instant
         self._mode_stop = mode_stop
+        self._target_soc_pct: float | None = None
 
     @property
     def device_id(self) -> str:
@@ -90,6 +93,11 @@ class OpenWBDevice:
     @property
     def role(self) -> DeviceRole:
         return DeviceRole.EV_CHARGER
+
+    def update_target_soc(self, soc_pct: float | None) -> None:
+        """Store the active goal's target SoC so it can be written to the
+        instant-charging SoC limit entity when instant mode is activated."""
+        self._target_soc_pct = soc_pct
 
     async def get_state(self) -> DeviceState:
         """Read SoC, power, and cable status from Home Assistant."""
@@ -153,3 +161,22 @@ class OpenWBDevice:
                 "OpenWBDevice %r: failed to set mode %r", self._device_id, mode,
                 exc_info=True,
             )
+
+        # When switching to instant charging, also write the SoC limit so
+        # openWB stops at the planned target SoC.
+        if mode == self._mode_instant and self._entity_soc_limit_instant and self._target_soc_pct is not None:
+            try:
+                await self._client.call_service(
+                    "number",
+                    "set_value",
+                    {"entity_id": self._entity_soc_limit_instant, "value": round(self._target_soc_pct)},
+                )
+                _log.debug(
+                    "OpenWBDevice %r: set instant SoC limit to %.0f%%",
+                    self._device_id, self._target_soc_pct,
+                )
+            except Exception:
+                _log.warning(
+                    "OpenWBDevice %r: failed to set instant SoC limit", self._device_id,
+                    exc_info=True,
+                )
