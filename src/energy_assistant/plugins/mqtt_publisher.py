@@ -1,15 +1,17 @@
 """MQTT Discovery publisher for EV charging entities.
 
 Publishes one HA device per EV chargepoint (keyed by asset_id) containing:
-  - sensor:        soc, charging_mode, target_soc, deadline
-  - binary_sensor: override_active
-  - number:        target_soc_set  (writable → set override SoC)
-  - datetime:      deadline_set    (writable → set override deadline, local tz)
-  - button:        clear_override
+  - sensor:        soc, charging_mode, target_soc, deadline  (read-only)
+  - binary_sensor: override_active                           (read-only)
+  - number:        target_soc_set   (writable — stages SoC)
+  - date:          deadline_date    (writable — stages date, asset local tz)
+  - time:          deadline_time    (writable — stages time, asset local tz)
+  - switch:        override_active  (ON = apply staged, OFF = revert to schedule)
 
-Command topics are subscribed by the addon. When HA sends a command the
-publisher resolves the full (soc, deadline) pair from cached goal state
-and calls the on_set_target / on_clear_target callbacks into the server.
+Setting the number/date/time pickers updates staged values only — the optimizer
+is not affected until the switch is turned ON. Turning the switch OFF reverts
+the optimizer to the schedule but keeps the staged values intact so the user
+can re-enable with the same settings.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
@@ -41,18 +43,20 @@ class EvMqttPublisher:
         self,
         cfg: MqttConfig,
         assets: list[EvChargingAsset],
-        on_set_target: Callable[[str, float, datetime], Awaitable[None]],
-        on_clear_target: Callable[[str], Awaitable[None]],
+        on_stage: Callable[[str, float, datetime], Awaitable[None]],
+        on_enable_override: Callable[[str], Awaitable[None]],
+        on_disable_override: Callable[[str], Awaitable[None]],
     ) -> None:
         self._cfg = cfg
         self._assets = assets
-        self._on_set_target = on_set_target
-        self._on_clear_target = on_clear_target
-        # Outbound publish queue: (topic, payload, retain)
+        self._on_stage = on_stage
+        self._on_enable_override = on_enable_override
+        self._on_disable_override = on_disable_override
         self._queue: asyncio.Queue[tuple[str, str, bool]] = asyncio.Queue()
         self._task: asyncio.Task[None] | None = None
-        # Last known goal per asset — used to fill defaults on partial commands
-        self._cached_goals: dict[str, EvChargingGoal] = {}
+        # Cached staged values per asset — updated on each publish_states call.
+        # Used to fill the other half when only date or only time changes.
+        self._cached_staged: dict[str, tuple[float, datetime]] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -76,13 +80,18 @@ class EvMqttPublisher:
         goals: list[EvChargingGoal],
         device_states: dict[str, DeviceState],
         overrides: dict[str, tuple[float, datetime]],
+        staged: dict[str, tuple[float, datetime]],
     ) -> None:
+        self._cached_staged = dict(staged)
         goals_by_asset = {g.asset_id: g for g in goals}
-        self._cached_goals = dict(goals_by_asset)
         for asset in self._assets:
             goal = goals_by_asset.get(asset.asset_id)
             state = device_states.get(asset.device_id)
-            for topic, payload, retain in _build_state_messages(asset, goal, state, overrides):
+            staged_for_asset = staged.get(asset.asset_id)
+            override_active = asset.asset_id in overrides
+            for topic, payload, retain in _build_state_messages(
+                asset, goal, state, staged_for_asset, override_active
+            ):
                 await self._queue.put((topic, payload, retain))
 
     # ------------------------------------------------------------------
@@ -112,8 +121,9 @@ class EvMqttPublisher:
             for asset in self._assets:
                 slug = asset.asset_id
                 await client.subscribe(f"{_BASE}/{slug}/target_soc/set")
-                await client.subscribe(f"{_BASE}/{slug}/deadline/set")
-                await client.subscribe(f"{_BASE}/{slug}/clear_override/press")
+                await client.subscribe(f"{_BASE}/{slug}/deadline_date/set")
+                await client.subscribe(f"{_BASE}/{slug}/deadline_time/set")
+                await client.subscribe(f"{_BASE}/{slug}/override/set")
 
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(self._drain_queue(client))
@@ -143,9 +153,9 @@ class EvMqttPublisher:
                 _log.warning("MQTT command error topic=%r: %s", topic, exc)
 
     async def _dispatch(self, topic: str, payload: str) -> None:
-        # topic: energy_assistant/ev/{asset_id}/{cmd}/set  or  .../press
+        # energy_assistant/ev/{asset_id}/{cmd}/set
         parts = topic.split("/")
-        if len(parts) < 4:
+        if len(parts) < 5:
             return
         asset_id = parts[2]
         cmd = parts[3]
@@ -154,9 +164,15 @@ class EvMqttPublisher:
             _log.warning("MQTT command for unknown asset: %r", asset_id)
             return
 
-        if cmd == "clear_override":
-            _log.info("MQTT clear_override: %r", asset_id)
-            await self._on_clear_target(asset_id)
+        tz = ZoneInfo(asset.timezone)
+
+        if cmd == "override":
+            if payload.upper() in ("ON", "TRUE", "1"):
+                _log.info("MQTT override ON: %r", asset_id)
+                await self._on_enable_override(asset_id)
+            else:
+                _log.info("MQTT override OFF: %r", asset_id)
+                await self._on_disable_override(asset_id)
 
         elif cmd == "target_soc":
             try:
@@ -164,38 +180,59 @@ class EvMqttPublisher:
             except ValueError:
                 _log.warning("MQTT target_soc invalid payload: %r", payload)
                 return
-            deadline = self._resolve_deadline(asset_id, asset)
-            _log.info("MQTT set_target: %r → %.0f%% by %s", asset_id, soc, deadline)
-            await self._on_set_target(asset_id, soc, deadline)
+            _, deadline = self._resolve_staged(asset_id, asset, tz)
+            _log.info("MQTT stage target_soc: %r → %.0f%% by %s", asset_id, soc, deadline)
+            await self._on_stage(asset_id, soc, deadline)
 
-        elif cmd == "deadline":
-            # HA datetime entity sends YYYY-MM-DDTHH:MM:SS (no tz) — treat as asset local time
+        elif cmd == "deadline_date":
+            # HA date entity sends YYYY-MM-DD
             try:
-                dt = datetime.fromisoformat(payload)
-                if dt.tzinfo is None:
-                    tz = ZoneInfo(asset.timezone)
-                    dt = dt.replace(tzinfo=tz)
-                dt_utc = dt.astimezone(timezone.utc)
-            except (ValueError, KeyError):
-                _log.warning("MQTT deadline invalid payload: %r", payload)
+                new_date = date.fromisoformat(payload)
+            except ValueError:
+                _log.warning("MQTT deadline_date invalid payload: %r", payload)
                 return
-            soc = self._resolve_target_soc(asset_id, asset)
-            _log.info("MQTT set_deadline: %r → %s (soc=%.0f%%)", asset_id, dt_utc, soc)
-            await self._on_set_target(asset_id, soc, dt_utc)
+            soc, current_deadline = self._resolve_staged(asset_id, asset, tz)
+            local_deadline = current_deadline.astimezone(tz)
+            new_local = datetime(
+                new_date.year, new_date.month, new_date.day,
+                local_deadline.hour, local_deadline.minute, 0,
+                tzinfo=tz,
+            )
+            dt_utc = new_local.astimezone(timezone.utc)
+            _log.info("MQTT stage deadline_date: %r → %s (soc=%.0f%%)", asset_id, dt_utc, soc)
+            await self._on_stage(asset_id, soc, dt_utc)
 
-    def _resolve_deadline(self, asset_id: str, asset: EvChargingAsset) -> datetime:
-        """Fall back to cached goal deadline, or 24 h from now."""
-        goal = self._cached_goals.get(asset_id)
-        if goal is not None:
-            return goal.target_by
-        return datetime.now(timezone.utc).replace(hour=6, minute=0, second=0, microsecond=0)
+        elif cmd == "deadline_time":
+            # HA time entity sends HH:MM:SS in local time
+            try:
+                new_time = time.fromisoformat(payload)
+            except ValueError:
+                _log.warning("MQTT deadline_time invalid payload: %r", payload)
+                return
+            soc, current_deadline = self._resolve_staged(asset_id, asset, tz)
+            local_deadline = current_deadline.astimezone(tz)
+            new_local = datetime(
+                local_deadline.year, local_deadline.month, local_deadline.day,
+                new_time.hour, new_time.minute, 0,
+                tzinfo=tz,
+            )
+            # If new time has already passed today, advance to tomorrow
+            if new_local <= datetime.now(tz):
+                new_local += timedelta(days=1)
+            dt_utc = new_local.astimezone(timezone.utc)
+            _log.info("MQTT stage deadline_time: %r → %s (soc=%.0f%%)", asset_id, dt_utc, soc)
+            await self._on_stage(asset_id, soc, dt_utc)
 
-    def _resolve_target_soc(self, asset_id: str, asset: EvChargingAsset) -> float:
-        """Fall back to cached goal target SoC, or asset charge limit."""
-        goal = self._cached_goals.get(asset_id)
-        if goal is not None:
-            return goal.target_soc_pct
-        return asset.charge_limit_soc_pct
+    def _resolve_staged(
+        self, asset_id: str, asset: EvChargingAsset, tz: ZoneInfo
+    ) -> tuple[float, datetime]:
+        """Return (soc, deadline) from cached staged values, or sensible defaults."""
+        if asset_id in self._cached_staged:
+            return self._cached_staged[asset_id]
+        # Default: charge_limit SoC, next 06:00 local
+        tomorrow = datetime.now(tz) + timedelta(days=1)
+        default_deadline = tomorrow.replace(hour=6, minute=0, second=0, microsecond=0)
+        return asset.charge_limit_soc_pct, default_deadline.astimezone(timezone.utc)
 
     # ------------------------------------------------------------------
     # Discovery
@@ -278,9 +315,9 @@ def _discovery_configs(
     ))
 
     configs.append((
-        f"{_DISC}/binary_sensor/ea_ev_{slug}_override/config",
+        f"{_DISC}/binary_sensor/ea_ev_{slug}_override_active/config",
         {
-            "unique_id": f"ea_ev_{slug}_override",
+            "unique_id": f"ea_ev_{slug}_override_active",
             "name": "Override Active",
             "device": device,
             "state_topic": f"{base}/override_active",
@@ -297,7 +334,7 @@ def _discovery_configs(
             "unique_id": f"ea_ev_{slug}_target_soc_set",
             "name": "Set Target SoC",
             "device": device,
-            "state_topic": f"{base}/target_soc_set/state",
+            "state_topic": f"{base}/staged_soc/state",
             "command_topic": f"{base}/target_soc/set",
             "availability_topic": avail,
             "unit_of_measurement": "%",
@@ -310,27 +347,43 @@ def _discovery_configs(
     ))
 
     configs.append((
-        f"{_DISC}/datetime/ea_ev_{slug}_deadline_set/config",
+        f"{_DISC}/date/ea_ev_{slug}_deadline_date/config",
         {
-            "unique_id": f"ea_ev_{slug}_deadline_set",
-            "name": "Set Deadline",
+            "unique_id": f"ea_ev_{slug}_deadline_date",
+            "name": "Deadline Date",
             "device": device,
-            "state_topic": f"{base}/deadline_set/state",
-            "command_topic": f"{base}/deadline/set",
+            "state_topic": f"{base}/staged_date/state",
+            "command_topic": f"{base}/deadline_date/set",
+            "availability_topic": avail,
+            "icon": "mdi:calendar-clock",
+        },
+    ))
+
+    configs.append((
+        f"{_DISC}/time/ea_ev_{slug}_deadline_time/config",
+        {
+            "unique_id": f"ea_ev_{slug}_deadline_time",
+            "name": "Deadline Time",
+            "device": device,
+            "state_topic": f"{base}/staged_time/state",
+            "command_topic": f"{base}/deadline_time/set",
             "availability_topic": avail,
             "icon": "mdi:clock-end",
         },
     ))
 
     configs.append((
-        f"{_DISC}/button/ea_ev_{slug}_clear_override/config",
+        f"{_DISC}/switch/ea_ev_{slug}_override/config",
         {
-            "unique_id": f"ea_ev_{slug}_clear_override",
-            "name": "Clear Override",
+            "unique_id": f"ea_ev_{slug}_override",
+            "name": "Override Active",
             "device": device,
-            "command_topic": f"{base}/clear_override/press",
+            "state_topic": f"{base}/override_active",
+            "command_topic": f"{base}/override/set",
             "availability_topic": avail,
-            "icon": "mdi:close-circle-outline",
+            "payload_on": "ON",
+            "payload_off": "OFF",
+            "icon": "mdi:flash",
         },
     ))
 
@@ -345,7 +398,8 @@ def _build_state_messages(
     asset: EvChargingAsset,
     goal: EvChargingGoal | None,
     state: DeviceState | None,
-    overrides: dict[str, tuple[float, datetime]],
+    staged: tuple[float, datetime] | None,
+    override_active: bool,
 ) -> list[tuple[str, str, bool]]:
     """Return list of (topic, payload, retain) for one asset."""
     slug = asset.asset_id
@@ -359,19 +413,23 @@ def _build_state_messages(
         msgs.append((f"{base}/soc", f"{state.soc_pct:.0f}", True))
 
     msgs.append((f"{base}/charging_mode", _derive_mode(goal, state), True))
-    msgs.append((f"{base}/override_active", "ON" if asset.asset_id in overrides else "OFF", True))
+    msgs.append((f"{base}/override_active", "ON" if override_active else "OFF", True))
 
     if goal is not None:
         msgs.append((f"{base}/target_soc", f"{goal.target_soc_pct:.0f}", True))
         msgs.append((f"{base}/deadline", goal.target_by.isoformat(), True))
-        msgs.append((f"{base}/target_soc_set/state", f"{goal.target_soc_pct:.0f}", True))
-        # HA datetime entity expects YYYY-MM-DDTHH:MM:SS — send as asset local time
+
+    # Staged values drive the setter entity states (date/time/soc pickers)
+    if staged is not None:
+        soc, deadline_utc = staged
+        msgs.append((f"{base}/staged_soc/state", f"{soc:.0f}", True))
         try:
             tz = ZoneInfo(asset.timezone)
-            local_dt = goal.target_by.astimezone(tz)
+            local_dt = deadline_utc.astimezone(tz)
         except Exception:
-            local_dt = goal.target_by
-        msgs.append((f"{base}/deadline_set/state", local_dt.strftime("%Y-%m-%dT%H:%M:%S"), True))
+            local_dt = deadline_utc
+        msgs.append((f"{base}/staged_date/state", local_dt.strftime("%Y-%m-%d"), True))
+        msgs.append((f"{base}/staged_time/state", local_dt.strftime("%H:%M:%S"), True))
 
     return msgs
 
