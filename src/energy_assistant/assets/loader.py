@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from ..core.models import DeviceState
+from ..core.models import DeviceState, ThresholdConstraints
 from .ev import (
     ChargeCurvePoint,
     EvChargingAsset,
@@ -23,18 +23,73 @@ from .ev import (
 
 _log = logging.getLogger(__name__)
 
+_THRESHOLD_TYPE = "threshold"
+
 
 def parse_ev_assets(raw_assets: dict[str, Any]) -> list[EvChargingAsset]:
-    """Parse the ``assets:`` section of the YAML config into ``EvChargingAsset`` objects."""
+    """Parse the ``assets:`` section of the YAML config into ``EvChargingAsset`` objects.
+
+    Entries with ``type: threshold`` are silently skipped (handled by
+    ``parse_threshold_assets``).
+    """
     result: list[EvChargingAsset] = []
     for asset_id, cfg in raw_assets.items():
         if not isinstance(cfg, dict):
+            continue
+        if cfg.get("type") == _THRESHOLD_TYPE:
             continue
         try:
             result.append(_parse_one(asset_id, cfg))
         except Exception as exc:  # noqa: BLE001
             _log.warning("assets[%r]: parse failed — %s", asset_id, exc)
     return result
+
+
+def parse_threshold_assets(raw_assets: dict[str, Any]) -> list[ThresholdConstraints]:
+    """Parse ``type: threshold`` entries from the ``assets:`` config section.
+
+    Each entry must supply:
+    - ``device``            — device_id matching a registered device.
+    - ``bottom_threshold``  — lower bound of the allowed range.
+    - ``top_threshold``     — upper bound of the allowed range.
+    - ``rated_power_kw``    — electrical power when running (kW).
+    - ``active_rate_per_h`` — rate of value change while running (units/h).
+    - ``drift_rate_per_h``  — rate of natural drift when off (units/h).
+
+    Optional:
+    - ``unit``          — display unit (default "").
+    - ``direction``     — "reduces" (default) or "increases".
+    - ``min_runtime_h`` — minimum on-time for compressor protection (h).
+    - ``min_offtime_h`` — minimum off-time for compressor protection (h).
+    """
+    result: list[ThresholdConstraints] = []
+    for asset_id, cfg in raw_assets.items():
+        if not isinstance(cfg, dict):
+            continue
+        if cfg.get("type") != _THRESHOLD_TYPE:
+            continue
+        try:
+            result.append(_parse_threshold_one(asset_id, cfg))
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("assets[%r] (threshold): parse failed — %s", asset_id, exc)
+    return result
+
+
+def _parse_threshold_one(asset_id: str, cfg: dict[str, Any]) -> ThresholdConstraints:
+    device_id = cfg.get("device") or asset_id
+    return ThresholdConstraints(
+        device_id=str(device_id),
+        bottom_threshold=float(cfg["bottom_threshold"]),
+        top_threshold=float(cfg["top_threshold"]),
+        unit=str(cfg.get("unit", "")),
+        direction=str(cfg.get("direction", "reduces")),  # type: ignore[arg-type]
+        rated_power_kw=float(cfg["rated_power_kw"]),
+        active_rate_per_h=float(cfg["active_rate_per_h"]),
+        drift_rate_per_h=float(cfg["drift_rate_per_h"]),
+        min_runtime_h=float(cfg.get("min_runtime_h", 0.0)),
+        min_offtime_h=float(cfg.get("min_offtime_h", 0.0)),
+        label=str(cfg.get("label", "")),
+    )
 
 
 def _parse_one(asset_id: str, cfg: dict[str, Any]) -> EvChargingAsset:

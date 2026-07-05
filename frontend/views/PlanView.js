@@ -1,7 +1,8 @@
 import { defineComponent, ref, onMounted, onUnmounted } from 'vue'
-import { fetchPlan, fetchForecast, fetchEv, triggerPlanRefresh } from '../api.js'
+import { fetchPlan, fetchForecast, fetchEv, fetchControllable, triggerPlanRefresh } from '../api.js'
 import PlotlyChart from '../components/PlotlyChart.js'
 import EvCard from '../components/EvCard.js'
+import ControllableDeviceCard from '../components/ControllableDeviceCard.js'
 
 // Convert ISO UTC string to a local-time string Plotly can parse as a date
 // e.g. "2026-07-03 14:30:00" — Plotly treats these as-is (no UTC conversion)
@@ -113,15 +114,16 @@ function buildSocTraces(intents, forecast, evDeviceIds) {
 
 export default defineComponent({
   name: 'PlanView',
-  components: { PlotlyChart, EvCard },
+  components: { PlotlyChart, EvCard, ControllableDeviceCard },
 
   setup() {
-    const evList      = ref([])
-    const planMeta    = ref('')
-    const flowTraces  = ref([])
-    const fcastTraces = ref([])
-    const priceTraces = ref([])
-    const socTraces   = ref([])
+    const evList       = ref([])
+    const controllable = ref([])
+    const planMeta     = ref('')
+    const flowTraces   = ref([])
+    const fcastTraces  = ref([])
+    const priceTraces  = ref([])
+    const socTraces    = ref([])
     let timer = null
 
     const refreshing = ref(false)
@@ -134,9 +136,12 @@ export default defineComponent({
 
     async function refresh() {
       try {
-        const [plan, forecast, evs] = await Promise.all([fetchPlan(), fetchForecast(), fetchEv()])
+        const [plan, forecast, evs, ctrl] = await Promise.all([
+          fetchPlan(), fetchForecast(), fetchEv(), fetchControllable(),
+        ])
 
-        evList.value = evs
+        evList.value       = evs
+        controllable.value = ctrl?.devices ?? []
         planMeta.value = plan.created_at
           ? `Plan created: ${new Date(plan.created_at).toLocaleString()} · step ${plan.step_minutes} min`
           : 'No plan yet'
@@ -157,7 +162,7 @@ export default defineComponent({
     onMounted(() => { refresh(); timer = setInterval(refresh, 60_000) })
     onUnmounted(() => clearInterval(timer))
 
-    return { evList, planMeta, flowTraces, fcastTraces, priceTraces, socTraces, refresh, triggerRefresh, refreshing, XAXIS }
+    return { evList, controllable, planMeta, flowTraces, fcastTraces, priceTraces, socTraces, refresh, triggerRefresh, refreshing, XAXIS }
   },
 
   template: `
@@ -173,6 +178,13 @@ export default defineComponent({
         <h2>EV Charging</h2>
         <div class="ev-cards">
           <EvCard v-for="ev in evList" :key="ev.asset_id" :ev="ev" @refresh="refresh" />
+        </div>
+      </div>
+
+      <div v-if="controllable.length" class="full panel" style="margin-bottom:10px">
+        <h2>Controllable Devices</h2>
+        <div class="ctrl-list">
+          <ControllableDeviceCard v-for="d in controllable" :key="d.device_id" :device="d" />
         </div>
       </div>
 
