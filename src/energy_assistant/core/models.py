@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -22,6 +24,7 @@ class DeviceRole(str, Enum):
     STORAGE = "storage"
     CONSUMER = "consumer"
     EV_CHARGER = "ev_charger"
+    THRESHOLD_CONTROLLED = "threshold_controlled"
 
 
 def parse_device_role(
@@ -107,6 +110,57 @@ class StorageConstraints(BaseModel):
         if self.purchase_price_eur and self.cycle_life and self.capacity_kwh:
             return self.purchase_price_eur / (self.cycle_life * self.capacity_kwh)
         return 0.0
+
+
+class ThresholdConstraints(BaseModel):
+    """Physical limits for a threshold-controlled device, declared for the MILP optimizer.
+
+    A threshold device is any load that keeps a measured environmental value
+    (temperature, humidity, CO₂, …) between ``bottom_threshold`` and
+    ``top_threshold``.  Examples: aquarium cooler, dehumidifier, space heater.
+
+    The MILP models the device as a binary on/off variable and tracks the
+    value trajectory over the horizon, scheduling runtime during cheap hours
+    while guaranteeing the value stays within bounds.
+
+    Direction semantics
+    -------------------
+    ``"reduces"``  — device reduces the value when running and the value drifts
+                     *upward* when off (cooler, dehumidifier).
+    ``"increases"`` — device increases the value when running and the value
+                      drifts *downward* when off (heater, humidifier).
+
+    The current measured value must be supplied as
+    ``DeviceState.extra["measured_value"]`` for the optimizer to use as the
+    initial condition.
+    """
+
+    device_id: str
+    bottom_threshold: float
+    """Lower bound of the allowed range (e.g. 24 °C, 40 % RH)."""
+    top_threshold: float
+    """Upper bound of the allowed range (e.g. 28 °C, 70 % RH)."""
+    unit: str = ""
+    """Display unit — informational only (e.g. '°C', '%RH')."""
+    direction: Literal["reduces", "increases"] = "reduces"
+    rated_power_kw: float
+    """Electrical power drawn when the device is running (kW)."""
+    active_rate_per_h: float
+    """Absolute rate of change while running (value units per hour).
+
+    E.g. a cooler that drops 2 °C/h → ``active_rate_per_h = 2.0``.
+    """
+    drift_rate_per_h: float
+    """Absolute rate of natural drift when the device is off (value units per hour).
+
+    E.g. an aquarium warming 1 °C/h when the cooler is off → ``drift_rate_per_h = 1.0``.
+    """
+    min_runtime_h: float = 0.0
+    """Minimum continuous runtime once started (compressor protection), in hours."""
+    min_offtime_h: float = 0.0
+    """Minimum off time after stopping (compressor protection), in hours."""
+    label: str = ""
+    """Human-readable display name shown in the UI (defaults to device_id if empty)."""
 
 
 class Measurement(BaseModel):

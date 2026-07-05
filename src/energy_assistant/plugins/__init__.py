@@ -32,6 +32,7 @@ from . import (  # noqa: E402
     pvforecast_iobroker,
     sma_modbus_iobroker,
     static_profile,
+    threshold_homeassistant,
     tibber_iobroker,
     zendure_iobroker,
 )
@@ -45,5 +46,6 @@ openwb_homeassistant.register(registry)
 pvforecast_iobroker.register(registry)
 sma_modbus_iobroker.register(registry)
 static_profile.register(registry)
+threshold_homeassistant.register(registry)
 tibber_iobroker.register(registry)
 zendure_iobroker.register(registry)

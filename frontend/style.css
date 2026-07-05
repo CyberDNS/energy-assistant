@@ -171,6 +171,15 @@ tbody tr:last-child td { border-bottom:none; }
 .basis-edit { display:flex; gap:6px; align-items:center; }
 .basis-edit input { width:90px; padding:3px 6px; border:1px solid var(--line); border-radius:5px; font-size:.83rem; }
 
+/* ── controllable devices list ── */
+.ctrl-list { display:flex; flex-direction:column; gap:0; }
+.ctrl-row { display:flex; flex-direction:column; gap:2px; padding:8px 0; border-bottom:1px solid var(--line); }
+.ctrl-row:last-child { border-bottom:none; }
+.ctrl-row-header { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.ctrl-label { font-weight:600; font-size:.88rem; }
+.ctrl-live { font-size:.82rem; color:var(--muted); }
+.ctrl-next { font-size:.75rem; color:var(--accent); margin-left:auto; }
+
 /* ── responsive ── */
 @media (max-width: 900px) {
   .row2, .row2-eq, .row3 { grid-template-columns: 1fr; }
