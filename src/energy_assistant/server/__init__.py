@@ -1422,8 +1422,18 @@ class Application:
         # JS files are served at /ui/…; index.html is served at /.
         # Cache-Control: no-store on every response so browser always fetches
         # fresh JS after a server restart (no stale module cache issues).
-        _fe = Path(__file__).resolve().parent.parent.parent.parent / "frontend"
-        if (_fe / "index.html").exists():
+        # Locate the frontend directory. Two layouts are supported:
+        #   installed wheel: energy_assistant/frontend/ sits next to this package
+        #   dev repo:        frontend/ is at the repository root (4 levels up)
+        _pkg_root = Path(__file__).resolve().parent.parent  # .../energy_assistant/
+        _fe = next(
+            (p for p in [
+                _pkg_root / "frontend",                       # installed wheel
+                _pkg_root.parent.parent / "frontend",          # dev repo root
+            ] if (p / "index.html").exists()),
+            None,
+        )
+        if _fe is not None:
             from fastapi.responses import FileResponse
             from starlette.middleware.base import BaseHTTPMiddleware
 
