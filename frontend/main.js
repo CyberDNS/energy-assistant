@@ -1,8 +1,8 @@
 import { createApp } from 'vue'
 import { createRouter, createWebHashHistory } from 'vue-router'
-import App from '/ui/App.js'
-import LiveView from '/ui/views/LiveView.js'
-import PlanView from '/ui/views/PlanView.js'
+import App from './App.js'
+import LiveView from './views/LiveView.js'
+import PlanView from './views/PlanView.js'
 
 const router = createRouter({
   history: createWebHashHistory(),

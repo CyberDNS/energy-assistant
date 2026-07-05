@@ -1,5 +1,5 @@
 import { defineComponent, ref, computed } from 'vue'
-import { setEvTarget, clearEvTarget, disableChargepoint, enableChargepoint } from '/ui/api.js'
+import { setEvTarget, clearEvTarget, disableChargepoint, enableChargepoint } from '../api.js'
 
 function fmt(v, dec = 0) {
   return v == null ? '—' : Number(v).toFixed(dec)
