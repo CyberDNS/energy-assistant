@@ -451,6 +451,7 @@ class Application:
         self._ev_assets: list[EvChargingAsset] = []
         self._ev_contributors: list[EvChargerContributor] = []
         self._ev_overrides: dict[str, tuple[float, datetime]] = {}
+        self._staged_overrides: dict[str, tuple[float, datetime]] = {}
         self._disabled_chargepoints: set[str] = set()
         self._last_ev_goals: list[EvChargingGoal] = []
         self._mqtt_publisher: EvMqttPublisher | None = None
@@ -513,6 +514,7 @@ class Application:
             self._control_loop.register_contributor(contrib)
         # Load persisted overrides and disabled state from SQLite
         self._ev_overrides = await self._storage.load_all_ev_targets()
+        self._staged_overrides = dict(self._ev_overrides)  # staged starts from any persisted override
         self._disabled_chargepoints = await self._storage.load_all_ev_disabled()
         for contrib in self._ev_contributors:
             asset = next(a for a in self._ev_assets if a.device_id == contrib.device_id)
@@ -527,8 +529,9 @@ class Application:
             self._mqtt_publisher = EvMqttPublisher(
                 cfg=self._cfg.backends.mqtt,
                 assets=self._ev_assets,
-                on_set_target=self._mqtt_apply_target,
-                on_clear_target=self._mqtt_clear_target,
+                on_stage=self._mqtt_stage_target,
+                on_enable_override=self._mqtt_enable_override,
+                on_disable_override=self._mqtt_disable_override,
             )
             await self._mqtt_publisher.start()
             _log.info("MQTT publisher started")
@@ -602,17 +605,31 @@ class Application:
     # MQTT callbacks (called by EvMqttPublisher on incoming commands)
     # ------------------------------------------------------------------
 
-    async def _mqtt_apply_target(self, asset_id: str, soc: float, deadline: datetime) -> None:
+    async def _mqtt_stage_target(self, asset_id: str, soc: float, deadline: datetime) -> None:
+        self._staged_overrides[asset_id] = (soc, deadline)
+        _log.info("MQTT staged: %r → %.0f%% by %s", asset_id, soc, deadline)
+        # If override is already active, apply the updated staged values immediately
+        if asset_id in self._ev_overrides:
+            await self._storage.set_ev_target(asset_id, soc, deadline)
+            self._ev_overrides[asset_id] = (soc, deadline)
+            asyncio.create_task(self._run_plan())
+
+    async def _mqtt_enable_override(self, asset_id: str) -> None:
+        staged = self._staged_overrides.get(asset_id)
+        if staged is None:
+            _log.warning("MQTT enable_override: no staged values for %r", asset_id)
+            return
+        soc, deadline = staged
         await self._storage.set_ev_target(asset_id, soc, deadline)
         self._ev_overrides[asset_id] = (soc, deadline)
-        _log.info("MQTT override applied: %r → %.0f%% by %s", asset_id, soc, deadline)
+        _log.info("MQTT override enabled: %r → %.0f%% by %s", asset_id, soc, deadline)
         asyncio.create_task(self._run_plan())
 
-    async def _mqtt_clear_target(self, asset_id: str) -> None:
+    async def _mqtt_disable_override(self, asset_id: str) -> None:
         if asset_id in self._ev_overrides:
             await self._storage.clear_ev_target(asset_id)
             self._ev_overrides.pop(asset_id, None)
-            _log.info("MQTT override cleared: %r", asset_id)
+            _log.info("MQTT override disabled: %r (staged values kept)", asset_id)
             asyncio.create_task(self._run_plan())
 
     # ------------------------------------------------------------------
@@ -811,7 +828,9 @@ class Application:
         await self._bus.flush()
 
         if self._mqtt_publisher is not None:
-            await self._mqtt_publisher.publish_states(ev_goals, device_states, self._ev_overrides)
+            await self._mqtt_publisher.publish_states(
+                ev_goals, device_states, self._ev_overrides, self._staged_overrides
+            )
 
     # ------------------------------------------------------------------
     # Control loop
@@ -1359,7 +1378,6 @@ class Application:
                 goal = next((g for g in fresh_goals if g.asset_id == asset.asset_id), None)
                 # phase1/phase2 kWh come from the last optimizer run (more accurate energy split)
                 planned = next((g for g in self._last_ev_goals if g.asset_id == asset.asset_id), None)
-                override = self._ev_overrides.get(asset.asset_id)
                 result.append({
                     "asset_id":       asset.asset_id,
                     "device_id":      asset.device_id,
@@ -1375,13 +1393,78 @@ class Application:
                         "phase2_kwh":       round(planned.phase2_required_kwh, 2) if planned else 0.0,
                         "phase2_start":     planned.phase2_start_time.isoformat() if planned else goal.target_by.isoformat(),
                     } if goal else None,
-                    "override": {
+                    "staged": {
                         "target_soc_pct": override[0],
                         "target_by":      override[1].isoformat(),
-                    } if override else None,
+                    } if (override := self._staged_overrides.get(asset.asset_id)) else None,
+                    "override_active": asset.asset_id in self._ev_overrides,
                     "disabled": asset.asset_id in self._disabled_chargepoints,
                 })
             return result
+
+        def _parse_ev_asset(asset_id: str) -> EvChargingAsset:
+            asset = next((a for a in self._ev_assets if a.asset_id == asset_id), None)
+            if asset is None:
+                raise HTTPException(404, f"Unknown EV asset: {asset_id!r}")
+            return asset
+
+        def _parse_target_dt(target_by: str) -> datetime:
+            try:
+                dt = datetime.fromisoformat(target_by)
+                return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+            except ValueError:
+                raise HTTPException(400, f"Invalid target_by datetime: {target_by!r}")
+
+        @api.post("/api/ev/{asset_id}/stage")
+        async def stage_ev_target(
+            asset_id: str,
+            target_soc_pct: float,
+            target_by: str,
+        ) -> dict:
+            """Store staged override values without activating the override.
+
+            Values are held in memory and applied to the optimizer only when
+            ``POST /api/ev/{asset_id}/override`` is called.
+            """
+            _parse_ev_asset(asset_id)
+            if not (0 <= target_soc_pct <= 100):
+                raise HTTPException(400, "target_soc_pct must be 0–100")
+            target_dt = _parse_target_dt(target_by)
+            self._staged_overrides[asset_id] = (target_soc_pct, target_dt)
+            # If override is already active, update it immediately too
+            if asset_id in self._ev_overrides:
+                await self._storage.set_ev_target(asset_id, target_soc_pct, target_dt)
+                self._ev_overrides[asset_id] = (target_soc_pct, target_dt)
+                asyncio.create_task(self._run_plan())
+            _log.info("EV staged: %r → %.0f%% by %s", asset_id, target_soc_pct, target_dt)
+            return {"status": "ok", "asset_id": asset_id,
+                    "target_soc_pct": target_soc_pct, "target_by": target_dt.isoformat()}
+
+        @api.post("/api/ev/{asset_id}/override")
+        async def enable_ev_override(asset_id: str) -> dict:
+            """Apply the staged values as an active override (feeds the optimizer)."""
+            _parse_ev_asset(asset_id)
+            staged = self._staged_overrides.get(asset_id)
+            if staged is None:
+                raise HTTPException(400, f"No staged values for asset: {asset_id!r}")
+            soc, dt = staged
+            await self._storage.set_ev_target(asset_id, soc, dt)
+            self._ev_overrides[asset_id] = (soc, dt)
+            _log.info("EV override enabled: %r → %.0f%% by %s", asset_id, soc, dt)
+            asyncio.create_task(self._run_plan())
+            return {"status": "ok", "asset_id": asset_id, "override_active": True}
+
+        @api.delete("/api/ev/{asset_id}/override")
+        async def disable_ev_override(asset_id: str) -> dict:
+            """Deactivate the override (reverts to schedule). Staged values are kept."""
+            _parse_ev_asset(asset_id)
+            if asset_id not in self._ev_overrides:
+                raise HTTPException(404, f"No active override for asset: {asset_id!r}")
+            await self._storage.clear_ev_target(asset_id)
+            self._ev_overrides.pop(asset_id, None)
+            _log.info("EV override disabled: %r (staged kept)", asset_id)
+            asyncio.create_task(self._run_plan())
+            return {"status": "ok", "asset_id": asset_id, "override_active": False}
 
         @api.post("/api/ev/{asset_id}/set_target")
         async def set_ev_target(
@@ -1389,22 +1472,12 @@ class Application:
             target_soc_pct: float,
             target_by: str,
         ) -> dict:
-            """Set a UI override charging target for the given asset.
-
-            ``target_by`` must be an ISO-8601 datetime string (UTC preferred).
-            """
-            asset = next((a for a in self._ev_assets if a.asset_id == asset_id), None)
-            if asset is None:
-                raise HTTPException(404, f"Unknown EV asset: {asset_id!r}")
-            try:
-                target_dt = datetime.fromisoformat(target_by)
-                if target_dt.tzinfo is None:
-                    target_dt = target_dt.replace(tzinfo=timezone.utc)
-            except ValueError:
-                raise HTTPException(400, f"Invalid target_by datetime: {target_by!r}")
+            """Stage and immediately activate an override (legacy endpoint)."""
+            _parse_ev_asset(asset_id)
             if not (0 <= target_soc_pct <= 100):
                 raise HTTPException(400, "target_soc_pct must be 0–100")
-
+            target_dt = _parse_target_dt(target_by)
+            self._staged_overrides[asset_id] = (target_soc_pct, target_dt)
             await self._storage.set_ev_target(asset_id, target_soc_pct, target_dt)
             self._ev_overrides[asset_id] = (target_soc_pct, target_dt)
             _log.info("EV override set: %r → %.0f%% by %s", asset_id, target_soc_pct, target_dt)
@@ -1414,12 +1487,13 @@ class Application:
 
         @api.delete("/api/ev/{asset_id}/target")
         async def clear_ev_target(asset_id: str) -> dict:
-            """Remove the UI override for the given asset (reverts to schedule)."""
+            """Clear override and staged values (legacy endpoint)."""
             if asset_id not in self._ev_overrides:
                 raise HTTPException(404, f"No override for asset: {asset_id!r}")
             await self._storage.clear_ev_target(asset_id)
             self._ev_overrides.pop(asset_id, None)
-            _log.info("EV override cleared: %r", asset_id)
+            self._staged_overrides.pop(asset_id, None)
+            _log.info("EV override + staged cleared: %r", asset_id)
             asyncio.create_task(self._run_plan())
             return {"status": "ok", "asset_id": asset_id}
 
