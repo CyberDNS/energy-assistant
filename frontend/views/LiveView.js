@@ -1,5 +1,5 @@
 import { defineComponent, ref, inject, computed, watch, onMounted } from 'vue'
-import { fetchLedger, setLedgerBasis } from '/ui/api.js'
+import { fetchLedger, setLedgerBasis } from '../api.js'
 
 function fmt(v, dec = 0) {
   return v == null ? '—' : Number(v).toFixed(dec)
