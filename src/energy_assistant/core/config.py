@@ -74,11 +74,22 @@ class HomeAssistantConfig:
 
 
 @dataclass
+class MqttConfig:
+    """Connection parameters for an MQTT broker."""
+
+    host: str
+    port: int = 1883
+    username: str | None = None
+    password: str | None = None
+
+
+@dataclass
 class BackendsConfig:
     """Connection parameters for all configured backends."""
 
     iobroker: IoBrokerConfig | None = None
     homeassistant: HomeAssistantConfig | None = None
+    mqtt: MqttConfig | None = None
 
 
 @dataclass
