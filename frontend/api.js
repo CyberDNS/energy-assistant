@@ -1,5 +1,11 @@
+// Resolve the addon root relative to this file's URL so API calls work
+// both in direct mode (http://host:8088/) and behind HASS ingress
+// (https://ha-host/api/hassio_ingress/<token>/).
+// api.js lives at <root>/ui/api.js → one level up is <root>.
+const _apiBase = new URL('..', import.meta.url).href.replace(/\/$/, '')
+
 async function call(url, options) {
-  const res = await fetch(url, options)
+  const res = await fetch(_apiBase + url, options)
   if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`)
   return res.json()
 }
