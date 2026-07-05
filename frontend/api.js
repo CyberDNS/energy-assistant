@@ -18,14 +18,15 @@ export const fetchLedger   = ()           => call('/api/ledger')
 export const fetchEv       = ()           => call('/api/ev')
 export const fetchConfig   = ()           => call('/api/config')
 
-export function setEvTarget(assetId, socPct, targetBy) {
+export function stageEvTarget(assetId, socPct, targetBy) {
   const by = targetBy instanceof Date ? targetBy.toISOString() : targetBy
-  const url = `/api/ev/${encodeURIComponent(assetId)}/set_target`
+  const url = `/api/ev/${encodeURIComponent(assetId)}/stage`
     + `?target_soc_pct=${socPct}&target_by=${encodeURIComponent(by)}`
   return call(url, { method: 'POST' })
 }
 
-export const clearEvTarget       = (id) => call(`/api/ev/${encodeURIComponent(id)}/target`,  { method: 'DELETE' })
+export const enableEvOverride    = (id) => call(`/api/ev/${encodeURIComponent(id)}/override`, { method: 'POST' })
+export const disableEvOverride   = (id) => call(`/api/ev/${encodeURIComponent(id)}/override`, { method: 'DELETE' })
 export const disableChargepoint  = (id) => call(`/api/ev/${encodeURIComponent(id)}/disable`, { method: 'POST' })
 export const enableChargepoint   = (id) => call(`/api/ev/${encodeURIComponent(id)}/disable`, { method: 'DELETE' })
 export const setLedgerBasis      = (deviceId, basis) =>
