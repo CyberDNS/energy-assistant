@@ -30,6 +30,7 @@ RUN pip install --no-cache-dir uv
 # (maximises Docker layer cache — source changes don't invalidate deps)
 COPY pyproject.toml uv.lock* README.md ./
 COPY src/ ./src/
+COPY frontend/ ./frontend/
 
 # Install the package and its runtime dependencies into an isolated prefix
 RUN uv pip install --system --no-cache .
