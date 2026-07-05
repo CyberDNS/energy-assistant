@@ -72,6 +72,7 @@ from ..core.topology import TopologyNode
 from ..loader.device_loader import build, build_all_forecasts, make_build_context
 from ..plugins import registry as plugin_registry
 from ..plugins.milp_highs import MilpHigsOptimizer
+from ..plugins.mqtt_publisher import EvMqttPublisher
 from ..storage.sqlite import SqliteStorageBackend
 
 _log = logging.getLogger(__name__)
@@ -452,6 +453,7 @@ class Application:
         self._ev_overrides: dict[str, tuple[float, datetime]] = {}
         self._disabled_chargepoints: set[str] = set()
         self._last_ev_goals: list[EvChargingGoal] = []
+        self._mqtt_publisher: EvMqttPublisher | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -520,6 +522,17 @@ class Application:
             len(self._ev_assets), len(self._ev_overrides), len(self._disabled_chargepoints),
         )
 
+        # 7c — MQTT publisher (optional — only started when mqtt: is configured)
+        if self._cfg.backends.mqtt and self._ev_assets:
+            self._mqtt_publisher = EvMqttPublisher(
+                cfg=self._cfg.backends.mqtt,
+                assets=self._ev_assets,
+                on_set_target=self._mqtt_apply_target,
+                on_clear_target=self._mqtt_clear_target,
+            )
+            await self._mqtt_publisher.start()
+            _log.info("MQTT publisher started")
+
         # 8 — Subscribe control loop to plan updates via event bus
         async def _on_plan_updated(event: PlanUpdatedEvent) -> None:
             self._control_loop.update_plan(event.plan)
@@ -569,6 +582,8 @@ class Application:
         if self.tasks:
             await asyncio.gather(*self.tasks, return_exceptions=True)
         self.tasks = []
+        if self._mqtt_publisher is not None:
+            await self._mqtt_publisher.stop()
         if hasattr(self, "_storage"):
             await self._storage.stop()
         _log.info("Energy Assistant stopped")
@@ -582,6 +597,23 @@ class Application:
             pass
         finally:
             await self.stop()
+
+    # ------------------------------------------------------------------
+    # MQTT callbacks (called by EvMqttPublisher on incoming commands)
+    # ------------------------------------------------------------------
+
+    async def _mqtt_apply_target(self, asset_id: str, soc: float, deadline: datetime) -> None:
+        await self._storage.set_ev_target(asset_id, soc, deadline)
+        self._ev_overrides[asset_id] = (soc, deadline)
+        _log.info("MQTT override applied: %r → %.0f%% by %s", asset_id, soc, deadline)
+        asyncio.create_task(self._run_plan())
+
+    async def _mqtt_clear_target(self, asset_id: str) -> None:
+        if asset_id in self._ev_overrides:
+            await self._storage.clear_ev_target(asset_id)
+            self._ev_overrides.pop(asset_id, None)
+            _log.info("MQTT override cleared: %r", asset_id)
+            asyncio.create_task(self._run_plan())
 
     # ------------------------------------------------------------------
     # Polling loop
@@ -777,6 +809,9 @@ class Application:
         _log.info("New plan: %d intents  horizon=%s  (cap=%s)", len(plan.intents), effective_horizon, self._horizon)
         await self._bus.publish(PlanUpdatedEvent(plan=plan))
         await self._bus.flush()
+
+        if self._mqtt_publisher is not None:
+            await self._mqtt_publisher.publish_states(ev_goals, device_states, self._ev_overrides)
 
     # ------------------------------------------------------------------
     # Control loop
