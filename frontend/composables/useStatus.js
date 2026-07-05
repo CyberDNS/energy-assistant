@@ -1,5 +1,5 @@
 import { ref, onMounted, onUnmounted } from 'vue'
-import { fetchStatus } from '/ui/api.js'
+import { fetchStatus } from '../api.js'
 
 export function useStatus() {
   const status  = ref(null)

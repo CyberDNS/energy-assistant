@@ -1,6 +1,6 @@
 import { defineComponent, computed, provide } from 'vue'
 import { RouterView, RouterLink } from 'vue-router'
-import { useStatus } from '/ui/composables/useStatus.js'
+import { useStatus } from './composables/useStatus.js'
 
 function fmt(v, dec = 0) {
   return v == null ? '—' : Number(v).toFixed(dec)
