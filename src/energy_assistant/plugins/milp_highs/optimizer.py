@@ -73,6 +73,7 @@ from ...core.models import (
     ForecastQuantity,
     StorageConstraints,
     TariffPoint,
+    ThresholdConstraints,
 )
 from ...core.optimizer import OptimizationContext
 
@@ -233,11 +234,17 @@ class MilpHigsOptimizer:
             len(prices),
         )
 
+        # ── Threshold devices ──────────────────────────────────────────
+        threshold_devices = context.threshold_constraints
+        initial_threshold_values = self._initial_threshold_values(threshold_devices, context)
+
         # ── Build and solve the MILP model ─────────────────────────────
         prob, variables = self._build_model(
             n_steps, step_h, batteries, net_load, prices, export_prices,
             initial_energy, context.battery_cost_basis, terminal_value_basis,
             ev_goals=ev_goals, timestamps=timestamps,
+            threshold_devices=threshold_devices,
+            initial_threshold_values=initial_threshold_values,
         )
         status = prob.solve(self._get_solver())
 
@@ -267,7 +274,8 @@ class MilpHigsOptimizer:
                         reserved_kwh=round(goal.max_charge_kw * step_h, 4),
                         charge_policy="grid_allowed",
                     ))
-        return EnergyPlan(horizon_hours=horizon_h, intents=intents + ev_intents)
+        threshold_intents = _extract_threshold_intents(threshold_devices, variables, timestamps)
+        return EnergyPlan(horizon_hours=horizon_h, intents=intents + ev_intents + threshold_intents)
 
     # ------------------------------------------------------------------
     # Model construction
@@ -286,6 +294,8 @@ class MilpHigsOptimizer:
         terminal_value_basis: dict[str, float] | None = None,
         ev_goals: list[EvChargingGoal] | None = None,
         timestamps: list[datetime] | None = None,
+        threshold_devices: list[ThresholdConstraints] | None = None,
+        initial_threshold_values: dict[str, float] | None = None,
     ) -> tuple[pulp.LpProblem, dict]:
         """Construct the PuLP problem and return (problem, variables dict).
 
@@ -336,6 +346,23 @@ class MilpHigsOptimizer:
                     upbound = 0.0
                 ev[(goal.asset_id, t)] = pulp.LpVariable(
                     f"ev__{goal.asset_id}__{t}", lowBound=0, upBound=upbound
+                )
+
+        # ── Threshold device variables ─────────────────────────────────
+        # run[device_id, t] — binary: 1 = device is running this step
+        # val[device_id, t] — measured value at END of this step
+        active_threshold_devices = list(threshold_devices or [])
+        initial_vals = initial_threshold_values or {}
+        run: dict[tuple[str, int], pulp.LpVariable] = {}
+        val: dict[tuple[str, int], pulp.LpVariable] = {}
+        for tc in active_threshold_devices:
+            td_id = tc.device_id
+            for t in T:
+                run[(td_id, t)] = pulp.LpVariable(f"run__{td_id}__{t}", cat="Binary")
+                val[(td_id, t)] = pulp.LpVariable(
+                    f"val__{td_id}__{t}",
+                    lowBound=tc.bottom_threshold,
+                    upBound=tc.top_threshold,
                 )
 
         # Grid energy per step: split into import (≥0) and export (≥0)
@@ -425,7 +452,11 @@ class MilpHigsOptimizer:
                 == net_load[t]
                 + pulp.lpSum(c[(sc.device_id, t)] for sc in batteries)
                 - pulp.lpSum(d[(sc.device_id, t)] for sc in batteries)
-                + pulp.lpSum(ev[(goal.asset_id, t)] for goal in active_ev_goals),
+                + pulp.lpSum(ev[(goal.asset_id, t)] for goal in active_ev_goals)
+                + pulp.lpSum(
+                    run[(tc.device_id, t)] * tc.rated_power_kw * step_h
+                    for tc in active_threshold_devices
+                ),
                 f"grid_balance__{t}",
             )
 
@@ -482,7 +513,37 @@ class MilpHigsOptimizer:
                     f"soc__{b}__{t}",
                 )
 
-        variables = {"c": c, "d": d, "u": u, "e": e, "g_imp": g_imp, "g_exp": g_exp, "ev": ev}
+        # ── Threshold device value dynamics ───────────────────────────
+        # v[d, t] = v[d, t-1]  ± drift × dt  ∓ (active + drift) × dt × run[d, t]
+        #
+        # For "reduces" (cooler/dehumidifier): value drifts UP when off,
+        #   drops DOWN when running.
+        # For "increases" (heater/humidifier): value drifts DOWN when off,
+        #   rises UP when running.
+        for tc in active_threshold_devices:
+            td_id = tc.device_id
+            v_init = initial_vals.get(td_id, (tc.bottom_threshold + tc.top_threshold) / 2.0)
+            combined_rate = (tc.active_rate_per_h + tc.drift_rate_per_h) * step_h
+            for t in T:
+                v_prev = v_init if t == 0 else val[(td_id, t - 1)]
+                if tc.direction == "reduces":
+                    # off: +drift, on: +drift − combined = −active
+                    prob += (
+                        val[(td_id, t)] == v_prev
+                        + tc.drift_rate_per_h * step_h
+                        - combined_rate * run[(td_id, t)],
+                        f"val_dynamics__{td_id}__{t}",
+                    )
+                else:  # "increases"
+                    # off: −drift, on: −drift + combined = +active
+                    prob += (
+                        val[(td_id, t)] == v_prev
+                        - tc.drift_rate_per_h * step_h
+                        + combined_rate * run[(td_id, t)],
+                        f"val_dynamics__{td_id}__{t}",
+                    )
+
+        variables = {"c": c, "d": d, "u": u, "e": e, "g_imp": g_imp, "g_exp": g_exp, "ev": ev, "run": run, "val": val}
         return prob, variables
 
     # ------------------------------------------------------------------
@@ -595,6 +656,36 @@ class MilpHigsOptimizer:
         return result
 
     @staticmethod
+    def _initial_threshold_values(
+        threshold_devices: list[ThresholdConstraints],
+        context: OptimizationContext,
+    ) -> dict[str, float]:
+        """Return initial measured value keyed by device_id.
+
+        Reads ``DeviceState.extra["measured_value"]``; falls back to the
+        midpoint of [bottom_threshold, top_threshold] when absent.
+        """
+        result: dict[str, float] = {}
+        for tc in threshold_devices:
+            state = context.device_states.get(tc.device_id)
+            measured: float | None = None
+            if state is not None:
+                raw = state.extra.get("measured_value")
+                if raw is not None:
+                    measured = float(raw)
+            if measured is None:
+                measured = (tc.bottom_threshold + tc.top_threshold) / 2.0
+                _log.warning(
+                    "MilpHigsOptimizer: no measured_value for threshold device %r"
+                    " — assuming midpoint %.2f %s",
+                    tc.device_id,
+                    measured,
+                    tc.unit,
+                )
+            result[tc.device_id] = measured
+        return result
+
+    @staticmethod
     def _get_solver() -> pulp.LpSolver:
         """Return the HiGHS solver; fall back to CBC if unavailable."""
         if "HiGHS" in pulp.listSolvers(onlyAvailable=True):
@@ -609,6 +700,38 @@ class MilpHigsOptimizer:
 # ──────────────────────────────────────────────────────────────────────────────
 # Module-level helpers
 # ──────────────────────────────────────────────────────────────────────────────
+
+
+def _extract_threshold_intents(
+    threshold_devices: list[ThresholdConstraints],
+    variables: dict,
+    timestamps: list[datetime],
+) -> list[ControlIntent]:
+    """Convert threshold device solver values into ``ControlIntent`` objects.
+
+    Modes emitted:
+    ``"run"``      — optimizer scheduled the device to run this step.
+    ``"standby"``  — optimizer scheduled the device to be off this step.
+    """
+    run = variables.get("run", {})
+    val = variables.get("val", {})
+    intents: list[ControlIntent] = []
+    for tc in threshold_devices:
+        d = tc.device_id
+        for t, ts in enumerate(timestamps):
+            run_val = pulp.value(run.get((d, t))) or 0.0
+            is_running = run_val > 0.5
+            predicted_value = pulp.value(val.get((d, t)))
+            intents.append(ControlIntent(
+                device_id=d,
+                timestep=ts,
+                mode="run" if is_running else "standby",
+                planned_kw=round(tc.rated_power_kw, 4) if is_running else 0.0,
+                # stored_energy_kwh repurposed here to carry the predicted
+                # measured value at end of step (°C, %RH, etc.) for UI display.
+                stored_energy_kwh=round(predicted_value, 4) if predicted_value is not None else None,
+            ))
+    return intents
 
 
 def _nearest(
