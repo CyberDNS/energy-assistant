@@ -1,6 +1,6 @@
 import { defineComponent, ref, onMounted } from 'vue'
-import { fetchHistory, fetchLedger } from '/ui/api.js'
-import PlotlyChart from '/ui/components/PlotlyChart.js'
+import { fetchHistory, fetchLedger } from '../api.js'
+import PlotlyChart from '../components/PlotlyChart.js'
 
 function localTs(isoArr) {
   return isoArr.map(t => new Date(t).toLocaleString())

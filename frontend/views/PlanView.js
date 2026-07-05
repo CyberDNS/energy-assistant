@@ -1,7 +1,7 @@
 import { defineComponent, ref, onMounted, onUnmounted } from 'vue'
-import { fetchPlan, fetchForecast, fetchEv, triggerPlanRefresh } from '/ui/api.js'
-import PlotlyChart from '/ui/components/PlotlyChart.js'
-import EvCard from '/ui/components/EvCard.js'
+import { fetchPlan, fetchForecast, fetchEv, triggerPlanRefresh } from '../api.js'
+import PlotlyChart from '../components/PlotlyChart.js'
+import EvCard from '../components/EvCard.js'
 
 // Convert ISO UTC string to a local-time string Plotly can parse as a date
 // e.g. "2026-07-03 14:30:00" — Plotly treats these as-is (no UTC conversion)
