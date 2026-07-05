@@ -45,8 +45,11 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 import uvicorn
 
+from ..assets.ev import EvChargerContributor, EvChargingAsset, EvChargingGoal
+from ..assets.loader import parse_ev_assets, resolve_active_goals
 from ..config.yaml import YamlConfigLoader
 from ..core.config import AppConfig
 from ..core.control import ControlLoop, LiveSituation, StorageControlContributor
@@ -92,713 +95,6 @@ class _TariffZone:
     is used for the feedback contribution when Z2 is exporting."""
 
 
-def _web_ui_html() -> str:
-    """Return the built-in multi-tab web UI for live diagnostics."""
-    return """<!doctype html>
-<html lang=\"en\">
-<head>
-    <meta charset=\"utf-8\" />
-    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-    <title>Energy Assistant</title>
-    <script src=\"https://cdn.plot.ly/plotly-2.35.2.min.js\"></script>
-    <style>
-        :root {
-            --bg: #f3f5f2;
-            --card: #ffffff;
-            --ink: #1a2420;
-            --muted: #586660;
-            --ok: #1d7f4e;
-            --warn: #ad7b00;
-            --bad: #9f2d2d;
-            --line: #d5dbd6;
-            --accent: #0f6a8f;
-            --tab-active: #0f6a8f;
-        }
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body {
-            font-family: ui-sans-serif, -apple-system, Segoe UI, Helvetica, Arial, sans-serif;
-            background: var(--bg);
-            color: var(--ink);
-            font-size: 14px;
-        }
-        .wrap { max-width: 1500px; margin: 0 auto; padding: 14px 16px; }
-        /* ── header ── */
-        .top { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; flex-wrap:wrap; gap:8px; }
-        h1 { font-size:1.15rem; letter-spacing:.03em; }
-        .stamp { color:var(--muted); font-size:.82rem; }
-        /* ── KPI bar ── */
-        .kpis { display:grid; grid-template-columns:repeat(auto-fill,minmax(145px,1fr)); gap:8px; margin-bottom:12px; }
-        .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:8px 12px; box-shadow:0 1px 2px rgba(0,0,0,.04); }
-        .k { color:var(--muted); font-size:.73rem; text-transform:uppercase; letter-spacing:.07em; }
-        .v { font-size:1.25rem; font-weight:700; margin-top:3px; }
-        .ok { color:var(--ok); } .warn { color:var(--warn); } .bad { color:var(--bad); }
-        /* ── tabs ── */
-        .tab-nav { display:flex; gap:4px; margin-bottom:12px; border-bottom:2px solid var(--line); padding-bottom:0; }
-        .tab-btn {
-            padding:7px 18px; border:none; background:none; cursor:pointer;
-            color:var(--muted); font-size:.9rem; font-weight:600; border-radius:6px 6px 0 0;
-            border-bottom:3px solid transparent; margin-bottom:-2px; transition:color .15s;
-        }
-        .tab-btn.active { color:var(--tab-active); border-bottom-color:var(--tab-active); }
-        .tab-btn:hover:not(.active) { color:var(--ink); background:var(--line); }
-        .tab-pane { display:none; }
-        .tab-pane.active { display:block; }
-        /* ── layout helpers ── */
-        .row2 { display:grid; grid-template-columns:1.4fr 1fr; gap:10px; margin-bottom:10px; }
-        .row2-eq { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:10px; }
-        .row3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; margin-bottom:10px; }
-        .full { margin-bottom:10px; }
-        .panel { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:10px 12px; }
-        .panel h2 { font-size:.78rem; color:var(--muted); text-transform:uppercase; letter-spacing:.07em; margin-bottom:8px; }
-        /* ── tables ── */
-        table { width:100%; border-collapse:collapse; font-size:.86rem; }
-        th,td { padding:5px 7px; border-bottom:1px solid var(--line); text-align:left; }
-        th { color:var(--muted); font-weight:600; font-size:.78rem; text-transform:uppercase; letter-spacing:.05em; }
-        tbody tr:last-child td { border-bottom:none; }
-        .footnote { font-size:.72rem; color:#777; margin-top:4px; }
-        /* ── time range buttons ── */
-        .range-btns { display:flex; gap:6px; margin-bottom:8px; }
-        .range-btn { padding:4px 12px; border:1px solid var(--line); background:var(--card); border-radius:6px; cursor:pointer; font-size:.82rem; }
-        .range-btn.active { background:var(--tab-active); color:#fff; border-color:var(--tab-active); }
-        /* ── responsive ── */
-        @media(max-width:900px) {
-            .row2,.row2-eq,.row3 { grid-template-columns:1fr; }
-        }
-    </style>
-</head>
-<body>
-<div class=\"wrap\">
-    <!-- Header -->
-    <div class=\"top\">
-        <h1>&#9889; Energy Assistant</h1>
-        <div class=\"stamp\" id=\"stamp\">loading&hellip;</div>
-    </div>
-
-    <!-- KPI bar (always visible) -->
-    <div class=\"kpis\" id=\"kpiBar\">
-        <div class=\"card\"><div class=\"k\">Grid</div><div class=\"v\" id=\"kGrid\">-</div></div>
-        <div class=\"card\"><div class=\"k\">PV</div><div class=\"v\" id=\"kPv\">-</div></div>
-        <div class=\"card\"><div class=\"k\">Import Price</div><div class=\"v\" id=\"kPrice\">-</div></div>
-        <div class=\"card\"><div class=\"k\">Export Price</div><div class=\"v\" id=\"kExport\">-</div></div>
-        <div id=\"marketKpis\"></div>
-        <div class=\"card\"><div class=\"k\">Dry Run</div><div class=\"v\" id=\"kDryRun\">-</div></div>
-        <div id=\"batteryKpis\"></div>
-    </div>
-
-    <!-- Tab navigation -->
-    <div class=\"tab-nav\">
-        <button class=\"tab-btn active\" data-tab=\"live\">Live</button>
-        <button class=\"tab-btn\" data-tab=\"plan\">Plan</button>
-        <button class=\"tab-btn\" data-tab=\"history\">History</button>
-    </div>
-
-    <!-- ══ TAB: Live ══════════════════════════════════════════════════════════ -->
-    <div id=\"tab-live\" class=\"tab-pane active\">
-        <div class=\"row2\">
-            <div class=\"panel\">
-                <h2>Devices</h2>
-                <table id=\"devicesTable\">
-                    <thead><tr><th>Device</th><th>Role</th><th>Power W</th><th>SoC %</th><th>OK</th></tr></thead>
-                    <tbody></tbody>
-                </table>
-                <p class=\"footnote\">&#185; no live meter &mdash; planned value from active forecast</p>
-            </div>
-            <div class=\"panel\">
-                <h2>Active Setpoints</h2>
-                <table id=\"setpointsTable\">
-                    <thead><tr><th>Device</th><th>Mode</th><th>Policy</th><th>W</th></tr></thead>
-                    <tbody></tbody>
-                </table>
-            </div>
-        </div>
-        <div class=\"full\">
-            <div class=\"panel\">
-                <h2>Battery Ledger</h2>
-                <table id=\"ledgerTable\">
-                    <thead><tr><th>Device</th><th>Stored kWh</th><th>SoC %</th><th>Capacity kWh</th><th>Basis &euro;/kWh</th></tr></thead>
-                    <tbody></tbody>
-                </table>
-            </div>
-        </div>
-    </div>
-
-    <!-- ══ TAB: Plan ══════════════════════════════════════════════════════════ -->
-    <div id=\"tab-plan\" class=\"tab-pane\">
-        <div id=\"planMeta\" class=\"footnote\" style=\"margin-bottom:8px\"></div>
-        <div class=\"full panel\">
-            <h2>Energy Flow &mdash; Supply &amp; Demand</h2>
-            <div id=\"chartFlow\" style=\"height:280px\"></div>
-        </div>
-        <div class=\"row2-eq\">
-            <div class=\"panel\">
-                <h2>PV &amp; Consumption Forecast</h2>
-                <div id=\"chartForecast\" style=\"height:220px\"></div>
-            </div>
-            <div class=\"panel\">
-                <h2>Electricity Prices</h2>
-                <div id=\"chartPrices\" style=\"height:220px\"></div>
-            </div>
-        </div>
-        <div class=\"row2-eq\">
-            <div class=\"panel\">
-                <h2>Per-step Saving vs Baseline</h2>
-                <div id=\"chartSaving\" style=\"height:200px\"></div>
-            </div>
-            <div class=\"panel\">
-                <h2>Cumulative Saving</h2>
-                <div id=\"chartCumSaving\" style=\"height:200px\"></div>
-            </div>
-        </div>
-        <div class=\"full panel\">
-            <h2>Battery SoC Trajectory</h2>
-            <div id=\"chartSoc\" style=\"height:220px\"></div>
-        </div>
-    </div>
-
-    <!-- ══ TAB: History ═══════════════════════════════════════════════════════ -->
-    <div id=\"tab-history\" class=\"tab-pane\">
-        <div class=\"range-btns\">
-            <button class=\"range-btn active\" data-h=\"6\">6 h</button>
-            <button class=\"range-btn\" data-h=\"12\">12 h</button>
-            <button class=\"range-btn\" data-h=\"24\">24 h</button>
-            <button class=\"range-btn\" data-h=\"48\">48 h</button>
-            <button class=\"range-btn\" data-h=\"168\">7 d</button>
-        </div>
-        <div class=\"row2-eq\">
-            <div class=\"panel\">
-                <h2>Battery SoC History</h2>
-                <div id=\"chartHistSoc\" style=\"height:300px\"></div>
-            </div>
-            <div class=\"panel\">
-                <h2>Power History (Grid / PV / Household)</h2>
-                <div id=\"chartHistPower\" style=\"height:300px\"></div>
-            </div>
-        </div>
-        <div class=\"row2-eq\">
-            <div class=\"panel\">
-                <h2>Battery Power History</h2>
-                <div id=\"chartHistBatPower\" style=\"height:280px\"></div>
-            </div>
-            <div class=\"panel\">
-                <h2>Ledger: Cost Basis History</h2>
-                <p id=\"histBasisNote\" class=\"footnote\" style=\"padding:12px\">Basis is persisted as a single snapshot (no time-series). Shown here as the most-recent value per battery from /api/ledger.</p>
-                <div id=\"chartHistBasis\" style=\"height:240px\"></div>
-            </div>
-        </div>
-    </div>
-</div>
-
-<script>
-// ── utilities ─────────────────────────────────────────────────────────────────
-function fmt(n, d=2) {
-    if (n === null || n === undefined || !Number.isFinite(Number(n))) return '-';
-    return Number(n).toFixed(d);
-}
-function setText(id, txt, cls='') {
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.textContent = txt;
-    el.className = 'v ' + cls;
-}
-function tableRows(id, rows) {
-    const tbody = document.querySelector('#' + id + ' tbody');
-    if (!tbody) return;
-    tbody.innerHTML = rows.map(r =>
-        '<tr>' + r.map(c => '<td>' + c + '</td>').join('') + '</tr>'
-    ).join('');
-}
-const PLT = {margin:{l:46,r:12,t:8,b:40}, paper_bgcolor:'white', plot_bgcolor:'white',
-             legend:{orientation:'h', y:-0.18}, font:{size:11}};
-const PLT_OPT = {responsive:true, displayModeBar:false};
-
-function mkLayout(extra) { return Object.assign({}, PLT, extra); }
-
-// Convert a UTC ISO string to a local-timezone naive ISO string so Plotly
-// displays in the browser's local time (Plotly treats timezone-free strings
-// as local time; strings with +00:00 are displayed as UTC).
-function utcToLocal(iso) {
-    const d = new Date(iso);
-    const pad = n => String(n).padStart(2, '0');
-    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}` +
-           `T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-}
-function localTs(arr) { return (arr || []).map(utcToLocal); }
-
-// ── tab switching ─────────────────────────────────────────────────────────────
-document.querySelectorAll('.tab-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-        document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
-        btn.classList.add('active');
-        document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
-        if (btn.dataset.tab === 'plan')    refreshPlan();
-        if (btn.dataset.tab === 'history') refreshHistory(currentHours);
-    });
-});
-
-// ── KPI helpers ───────────────────────────────────────────────────────────────
-function activePolicies(plan, nowIso) {
-    const now = new Date(nowIso).getTime();
-    const map = {};
-    for (const i of (plan.intents || [])) {
-        const ts = new Date(i.timestep).getTime();
-        if (ts <= now) {
-            const cur = map[i.device_id];
-            if (!cur || ts > cur.ts)
-                map[i.device_id] = {ts, cp: i.charge_policy || 'auto', dp: i.discharge_policy || 'meet_load_only'};
-        }
-    }
-    return map;
-}
-
-// ── LIVE tab ──────────────────────────────────────────────────────────────────
-async function refreshLive() {
-    const [sR, pR, cR] = await Promise.all([
-        fetch('api/status'), fetch('api/plan'), fetch('api/config'),
-    ]);
-    const status = await sR.json();
-    const plan   = await pR.json();
-    const cfg    = await cR.json();
-
-    // Build role lookup
-    const roleMap = {};
-    for (const d of (cfg.devices || [])) roleMap[d.device_id] = d.role;
-
-    // PV device = first producer in status
-    const pvDev = (status.devices || []).find(d => roleMap[d.device_id] === 'producer');
-
-    const gp = Number(status.grid_power_w || 0);
-    setText('kGrid', Math.round(gp) + ' W', gp > 50 ? 'warn' : (gp < -50 ? 'ok' : ''));
-    const pvW = pvDev ? Math.abs(Number(pvDev.power_w || 0)) : 0;
-    setText('kPv', Math.round(pvW) + ' W', pvW > 50 ? 'ok' : '');
-    setText('kPrice', fmt(status.current_price_eur_per_kwh, 4) + ' €/kWh');
-    setText('kExport', fmt(status.pv_opportunity_price_eur_per_kwh, 4) + ' €/kWh');
-    const marketBreakdown = status.market_price_breakdown || {};
-    // Market price cards — one per tariff (server already computed the blended price)
-    document.getElementById('marketKpis').innerHTML = Object.entries(status.market_prices || {}).map(([tid, mp]) => {
-        const cap = tid.charAt(0).toUpperCase() + tid.slice(1);
-        const parts = marketBreakdown[tid] || {};
-        const pvFrac = Number(parts.pv_frac || 0);
-        const gridFrac = Number(parts.grid_frac || 0);
-        const batFrac = Number(parts.bat_frac || 0);
-        const mixParts = [];
-        if (gridFrac > 0.01) mixParts.push(Math.round(gridFrac * 100) + '% Grid');
-        if (pvFrac > 0.01)   mixParts.push(Math.round(pvFrac * 100) + '% PV');
-        if (batFrac > 0.01)  mixParts.push(Math.round(batFrac * 100) + '% Bat');
-        const mixLabel = mixParts.join(' \u00b7 ') || '\u2014';
-        const mixCls = pvFrac > 0.66 ? 'ok' : (pvFrac > 0.33 ? '' : 'warn');
-        return `<div class="card" title="Market price for ${tid} tariff (${mixLabel})">
-            <div class="k">Market (${cap})</div>
-            <div class="v ${mixCls}">${fmt(mp, 4)} \u20ac/kWh</div>
-            <div class="k" style="font-size:.72rem;margin-top:2px">${mixLabel}</div>
-        </div>`;
-    }).join('');
-    setText('kDryRun', status.dry_run ? 'YES' : 'NO', status.dry_run ? 'warn' : 'ok');
-    document.getElementById('stamp').textContent = 'updated ' + new Date(status.timestamp).toLocaleString();
-
-    // Battery KPI cards (dynamic — inject into #batteryKpis)
-    const batteryDevs = (status.devices || []).filter(d => d.soc_pct != null);
-    document.getElementById('batteryKpis').innerHTML = batteryDevs.map(d => {
-        const pct = Number(d.soc_pct);
-        const cls = pct < 15 ? 'bad' : (pct > 80 ? 'ok' : '');
-        return `<div class=\"card\"><div class=\"k\">${d.device_id}</div>
-                 <div class=\"v ${cls}\">${fmt(pct, 0)} %</div></div>`;
-    }).join('');
-
-    const policies = activePolicies(plan, status.timestamp);
-
-    // Devices table
-    tableRows('devicesTable', (status.devices || []).map(d => {
-        const liveW = Number(d.power_w);
-        const fw    = Number(d.forecast_power_w);
-        const use   = Boolean(d.is_virtual) && Number.isFinite(fw);
-        const pw    = use ? Math.round(fw) + ' &#185;' : String(Math.round(liveW || 0));
-        const role  = roleMap[d.device_id] || '-';
-        return [d.device_id, role, pw,
-                d.soc_pct == null ? '-' : fmt(d.soc_pct, 1),
-                d.available ? 'yes' : 'no'];
-    }));
-
-    // Setpoints table
-    tableRows('setpointsTable', (status.setpoints || []).map(sp => {
-        const p = policies[sp.device_id] || {cp:'auto', dp:'meet_load_only'};
-        return [sp.device_id, sp.mode || '-',
-                `c=${p.cp}<br>d=${p.dp}`,
-                String(Math.round(Number(sp.setpoint_w || 0)))];
-    }));
-
-    // Ledger table + manual basis override controls.
-    // Keep focus stable: while the user edits a basis field, do not rebuild
-    // the ledger table on periodic refresh ticks.
-    const activeEl = document.activeElement;
-    const editingLedgerBasis = Boolean(
-        activeEl && activeEl.classList && activeEl.classList.contains('ledger-basis-input')
-    );
-    if (!editingLedgerBasis) {
-        tableRows('ledgerTable', (status.ledger || []).map(l => {
-            const stored = Number(l.stored_energy_kwh || 0);
-            const cap    = Number(l.capacity_kwh || 1);
-            const soc    = stored / cap * 100;
-            const basis = Number(l.cost_basis_eur_per_kwh || 0);
-            const basisEditor =
-                `<div style="display:flex; gap:6px; align-items:center;">
-                    <input class="ledger-basis-input" type="number" min="0" step="0.0001"
-                           value="${fmt(basis, 4)}" style="width:92px" />
-                    <button class="range-btn ledger-basis-set" data-device="${l.device_id}">Set</button>
-                </div>`;
-            return [l.device_id, fmt(stored, 2), fmt(soc, 1) + ' %', fmt(cap, 2), basisEditor];
-        }));
-
-        document.querySelectorAll('.ledger-basis-set').forEach(btn => {
-            btn.onclick = async () => {
-                const deviceId = btn.dataset.device || '';
-                const wrap = btn.parentElement;
-                const input = wrap ? wrap.querySelector('.ledger-basis-input') : null;
-                const value = Number(input ? input.value : NaN);
-                if (!Number.isFinite(value) || value < 0) {
-                    alert('Please enter a non-negative basis value.');
-                    return;
-                }
-                const oldLabel = btn.textContent;
-                btn.textContent = 'Saving…';
-                btn.disabled = true;
-                try {
-                    const url = `api/ledger/set_basis?device_id=${encodeURIComponent(deviceId)}` +
-                        `&cost_basis_eur_per_kwh=${encodeURIComponent(String(value))}`;
-                    const res = await fetch(url, {method:'POST'});
-                    if (!res.ok) {
-                        const txt = await res.text();
-                        throw new Error(txt || 'request failed');
-                    }
-                    await refreshLive();
-                } catch (err) {
-                    alert('Failed to update ledger basis: ' + (err && err.message ? err.message : err));
-                } finally {
-                    btn.textContent = oldLabel;
-                    btn.disabled = false;
-                }
-            };
-        });
-    }
-}
-
-// ── PLAN tab ──────────────────────────────────────────────────────────────────
-async function refreshPlan() {
-    const [pR, fR, sR] = await Promise.all([
-        fetch('api/plan'), fetch('api/forecast'), fetch('api/status'),
-    ]);
-    const plan     = await pR.json();
-    const fc       = await fR.json();
-    const status   = await sR.json();
-
-    const intents  = plan.intents || [];
-    const ts       = fc.timestamps || [];
-    const prices   = fc.prices || [];
-    const priceIsEstimated = fc.price_is_estimated || [];
-    const varPrices = (fc.variable_prices && fc.variable_prices.length) ? fc.variable_prices : prices;
-    const varPriceIsEstimated =
-        (fc.variable_price_is_estimated && fc.variable_price_is_estimated.length)
-            ? fc.variable_price_is_estimated
-            : priceIsEstimated;
-    const epPrices = fc.export_prices || [];
-    const pvKw     = fc.pv_kw || [];
-    const pvIsEstimated = fc.pv_is_estimated || [];
-    const consKw   = fc.consumption_kw || [];
-    const stepH    = (Number(fc.step_minutes) || 60) / 60;
-    const stCap    = fc.storage_capacity || {};
-
-    if (!ts.length) {
-        document.getElementById('planMeta').textContent = 'No plan available yet.';
-        return;
-    }
-
-    const created = plan.created_at ? new Date(plan.created_at).toLocaleString() : '-';
-    document.getElementById('planMeta').textContent =
-        `Plan created: ${created}  ·  step: ${fc.step_minutes} min  ·  ${ts.length} steps`;
-
-    // Build per-timestamp lookup from plan intents
-    const tsMs = ts.map(t => new Date(t).getTime());
-    function nearestIdx(iso) {
-        const ms = new Date(iso).getTime();
-        let bi = 0, bd = Infinity;
-        for (let i = 0; i < tsMs.length; i++) { const d = Math.abs(tsMs[i]-ms); if (d<bd){bd=d;bi=i;} }
-        return bi;
-    }
-
-    const chargeByDev   = {};
-    const dischargeByDev = {};
-    const storageDevs   = [...new Set(intents.map(i => i.device_id))];
-
-    for (const dev of storageDevs) {
-        chargeByDev[dev]    = new Array(ts.length).fill(0);
-        dischargeByDev[dev] = new Array(ts.length).fill(0);
-    }
-    for (const i of intents) {
-        const idx = nearestIdx(i.timestep);
-        const kw = Number(i.planned_kw || 0);
-        if (kw > 0) chargeByDev[i.device_id][idx]    += kw;
-        else        dischargeByDev[i.device_id][idx]  += -kw;
-    }
-
-    const totalChargeKw    = ts.map((_,i) => storageDevs.reduce((s,d) => s + chargeByDev[d][i],    0));
-    const totalDischargeKw = ts.map((_,i) => storageDevs.reduce((s,d) => s + dischargeByDev[d][i], 0));
-
-    const gridImportKw = ts.map((_,i) => Math.max(0, consKw[i] + totalChargeKw[i] - pvKw[i] - totalDischargeKw[i]));
-    const gridExportKw = ts.map((_,i) => Math.max(0, pvKw[i] + totalDischargeKw[i] - consKw[i] - totalChargeKw[i]));
-
-    // Cost metrics
-    const baselineCost = ts.map((_,i) => {
-        const net = consKw[i] - pvKw[i];
-        return net > 0 ? net * stepH * prices[i]
-                       : net * stepH * epPrices[i];  // net<0 → exporting pv
-    });
-    const optCost = ts.map((_,i) =>
-        prices[i] * gridImportKw[i] * stepH - epPrices[i] * gridExportKw[i] * stepH
-    );
-    const saving = ts.map((_,i) => baselineCost[i] - optCost[i]);
-    const cumSaving = [];
-    let run = 0;
-    for (const v of saving) { run += v; cumSaving.push(run); }
-
-    const totalSave = cumSaving[cumSaving.length - 1] || 0;
-    document.getElementById('planMeta').textContent +=
-        `  ·  est. saving: ${totalSave >= 0 ? '+' : ''}${fmt(totalSave, 3)} €`;
-
-    // Convert UTC plan timestamps to local time once (Plotly displays tz-naive strings as local)
-    const tsLocal = localTs(ts);
-
-    function splitEstimated(values, flags) {
-        const actual = [];
-        const estimated = [];
-        for (let i = 0; i < values.length; i++) {
-            const est = Boolean(flags[i]);
-            actual.push(est ? null : values[i]);
-            estimated.push(est ? values[i] : null);
-        }
-        return {actual, estimated};
-    }
-    const pvSplit = splitEstimated(pvKw, pvIsEstimated);
-    const priceSplit = splitEstimated(varPrices, varPriceIsEstimated);
-
-    // ── Panel 1: Energy flow stacked bars ─────────────────────────────────────
-    const flowTraces = [
-        {name:'PV',       type:'bar', x:tsLocal, y:pvKw,           marker:{color:'#f0c040'}, hovertemplate:'%{y:.2f} kW'},
-        {name:'Discharge',type:'bar', x:tsLocal, y:totalDischargeKw,marker:{color:'#4caf7d'}, hovertemplate:'%{y:.2f} kW'},
-        {name:'Grid imp', type:'bar', x:tsLocal, y:gridImportKw,    marker:{color:'#e07070'}, hovertemplate:'%{y:.2f} kW'},
-        {name:'Consumption',type:'bar',x:tsLocal,y:consKw.map(v=>-v),marker:{color:'#6b7bb5'}, hovertemplate:'%{y:.2f} kW'},
-        {name:'Charge',   type:'bar', x:tsLocal, y:totalChargeKw.map(v=>-v),marker:{color:'#3a9ad9'}, hovertemplate:'%{y:.2f} kW'},
-        {name:'Grid exp', type:'bar', x:tsLocal, y:gridExportKw.map(v=>-v), marker:{color:'#b07030'}, hovertemplate:'%{y:.2f} kW'},
-    ];
-    Plotly.newPlot('chartFlow', flowTraces,
-        mkLayout({barmode:'relative', yaxis:{title:'kW', zeroline:true}, xaxis:{}}),
-        PLT_OPT);
-
-    // ── Panel 2: Forecast ─────────────────────────────────────────────────────
-    const fcTraces = [
-        {name:'PV forecast',   mode:'lines', x:tsLocal, y:pvSplit.actual,   line:{color:'#f0c040'}, hovertemplate:'%{y:.2f} kW'},
-        {name:'PV forecast (estimated)', mode:'lines', x:tsLocal, y:pvSplit.estimated,
-            line:{color:'#f0c040', dash:'dot'}, hovertemplate:'%{y:.2f} kW (estimated)'},
-        {name:'Consumption fc',mode:'lines', x:tsLocal, y:consKw, line:{color:'#6b7bb5'}, hovertemplate:'%{y:.2f} kW'},
-    ];
-    Plotly.newPlot('chartForecast', fcTraces,
-        mkLayout({yaxis:{title:'kW'}, xaxis:{}}), PLT_OPT);
-
-    // ── Panel 3: Prices ───────────────────────────────────────────────────────
-    const priceTraces = [
-        {name:'Import price', mode:'lines', x:tsLocal, y:priceSplit.actual,   line:{color:'#e07070', dash:'solid'}},
-        {name:'Import price (estimated)', mode:'lines', x:tsLocal, y:priceSplit.estimated,
-            line:{color:'#e07070', dash:'dot'}},
-        {name:'Export price', mode:'lines', x:tsLocal, y:epPrices, line:{color:'#4caf7d', dash:'dot'}},
-    ];
-    Plotly.newPlot('chartPrices', priceTraces,
-        mkLayout({yaxis:{title:'€/kWh'}, xaxis:{}}), PLT_OPT);
-
-    const estCount = priceIsEstimated.filter(Boolean).length + pvIsEstimated.filter(Boolean).length;
-    if (estCount > 0) {
-        document.getElementById('planMeta').textContent +=
-            `  ·  dotted segments are repeated estimates (${estCount} points)`;
-    }
-
-    // ── Panel 4: Per-step saving ──────────────────────────────────────────────
-    const savingTraces = [{
-        name:'Saving', type:'bar', x:tsLocal, y:saving,
-        marker:{color: saving.map(v => v >= 0 ? '#4caf7d' : '#e07070')},
-        hovertemplate:'%{y:.4f} €',
-    }];
-    Plotly.newPlot('chartSaving', savingTraces,
-        mkLayout({yaxis:{title:'€'}, xaxis:{}}), PLT_OPT);
-
-    // ── Panel 5: Cumulative saving ────────────────────────────────────────────
-    Plotly.newPlot('chartCumSaving',
-        [{name:'Cumulative', mode:'lines', fill:'tozeroy', x:tsLocal, y:cumSaving,
-          line:{color:'#4caf7d'}, fillcolor:'rgba(76,175,125,0.15)', hovertemplate:'%{y:.4f} €'}],
-        mkLayout({yaxis:{title:'€'}, xaxis:{}}), PLT_OPT);
-
-    // ── Panel 6: SoC trajectories ─────────────────────────────────────────────
-    const deviceSocPct = {};
-    for (const d of (status.devices || []))
-        if (d.soc_pct != null) deviceSocPct[d.device_id] = Number(d.soc_pct);
-
-    const socTraces = [];
-    for (const dev of storageDevs) {
-        if (deviceSocPct[dev] == null) continue;
-        const cap   = (stCap[dev] || {}).capacity_kwh   || 7.5;
-        const etaC  = (stCap[dev] || {}).charge_efficiency    || 0.95;
-        const etaD  = (stCap[dev] || {}).discharge_efficiency || 0.95;
-        const minS  = (stCap[dev] || {}).min_soc_pct || 0;
-        const maxS  = (stCap[dev] || {}).max_soc_pct || 100;
-        let energy  = cap * deviceSocPct[dev] / 100;
-        const socPct = [deviceSocPct[dev]];
-        const socTs  = [utcToLocal(new Date(new Date(ts[0]).getTime() - (Number(fc.step_minutes)||60)*60000).toISOString())];
-        for (let i = 0; i < ts.length; i++) {
-            energy += etaC * chargeByDev[dev][i] * stepH;
-            energy -= dischargeByDev[dev][i] / etaD * stepH;
-            energy  = Math.max(cap*minS/100, Math.min(cap*maxS/100, energy));
-            socPct.push(energy / cap * 100);
-            socTs.push(tsLocal[i]);
-        }
-        socTraces.push({name:dev, mode:'lines', x:socTs, y:socPct,
-            hovertemplate:'%{y:.1f} %'});
-    }
-    Plotly.newPlot('chartSoc', socTraces,
-        mkLayout({yaxis:{title:'SoC %', range:[0,105]}, xaxis:{}}), PLT_OPT);
-}
-
-// ── HISTORY tab ───────────────────────────────────────────────────────────────
-let currentHours = 6;
-
-document.querySelectorAll('.range-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-        document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        currentHours = Number(btn.dataset.h);
-        refreshHistory(currentHours);
-    });
-});
-
-async function refreshHistory(hours) {
-    let resp;
-    try {
-        const r = await fetch(`api/history?hours=${hours}`);
-        resp = await r.json();
-    } catch(e) { console.error('history fetch failed', e); return; }
-
-    // New response shape: {measurements: {...}, ledger: {...}}
-    const histData   = resp.measurements || resp;   // backwards-compat if old shape
-    const ledgerHist = resp.ledger || {};
-
-    // Also fetch current ledger snapshot for devices with no history yet
-    let ledgerSnap = [];
-    try { ledgerSnap = await (await fetch('api/ledger')).json(); } catch(_) {}
-
-    // ── SoC history ───────────────────────────────────────────────────────────
-    const socTraces = [];
-    for (const [did, rows] of Object.entries(histData)) {
-        const hasSoc = rows.some(r => r.soc_pct != null);
-        if (!hasSoc) continue;
-        const x = localTs(rows.map(r => r.t));
-        const y = rows.map(r => r.soc_pct);
-        socTraces.push({name: did, mode:'lines', x, y, hovertemplate:'%{y:.1f} %'});
-    }
-    if (socTraces.length) {
-        Plotly.newPlot('chartHistSoc', socTraces,
-            mkLayout({yaxis:{title:'SoC %', range:[0,105]}, xaxis:{}}), PLT_OPT);
-    }
-
-    // ── Power history (meters + PV) ───────────────────────────────────────────
-    const pwrTraces = [];
-    const pwrDids   = Object.keys(histData).filter(did => !histData[did].some(r => r.soc_pct != null && r.power_w == null));
-    for (const did of pwrDids) {
-        const rows = histData[did];
-        if (!rows.length) continue;
-        const hasPwr = rows.some(r => r.power_w != null);
-        if (!hasPwr) continue;
-        const x = localTs(rows.filter(r => r.power_w != null).map(r => r.t));
-        const y = rows.filter(r => r.power_w != null).map(r => r.power_w);
-        pwrTraces.push({name: did, mode:'lines', x, y, hovertemplate:'%{y:.0f} W'});
-    }
-    if (pwrTraces.length) {
-        Plotly.newPlot('chartHistPower', pwrTraces,
-            mkLayout({yaxis:{title:'W'}, xaxis:{}}), PLT_OPT);
-    }
-
-    // ── Battery power history ─────────────────────────────────────────────────
-    const batPwrTraces = [];
-    for (const [did, rows] of Object.entries(histData)) {
-        const hasSoc = rows.some(r => r.soc_pct != null);
-        if (!hasSoc) continue;
-        const x = localTs(rows.filter(r => r.power_w != null).map(r => r.t));
-        const y = rows.filter(r => r.power_w != null).map(r => r.power_w);
-        if (x.length) batPwrTraces.push({name: did, mode:'lines', x, y, hovertemplate:'%{y:.0f} W'});
-    }
-    if (batPwrTraces.length) {
-        Plotly.newPlot('chartHistBatPower', batPwrTraces,
-            mkLayout({yaxis:{title:'W', zeroline:true}, xaxis:{}}), PLT_OPT);
-    }
-
-    // ── Cost Basis history (time-series from ledger_history table) ─────────────
-    const basisTraces = [];
-    for (const [did, rows] of Object.entries(ledgerHist)) {
-        if (!rows.length) continue;
-        basisTraces.push({
-            name: did + ' basis', mode:'lines',
-            x: localTs(rows.map(r => r.t)),
-            y: rows.map(r => r.cost_basis_eur_per_kwh),
-            hovertemplate: '%{y:.4f} €/kWh',
-        });
-    }
-    // If no history yet, fall back to current snapshot as a reference bar
-    if (!basisTraces.length && ledgerSnap.length) {
-        const basisNote = document.getElementById('histBasisNote');
-        if (basisNote) basisNote.style.display = '';
-        Plotly.newPlot('chartHistBasis',
-            [{type:'bar',
-              x: ledgerSnap.map(l => l.device_id),
-              y: ledgerSnap.map(l => l.cost_basis_eur_per_kwh || 0),
-              text: ledgerSnap.map(l => fmt(l.cost_basis_eur_per_kwh, 4) + ' €/kWh'),
-              textposition:'auto', marker:{color:'#3a9ad9'}}],
-            mkLayout({yaxis:{title:'€/kWh'}, xaxis:{}, margin:{l:46,r:12,t:8,b:60}}), PLT_OPT);
-    } else if (basisTraces.length) {
-        const basisNote = document.getElementById('histBasisNote');
-        if (basisNote) basisNote.style.display = 'none';
-        Plotly.newPlot('chartHistBasis', basisTraces,
-            mkLayout({yaxis:{title:'€/kWh'}, xaxis:{}}), PLT_OPT);
-    }
-}
-
-// ── Auto-refresh logic ────────────────────────────────────────────────────────
-function activeTab() {
-    const btn = document.querySelector('.tab-btn.active');
-    return btn ? btn.dataset.tab : 'live';
-}
-
-async function refreshAll() {
-    const tab = activeTab();
-    if (tab === 'live')    await refreshLive();
-    if (tab === 'plan')    await refreshPlan();
-    if (tab === 'history') await refreshHistory(currentHours);
-}
-
-// Initial load
-refreshLive().catch(console.error);
-
-// Periodic refresh
-setInterval(() => {
-    const tab = activeTab();
-    if (tab === 'live') refreshLive().catch(console.error);
-}, 3000);
-setInterval(() => {
-    const tab = activeTab();
-    if (tab === 'plan') refreshPlan().catch(console.error);
-}, 60000);
-setInterval(() => {
-    const tab = activeTab();
-    if (tab === 'history') refreshHistory(currentHours).catch(console.error);
-}, 300000);
-</script>
-</body>
-</html>
-"""
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -1042,22 +338,30 @@ async def _collect_forecasts(
     """Call every provider and group points by quantity.
 
     Multiple providers for the same quantity (e.g. several consumption
-    profiles for different devices) have their point lists concatenated.
-    The optimizer's nearest-neighbour interpolation then effectively sums
-    them per timestamp.
+    profiles for different devices) have their values summed per timestamp
+    so the result has exactly one point per timestamp per quantity.
     """
-    result: dict[ForecastQuantity, list[ForecastPoint]] = {}
+    from collections import defaultdict
+
+    buckets: dict[ForecastQuantity, dict[datetime, float]] = {}
     for provider in providers:
         try:
             pts = await provider.get_forecast(horizon)
             q = provider.quantity
-            if q in result:
-                result[q].extend(pts)
-            else:
-                result[q] = list(pts)
+            if q not in buckets:
+                buckets[q] = defaultdict(float)
+            for pt in pts:
+                buckets[q][pt.timestamp] += float(pt.value)
         except Exception as exc:  # noqa: BLE001
             _log.warning("Forecast provider %r failed: %s", getattr(provider, "quantity", "?"), exc)
-    return result
+
+    return {
+        q: sorted(
+            [ForecastPoint(timestamp=ts, value=v) for ts, v in by_ts.items()],
+            key=lambda p: p.timestamp,
+        )
+        for q, by_ts in buckets.items()
+    }
 
 
 async def _virtual_forecast_power_w(device_cfg: dict) -> float | None:
@@ -1143,6 +447,11 @@ class Application:
         self._dry_run: bool
         self._first_poll_done: asyncio.Event
         self._api: FastAPI
+        self._ev_assets: list[EvChargingAsset] = []
+        self._ev_contributors: list[EvChargerContributor] = []
+        self._ev_overrides: dict[str, tuple[float, datetime]] = {}
+        self._disabled_chargepoints: set[str] = set()
+        self._last_ev_goals: list[EvChargingGoal] = []
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -1194,6 +503,22 @@ class Application:
         for sc in self._storage_constraints:
             self._control_loop.register_contributor(StorageControlContributor(sc))
         _log.info("Registered %d storage contributors", len(self._storage_constraints))
+
+        # 7b — EV assets + contributors
+        self._ev_assets = parse_ev_assets(self._cfg.assets)
+        self._ev_contributors = [EvChargerContributor(a) for a in self._ev_assets]
+        for contrib in self._ev_contributors:
+            self._control_loop.register_contributor(contrib)
+        # Load persisted overrides and disabled state from SQLite
+        self._ev_overrides = await self._storage.load_all_ev_targets()
+        self._disabled_chargepoints = await self._storage.load_all_ev_disabled()
+        for contrib in self._ev_contributors:
+            asset = next(a for a in self._ev_assets if a.device_id == contrib.device_id)
+            contrib.set_disabled(asset.asset_id in self._disabled_chargepoints)
+        _log.info(
+            "Loaded %d EV assets (%d overrides, %d disabled)",
+            len(self._ev_assets), len(self._ev_overrides), len(self._disabled_chargepoints),
+        )
 
         # 8 — Subscribe control loop to plan updates via event bus
         async def _on_plan_updated(event: PlanUpdatedEvent) -> None:
@@ -1319,6 +644,40 @@ class Application:
             for did in (device.device_id,)
         }
 
+        # For storage devices whose cached SoC is unavailable (e.g. ioBroker not
+        # ready on startup), poll the device directly to get a fresh reading.
+        # This ensures the plan always starts from the same SoC shown in the
+        # live view. Falls back to ledger stored energy if the poll also fails.
+        for sc in self._storage_constraints:
+            state = device_states.get(sc.device_id)
+            if state is not None and state.soc_pct is None:
+                device = self._registry.get(sc.device_id)
+                if device is not None:
+                    try:
+                        fresh = await device.get_state()
+                        if fresh.soc_pct is not None:
+                            device_states[sc.device_id] = fresh
+                            self._registry.update_state(fresh)
+                            _log.info(
+                                "_run_plan: fresh SoC poll for %r → %.1f%%",
+                                sc.device_id, fresh.soc_pct,
+                            )
+                            continue
+                    except Exception as exc:  # noqa: BLE001
+                        _log.warning(
+                            "_run_plan: fresh poll for %r failed: %s", sc.device_id, exc
+                        )
+                # Poll also returned None — fall back to ledger stored energy
+                if sc.capacity_kwh > 0:
+                    stored_kwh = self._ledger.stored_energy(sc.device_id)
+                    if stored_kwh is not None:
+                        derived_soc = min(100.0, max(0.0, stored_kwh / sc.capacity_kwh * 100.0))
+                        device_states[sc.device_id] = state.model_copy(update={"soc_pct": derived_soc})
+                        _log.info(
+                            "_run_plan: soc_pct missing for %r — using ledger %.2f kWh → %.1f%%",
+                            sc.device_id, stored_kwh, derived_soc,
+                        )
+
         forecasts = await _collect_forecasts(self._forecast_providers, self._horizon)
 
         # Build a tariff-weighted import-price curve from per-consumer load
@@ -1374,6 +733,27 @@ class Application:
             forecasts, self._optimizer._step_min, self._horizon
         )
 
+        # Compute active EV goals from current SoC + schedule/overrides,
+        # excluding disabled chargepoints from both planning and control.
+        active_assets = [a for a in self._ev_assets if a.asset_id not in self._disabled_chargepoints]
+        ev_goals = resolve_active_goals(active_assets, device_states, self._ev_overrides)
+        self._last_ev_goals = ev_goals
+        # Push updated goals to contributors so the control loop uses them.
+        # Also propagate the target SoC to devices that write it to hardware
+        # (e.g. openWB instant-charging SoC limit register).
+        for contrib in self._ev_contributors:
+            goal = next((g for g in ev_goals if g.device_id == contrib.device_id), None)
+            contrib.update_goal(goal)
+            device = self._registry.get(contrib.device_id)
+            if device is not None and hasattr(device, "update_target_soc"):
+                device.update_target_soc(goal.target_soc_pct if goal else None)
+        if ev_goals:
+            _log.info(
+                "EV goals: %s",
+                [(g.asset_id, f"{g.current_soc_pct:.0f}%→{g.target_soc_pct:.0f}%",
+                  g.target_by.strftime("%Y-%m-%dT%H:%M")) for g in ev_goals],
+            )
+
         context = OptimizationContext(
             device_states=device_states,
             storage_constraints=self._storage_constraints,
@@ -1381,6 +761,11 @@ class Application:
             forecasts=forecasts,
             horizon=effective_horizon,
             battery_cost_basis=self._ledger.all_cost_bases(),
+            ev_charging_goals=ev_goals,
+            producer_device_ids={
+                d.device_id for d in self._registry.all()
+                if d.role == DeviceRole.PRODUCER
+            },
         )
 
         try:
@@ -1528,16 +913,6 @@ class Application:
         """Build the FastAPI application exposing live server state."""
         api = FastAPI(title="Energy Assistant", version="0.1")
 
-        @api.get("/", response_class=HTMLResponse)
-        async def ui_root() -> str:
-            """Built-in live web UI with Plotly charts."""
-            return _web_ui_html()
-
-        @api.get("/ui", response_class=HTMLResponse)
-        async def ui_page() -> str:
-            """Alias for the built-in live web UI."""
-            return _web_ui_html()
-
         @api.get("/health")
         async def health() -> dict:
             """Liveness probe endpoint used by container health checks."""
@@ -1655,9 +1030,39 @@ class Application:
                         "min_power_w": i.min_power_w,
                         "max_power_w": i.max_power_w,
                         "reserved_kwh": i.reserved_kwh,
+                        "stored_energy_kwh": i.stored_energy_kwh,
                     }
                     for i in plan.intents
                 ],
+            }
+
+        @api.post("/api/plan/refresh")
+        async def trigger_plan_refresh() -> dict:
+            """Trigger an immediate plan recomputation outside the normal interval."""
+            await self._run_plan()
+            plan = self._control_loop._active_plan
+            return {"ok": True, "created_at": plan.created_at.isoformat() if plan else None}
+
+        @api.get("/api/debug/plan_inputs")
+        async def debug_plan_inputs() -> dict:
+            """Debug: show what the optimizer would receive on the next plan run."""
+            from .server import _collect_forecasts, _infer_effective_horizon  # noqa: PLC0415
+            device_states = {
+                did: state
+                for device in self._registry.all()
+                if (state := self._registry.latest_state(device.device_id)) is not None
+                for did in (device.device_id,)
+            }
+            forecasts = await _collect_forecasts(self._forecast_providers, self._horizon)
+            effective_horizon = _infer_effective_horizon(
+                forecasts, self._optimizer._step_min, self._horizon
+            )
+            return {
+                "storage_constraints": [s.device_id for s in self._storage_constraints],
+                "device_states": {did: {"soc_pct": s.soc_pct, "available": s.available} for did, s in device_states.items()},
+                "forecast_quantities": {str(k): len(v) for k, v in forecasts.items()},
+                "effective_horizon_h": effective_horizon.total_seconds() / 3600,
+                "n_steps": int(effective_horizon.total_seconds() / (self._optimizer._step_min * 60)),
             }
 
         @api.get("/api/ledger")
@@ -1898,6 +1303,147 @@ class Application:
                     for sc in self._storage_constraints
                 ],
             }
+
+        # ── EV charging targets ────────────────────────────────────────
+
+        @api.get("/api/ev")
+        async def get_ev_status() -> list[dict]:
+            """Active EV charging goals (one per configured chargepoint)."""
+            device_states = {
+                did: state
+                for device in self._registry.all()
+                if (state := self._registry.latest_state(device.device_id)) is not None
+                for did in (device.device_id,)
+            }
+            # Compute fresh goals so target always reflects the current override/schedule,
+            # not the (potentially stale) last plan run.
+            fresh_goals = resolve_active_goals(self._ev_assets, device_states, self._ev_overrides)
+            result = []
+            for asset in self._ev_assets:
+                state = self._registry.latest_state(asset.device_id)
+                goal = next((g for g in fresh_goals if g.asset_id == asset.asset_id), None)
+                # phase1/phase2 kWh come from the last optimizer run (more accurate energy split)
+                planned = next((g for g in self._last_ev_goals if g.asset_id == asset.asset_id), None)
+                override = self._ev_overrides.get(asset.asset_id)
+                result.append({
+                    "asset_id":       asset.asset_id,
+                    "device_id":      asset.device_id,
+                    "label":          asset.label,
+                    "connected":      state.available if state else False,
+                    "soc_pct":        state.soc_pct if state else None,
+                    "charge_limit_soc_pct": asset.charge_limit_soc_pct,
+                    "max_charge_kw":  asset.max_charge_kw,
+                    "goal": {
+                        "target_soc_pct":   goal.target_soc_pct,
+                        "target_by":        goal.target_by.isoformat(),
+                        "phase1_kwh":       round(planned.phase1_required_kwh, 2) if planned else 0.0,
+                        "phase2_kwh":       round(planned.phase2_required_kwh, 2) if planned else 0.0,
+                        "phase2_start":     planned.phase2_start_time.isoformat() if planned else goal.target_by.isoformat(),
+                    } if goal else None,
+                    "override": {
+                        "target_soc_pct": override[0],
+                        "target_by":      override[1].isoformat(),
+                    } if override else None,
+                    "disabled": asset.asset_id in self._disabled_chargepoints,
+                })
+            return result
+
+        @api.post("/api/ev/{asset_id}/set_target")
+        async def set_ev_target(
+            asset_id: str,
+            target_soc_pct: float,
+            target_by: str,
+        ) -> dict:
+            """Set a UI override charging target for the given asset.
+
+            ``target_by`` must be an ISO-8601 datetime string (UTC preferred).
+            """
+            asset = next((a for a in self._ev_assets if a.asset_id == asset_id), None)
+            if asset is None:
+                raise HTTPException(404, f"Unknown EV asset: {asset_id!r}")
+            try:
+                target_dt = datetime.fromisoformat(target_by)
+                if target_dt.tzinfo is None:
+                    target_dt = target_dt.replace(tzinfo=timezone.utc)
+            except ValueError:
+                raise HTTPException(400, f"Invalid target_by datetime: {target_by!r}")
+            if not (0 <= target_soc_pct <= 100):
+                raise HTTPException(400, "target_soc_pct must be 0–100")
+
+            await self._storage.set_ev_target(asset_id, target_soc_pct, target_dt)
+            self._ev_overrides[asset_id] = (target_soc_pct, target_dt)
+            _log.info("EV override set: %r → %.0f%% by %s", asset_id, target_soc_pct, target_dt)
+            asyncio.create_task(self._run_plan())
+            return {"status": "ok", "asset_id": asset_id,
+                    "target_soc_pct": target_soc_pct, "target_by": target_dt.isoformat()}
+
+        @api.delete("/api/ev/{asset_id}/target")
+        async def clear_ev_target(asset_id: str) -> dict:
+            """Remove the UI override for the given asset (reverts to schedule)."""
+            if asset_id not in self._ev_overrides:
+                raise HTTPException(404, f"No override for asset: {asset_id!r}")
+            await self._storage.clear_ev_target(asset_id)
+            self._ev_overrides.pop(asset_id, None)
+            _log.info("EV override cleared: %r", asset_id)
+            asyncio.create_task(self._run_plan())
+            return {"status": "ok", "asset_id": asset_id}
+
+        @api.post("/api/ev/{asset_id}/disable")
+        async def disable_chargepoint(asset_id: str) -> dict:
+            """Exclude this chargepoint from optimizer and control."""
+            if not any(a.asset_id == asset_id for a in self._ev_assets):
+                raise HTTPException(404, f"Unknown EV asset: {asset_id!r}")
+            await self._storage.set_ev_disabled(asset_id)
+            self._disabled_chargepoints.add(asset_id)
+            for contrib in self._ev_contributors:
+                asset = next((a for a in self._ev_assets if a.device_id == contrib.device_id), None)
+                if asset and asset.asset_id == asset_id:
+                    contrib.set_disabled(True)
+            _log.info("Chargepoint disabled: %r", asset_id)
+            asyncio.create_task(self._run_plan())
+            return {"status": "ok", "asset_id": asset_id, "disabled": True}
+
+        @api.delete("/api/ev/{asset_id}/disable")
+        async def enable_chargepoint(asset_id: str) -> dict:
+            """Re-include this chargepoint in optimizer and control."""
+            if not any(a.asset_id == asset_id for a in self._ev_assets):
+                raise HTTPException(404, f"Unknown EV asset: {asset_id!r}")
+            await self._storage.clear_ev_disabled(asset_id)
+            self._disabled_chargepoints.discard(asset_id)
+            for contrib in self._ev_contributors:
+                asset = next((a for a in self._ev_assets if a.device_id == contrib.device_id), None)
+                if asset and asset.asset_id == asset_id:
+                    contrib.set_disabled(False)
+            _log.info("Chargepoint enabled: %r", asset_id)
+            asyncio.create_task(self._run_plan())
+            return {"status": "ok", "asset_id": asset_id, "disabled": False}
+
+        # ── Static frontend (registered last so API routes take priority) ──────
+        # JS files are served at /ui/…; index.html is served at /.
+        # Cache-Control: no-store on every response so browser always fetches
+        # fresh JS after a server restart (no stale module cache issues).
+        _fe = Path(__file__).resolve().parent.parent.parent.parent / "frontend"
+        if (_fe / "index.html").exists():
+            from fastapi.responses import FileResponse
+            from starlette.middleware.base import BaseHTTPMiddleware
+
+            class _NoCacheMiddleware(BaseHTTPMiddleware):
+                async def dispatch(self, request, call_next):
+                    response = await call_next(request)
+                    if request.url.path.startswith("/ui/"):
+                        response.headers["Cache-Control"] = "no-store"
+                    return response
+
+            api.add_middleware(_NoCacheMiddleware)
+            api.mount("/ui", StaticFiles(directory=str(_fe)), name="ui")
+
+            @api.get("/")
+            async def serve_ui() -> FileResponse:
+                return FileResponse(str(_fe / "index.html"), headers={"Cache-Control": "no-store"})
+        else:
+            @api.get("/", response_class=HTMLResponse)
+            async def serve_ui_missing() -> str:
+                return "<h1>UI not found. Place <code>frontend/index.html</code> at the repo root.</h1>"
 
         return api
 

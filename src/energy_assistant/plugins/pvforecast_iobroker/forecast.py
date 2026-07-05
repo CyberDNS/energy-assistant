@@ -75,6 +75,9 @@ class PvForecastIoBrokerForecast:
             return []
 
         now = datetime.now(timezone.utc)
+        # Include the current hour's point even though its timestamp is in the
+        # past — it represents the expected generation for the hour we're in.
+        current_hour = now.replace(minute=0, second=0, microsecond=0)
         cutoff = now + horizon
         points: list[ForecastPoint] = []
 
@@ -84,7 +87,7 @@ class PvForecastIoBrokerForecast:
                 power_kw = float(row["y"]) / 1000.0
             except (KeyError, ValueError, TypeError):
                 continue
-            if ts < now or ts > cutoff:
+            if ts < current_hour or ts > cutoff:
                 continue
             points.append(ForecastPoint(timestamp=ts, value=power_kw))
 
