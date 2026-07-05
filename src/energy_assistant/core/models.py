@@ -194,6 +194,12 @@ class ControlIntent(BaseModel):
     has actually been delivered so it can decide whether to allow PV overflow
     on top of a partially-filled slot.
     """
+    stored_energy_kwh: float | None = None
+    """Stored energy in the battery at the END of this timestep (kWh).
+
+    Populated by the MILP optimizer from the e[b,t] variable. Used by the
+    UI to display the SoC trajectory chart.
+    """
 
     charge_policy: str = "auto"
     """Charging source policy — informational / backward-compat for legacy modes.

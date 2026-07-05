@@ -32,6 +32,7 @@ def _build(device_id: str, cfg: dict, ctx) -> OpenWBDevice:  # type: ignore[type
         entity_soc=cfg["entity_soc"],
         entity_power=cfg.get("entity_power"),
         entity_plugged=cfg.get("entity_plugged"),
+        entity_soc_limit_instant=cfg.get("entity_soc_limit_instant"),
         mode_pv=cfg.get("mode_pv", "PV Charging"),
         mode_instant=cfg.get("mode_instant", "Instant Charging"),
         mode_stop=cfg.get("mode_stop", "Stop"),

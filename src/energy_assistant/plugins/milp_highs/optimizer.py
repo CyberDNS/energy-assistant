@@ -251,7 +251,7 @@ class MilpHigsOptimizer:
         # ── Extract schedule → EnergyPlan ─────────────────────────────
         intents = _extract_intents(batteries, variables, timestamps, step_h)
         ev_intents = _extract_ev_intents(
-            ev_goals, variables, timestamps, step_h, baseline_net_load
+            ev_goals, variables, timestamps, step_h
         )
         # Phase-2 intents (mandatory top-off slots, handled outside the MILP)
         for goal in ev_goals:
@@ -637,14 +637,13 @@ def _extract_ev_intents(
     variables: dict,
     timestamps: list[datetime],
     step_h: float,
-    baseline_net_load: list[float],
 ) -> list[ControlIntent]:
     """Convert EV solver values into ``ControlIntent`` objects (phase-1 only).
 
     Phase-2 intents (mandatory top-off) are appended by the caller.
-    Mode is determined by the baseline net_load (pre-EV):
-      net_load < 0 → PV surplus existed → charge_from_pv
-      net_load ≥ 0 → grid needed          → charge_from_grid
+    Every planned step uses charge_from_grid (instant charging) so openWB
+    delivers the planned rate.  Unplanned steps are left to the contributor's
+    PV-charging fallback.
     """
     ev = variables.get("ev", {})
     intents: list[ControlIntent] = []
@@ -657,13 +656,13 @@ def _extract_ev_intents(
                 continue  # phase2 intents added separately
             ev_kwh = pulp.value(ev.get((goal.asset_id, t))) or 0.0
             if ev_kwh > 0.01:
-                # PV slot only when the available surplus fully covers the charge;
-                # if grid import is needed, use charge_from_grid so the charger
-                # isn't limited to PV-only rate.
-                pv_surplus_kwh = max(0.0, -baseline_net_load[t])
-                is_pv_slot = baseline_net_load[t] < 0 and pv_surplus_kwh >= ev_kwh
-                mode = "charge_from_pv" if is_pv_slot else "charge_from_grid"
-                policy = "pv_only" if is_pv_slot else "grid_allowed"
+                # Planned charging always uses instant (grid) mode.
+                # openWB's PV mode only charges at the net grid surplus, which is
+                # unreliable when the MILP also dispatches battery storage from the
+                # same PV. Instant mode delivers the planned rate regardless.
+                # Unplanned steps fall through to PV mode in EvChargerContributor.
+                mode = "charge_from_grid"
+                policy = "grid_allowed"
                 intents.append(ControlIntent(
                     device_id=goal.device_id,
                     timestep=ts,
@@ -684,6 +683,7 @@ def _extract_intents(
     """Convert solver values into ``ControlIntent`` objects."""
     c = variables["c"]
     d = variables["d"]
+    e = variables["e"]
     g_exp = variables["g_exp"]
     intents: list[ControlIntent] = []
 
@@ -692,6 +692,7 @@ def _extract_intents(
         for t, ts in enumerate(timestamps):
             c_kwh = pulp.value(c[(b, t)]) or 0.0
             d_kwh = pulp.value(d[(b, t)]) or 0.0
+            e_kwh = pulp.value(e[(b, t)]) or 0.0
             # Convert from kWh per step back to average W
             c_w = c_kwh / step_h * 1000.0
             d_w = d_kwh / step_h * 1000.0
@@ -714,6 +715,7 @@ def _extract_intents(
                         max_power_w=round(c_w, 1),
                         planned_kw=round(c_w / 1000.0, 4),
                         reserved_kwh=round(c_kwh, 4),
+                        stored_energy_kwh=round(e_kwh, 4),
                         charge_policy=charge_policy,
                     )
                 )
@@ -733,6 +735,7 @@ def _extract_intents(
                         max_power_w=0.0,
                         planned_kw=round(-d_w / 1000.0, 4),
                         reserved_kwh=round(-d_kwh, 4),
+                        stored_energy_kwh=round(e_kwh, 4),
                     )
                 )
             else:
@@ -746,6 +749,7 @@ def _extract_intents(
                         mode="charge_from_pv",
                         planned_kw=0.0,
                         reserved_kwh=0.0,
+                        stored_energy_kwh=round(e_kwh, 4),
                         charge_policy="pv_only",  # informational
                     )
                 )
