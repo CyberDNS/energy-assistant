@@ -36,7 +36,7 @@ from typing import Any
 
 import yaml
 
-from ..core.config import AppConfig, BackendsConfig, HomeAssistantConfig, IoBrokerConfig
+from ..core.config import AppConfig, BackendsConfig, HomeAssistantConfig, IoBrokerConfig, MqttConfig
 from ..secrets import SecretsManager
 
 
@@ -229,4 +229,13 @@ def _parse_backends(cfg: dict[str, Any]) -> BackendsConfig:
             timeout_s=float(ha_cfg.get("timeout_s", 10.0)),
         )
 
-    return BackendsConfig(iobroker=iobroker, homeassistant=homeassistant)
+    mqtt: MqttConfig | None = None
+    if mqtt_cfg := cfg.get("mqtt"):
+        mqtt = MqttConfig(
+            host=mqtt_cfg["host"],
+            port=int(mqtt_cfg.get("port", 1883)),
+            username=mqtt_cfg.get("username"),
+            password=mqtt_cfg.get("password"),
+        )
+
+    return BackendsConfig(iobroker=iobroker, homeassistant=homeassistant, mqtt=mqtt)
