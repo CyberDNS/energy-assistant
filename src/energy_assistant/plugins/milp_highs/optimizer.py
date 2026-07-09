@@ -110,7 +110,9 @@ class MilpHigsOptimizer:
         if n_steps == 0:
             return EnergyPlan(horizon_hours=horizon_h)
 
-        now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        _now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        # Floor to the step boundary so timestamps align with price/PV forecasts
+        now = _now - timedelta(minutes=_now.minute % self._step_min)
         timestamps = [now + step_td * t for t in range(n_steps)]
 
         # ── Prices ────────────────────────────────────────────────────
@@ -331,22 +333,30 @@ class MilpHigsOptimizer:
                 e[(b, t)] = pulp.LpVariable(f"e__{b}__{t}", lowBound=e_min, upBound=e_max)
 
         # ── EV charging variables ──────────────────────────────────────
-        # ev[asset_id, t] — AC energy charged into the EV in step t (kWh).
-        # Upper bound is 0 for steps at or after phase2_start_time (those
-        # slots are already represented as a fixed load in net_load).
-        ev: dict[tuple[str, int], pulp.LpVariable] = {}
+        # ev[asset_id, t]    — AC energy charged into the EV in step t (kWh).
+        # ev_on[asset_id, t] — binary: 1 = charger is active this step.
+        #
+        # Semi-continuous constraint: ev is either 0 (charger off) or in
+        # [min_charge_kw * step_h, max_charge_kw * step_h] (charger on).
+        # This prevents the optimizer from planning sub-minimum currents that
+        # the charger cannot physically deliver (openWB requires ≥ 6 A).
+        #
+        # Phase-2 slots are excluded: they are fixed loads in net_load already.
+        ev:    dict[tuple[str, int], pulp.LpVariable] = {}
+        ev_on: dict[tuple[str, int], pulp.LpVariable] = {}
         active_ev_goals = [g for g in (ev_goals or []) if g.connected]
         ts_list = timestamps or []
         for goal in active_ev_goals:
+            min_kwh = goal.min_charge_kw * step_h
+            max_kwh = goal.max_charge_kw * step_h
             for t in T:
                 ts = ts_list[t] if t < len(ts_list) else None
+                key = (goal.asset_id, t)
                 if ts is not None and ts < goal.phase2_start_time:
-                    upbound = goal.max_charge_kw * step_h
+                    ev[key]    = pulp.LpVariable(f"ev__{goal.asset_id}__{t}",    lowBound=0, upBound=max_kwh)
+                    ev_on[key] = pulp.LpVariable(f"ev_on__{goal.asset_id}__{t}", cat="Binary")
                 else:
-                    upbound = 0.0
-                ev[(goal.asset_id, t)] = pulp.LpVariable(
-                    f"ev__{goal.asset_id}__{t}", lowBound=0, upBound=upbound
-                )
+                    ev[key] = pulp.LpVariable(f"ev__{goal.asset_id}__{t}", lowBound=0, upBound=0.0)
 
         # ── Threshold device variables ─────────────────────────────────
         # run[device_id, t] — binary: 1 = device is running this step
@@ -460,6 +470,18 @@ class MilpHigsOptimizer:
                 f"grid_balance__{t}",
             )
 
+        # ── EV semi-continuous constraints (min current) ───────────────
+        # ev is either 0 or ≥ min_charge_kw * step_h (no sub-minimum charging).
+        for goal in active_ev_goals:
+            min_kwh = goal.min_charge_kw * step_h
+            max_kwh = goal.max_charge_kw * step_h
+            for t in T:
+                key = (goal.asset_id, t)
+                if key not in ev_on:
+                    continue
+                prob += ev[key] >= min_kwh * ev_on[key], f"ev_min__{goal.asset_id}__{t}"
+                prob += ev[key] <= max_kwh * ev_on[key], f"ev_max__{goal.asset_id}__{t}"
+
         # ── EV phase-1 deadline constraints ───────────────────────────
         for goal in active_ev_goals:
             if goal.phase1_required_kwh <= 0.01:
@@ -543,7 +565,7 @@ class MilpHigsOptimizer:
                         f"val_dynamics__{td_id}__{t}",
                     )
 
-        variables = {"c": c, "d": d, "u": u, "e": e, "g_imp": g_imp, "g_exp": g_exp, "ev": ev, "run": run, "val": val}
+        variables = {"c": c, "d": d, "u": u, "e": e, "g_imp": g_imp, "g_exp": g_exp, "ev": ev, "ev_on": ev_on, "run": run, "val": val}
         return prob, variables
 
     # ------------------------------------------------------------------
@@ -784,15 +806,13 @@ def _extract_ev_intents(
                 # unreliable when the MILP also dispatches battery storage from the
                 # same PV. Instant mode delivers the planned rate regardless.
                 # Unplanned steps fall through to PV mode in EvChargerContributor.
-                mode = "charge_from_grid"
-                policy = "grid_allowed"
                 intents.append(ControlIntent(
                     device_id=goal.device_id,
                     timestep=ts,
-                    mode=mode,
+                    mode="charge_from_grid",
                     planned_kw=round(ev_kwh / step_h, 4),
                     reserved_kwh=round(ev_kwh, 4),
-                    charge_policy=policy,
+                    charge_policy="grid_allowed",
                 ))
     return intents
 

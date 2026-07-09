@@ -96,6 +96,7 @@ def _parse_one(asset_id: str, cfg: dict[str, Any]) -> EvChargingAsset:
     device_id = cfg["device"]
     capacity = float(cfg["capacity_kwh"])
     max_charge = float(cfg.get("max_charge_kw", 11.0))
+    min_charge = float(cfg.get("min_charge_kw", 1.38))  # 6 A × 230 V single-phase default
     charge_limit = float(cfg.get("charge_limit_soc_pct", 100.0))
     label = str(cfg.get("label", asset_id))
     tz = str(cfg.get("timezone", "Europe/Berlin"))
@@ -122,6 +123,7 @@ def _parse_one(asset_id: str, cfg: dict[str, Any]) -> EvChargingAsset:
         label=label,
         capacity_kwh=capacity,
         max_charge_kw=max_charge,
+        min_charge_kw=min_charge,
         charge_limit_soc_pct=charge_limit,
         charge_curve=curve,
         schedule=schedule,
@@ -169,6 +171,7 @@ def resolve_active_goals(
                     device_id=asset.device_id,
                     capacity_kwh=asset.capacity_kwh,
                     max_charge_kw=asset.max_charge_kw,
+                    min_charge_kw=asset.min_charge_kw,
                     charge_limit_soc_pct=asset.charge_limit_soc_pct,
                     target_soc_pct=asset.charge_limit_soc_pct,
                     target_by=now + timedelta(hours=168),  # far future
@@ -191,6 +194,7 @@ def resolve_active_goals(
             device_id=asset.device_id,
             capacity_kwh=asset.capacity_kwh,
             max_charge_kw=asset.max_charge_kw,
+            min_charge_kw=asset.min_charge_kw,
             charge_limit_soc_pct=asset.charge_limit_soc_pct,
             target_soc_pct=target_soc,
             target_by=target_by,
