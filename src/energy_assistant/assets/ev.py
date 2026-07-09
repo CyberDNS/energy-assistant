@@ -77,6 +77,7 @@ class EvChargingAsset:
     label: str
     capacity_kwh: float
     max_charge_kw: float
+    min_charge_kw: float = 1.38   # 6 A × 230 V single-phase; override per charger
     charge_limit_soc_pct: float = 100.0
     charge_curve: list[ChargeCurvePoint] = field(default_factory=list)
     schedule: list[EvScheduleEntry] = field(default_factory=list)
@@ -95,6 +96,7 @@ class EvChargingGoal:
     device_id: str
     capacity_kwh: float
     max_charge_kw: float
+    min_charge_kw: float
     charge_limit_soc_pct: float
     target_soc_pct: float
     target_by: datetime          # UTC
@@ -156,6 +158,7 @@ def build_goal_from_parts(
     device_id: str,
     capacity_kwh: float,
     max_charge_kw: float,
+    min_charge_kw: float,
     charge_limit_soc_pct: float,
     target_soc_pct: float,
     target_by: datetime,
@@ -180,6 +183,7 @@ def build_goal_from_parts(
         device_id=device_id,
         capacity_kwh=capacity_kwh,
         max_charge_kw=max_charge_kw,
+        min_charge_kw=min_charge_kw,
         charge_limit_soc_pct=effective_limit,
         target_soc_pct=target_soc_pct,
         target_by=target_by,
@@ -260,7 +264,8 @@ class EvChargerContributor:
 
         # Active goal, optimizer issued charge_from_grid → Instant Charging
         if intent is not None and intent.mode == "charge_from_grid":
-            return self._asset.max_charge_kw * 1000.0
+            planned = intent.planned_kw if intent.planned_kw is not None and intent.planned_kw > 0 else self._asset.max_charge_kw
+            return max(self._asset.min_charge_kw, min(self._asset.max_charge_kw, planned)) * 1000.0
 
         # charge_from_pv, idle, or no intent → PV Charging
         return _PV_SENTINEL_W

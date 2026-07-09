@@ -16,12 +16,12 @@ function localTs(isoArr) {
   return isoArr.map(toPlotlyDate)
 }
 
-// X-axis config shared by all plan charts: compact ticks, no cluttered labels
+// X-axis: hour labels placed dynamically by PlotlyChart; minor ticks at each 15-min step
 const XAXIS = {
   type: 'date',
-  tickformat: '%H:%M<br>%d.%m.',
-  nticks: 10,
+  tickformat: '%H',
   tickangle: 0,
+  minor: { dtick: 900000, ticks: 'outside', ticklen: 4 },
 }
 
 function buildFlowTraces(intents, forecast, evDeviceIds) {
@@ -67,23 +67,23 @@ function buildFlowTraces(intents, forecast, evDeviceIds) {
 
   return {
     flowTraces: [
-      { name: 'PV',          type: 'bar', x: ts, y: pvKw,                    marker: { color: '#f0c040' }, hovertemplate: '%{y:.2f} kW' },
-      { name: 'Discharge',   type: 'bar', x: ts, y: dischargeKw,             marker: { color: '#4caf7d' }, hovertemplate: '%{y:.2f} kW' },
-      { name: 'Grid import', type: 'bar', x: ts, y: gridImport,              marker: { color: '#e07070' }, hovertemplate: '%{y:.2f} kW' },
-      { name: 'Consumption', type: 'bar', x: ts, y: consKw.map(v => -v),     marker: { color: '#6b7bb5' }, hovertemplate: '%{y:.2f} kW' },
-      { name: 'Charge',      type: 'bar', x: ts, y: chargeKw.map(v => -v),   marker: { color: '#3a9ad9' }, hovertemplate: '%{y:.2f} kW' },
-      { name: 'EV Charging', type: 'bar', x: ts, y: evChargeKw.map(v => -v), marker: { color: '#00acc1' }, hovertemplate: '%{y:.2f} kW' },
-      { name: 'Grid export', type: 'bar', x: ts, y: gridExport.map(v => -v), marker: { color: '#b07030' }, hovertemplate: '%{y:.2f} kW' },
+      { name: 'PV',          type: 'bar', x: ts, y: pvKw,                    marker: { color: '#f0c040' }, hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra></extra>' },
+      { name: 'Discharge',   type: 'bar', x: ts, y: dischargeKw,             marker: { color: '#4caf7d' }, hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra></extra>' },
+      { name: 'Grid import', type: 'bar', x: ts, y: gridImport,              marker: { color: '#e07070' }, hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra></extra>' },
+      { name: 'Consumption', type: 'bar', x: ts, y: consKw.map(v => -v),     marker: { color: '#6b7bb5' }, hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra></extra>' },
+      { name: 'Charge',      type: 'bar', x: ts, y: chargeKw.map(v => -v),   marker: { color: '#3a9ad9' }, hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra></extra>' },
+      { name: 'EV Charging', type: 'bar', x: ts, y: evChargeKw.map(v => -v), marker: { color: '#00acc1' }, hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra></extra>' },
+      { name: 'Grid export', type: 'bar', x: ts, y: gridExport.map(v => -v), marker: { color: '#b07030' }, hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra></extra>' },
     ],
     forecastTraces: [
-      { name: 'PV forecast',    mode: 'lines', x: ts, y: pvKw,            line: { color: '#f0c040' }, hovertemplate: '%{y:.2f} kW' },
-      { name: 'Consumption',    mode: 'lines', x: ts, y: consKw,          line: { color: '#6b7bb5' }, hovertemplate: '%{y:.2f} kW' },
-      { name: 'EV Charging',    mode: 'lines', x: ts, y: evChargeKw,      line: { color: '#00acc1', dash: 'dot' }, hovertemplate: '%{y:.2f} kW' },
+      { name: 'PV forecast',    mode: 'lines', x: ts, y: pvKw,            line: { color: '#f0c040' }, hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra></extra>' },
+      { name: 'Consumption',    mode: 'lines', x: ts, y: consKw,          line: { color: '#6b7bb5' }, hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra></extra>' },
+      { name: 'EV Charging',    mode: 'lines', x: ts, y: evChargeKw,      line: { color: '#00acc1', dash: 'dot' }, hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra></extra>' },
     ],
     priceTraces: [
-      { name: 'Import price',      mode: 'lines', x: ts, y: priceReal, line: { color: '#e07070' },               connectgaps: false, hovertemplate: '%{y:.4f} €/kWh' },
-      { name: 'Import (forecast)', mode: 'lines', x: ts, y: priceEst,  line: { color: '#e07070', dash: 'dash' }, connectgaps: false, hovertemplate: '%{y:.4f} €/kWh', showlegend: hasEst },
-      { name: 'Export price',      mode: 'lines', x: ts, y: expPrices, line: { color: '#4caf7d' },               hovertemplate: '%{y:.4f} €/kWh' },
+      { name: 'Import price',      mode: 'lines', x: ts, y: priceReal, line: { color: '#e07070' },               connectgaps: false, hovertemplate: '%{x|%H:%M}  %{y:.4f} €/kWh<extra></extra>' },
+      { name: 'Import (forecast)', mode: 'lines', x: ts, y: priceEst,  line: { color: '#e07070', dash: 'dash' }, connectgaps: false, hovertemplate: '%{x|%H:%M}  %{y:.4f} €/kWh<extra></extra>', showlegend: hasEst },
+      { name: 'Export price',      mode: 'lines', x: ts, y: expPrices, line: { color: '#4caf7d' },               hovertemplate: '%{x|%H:%M}  %{y:.4f} €/kWh<extra></extra>' },
     ],
     evChargeKw,
   }
@@ -106,7 +106,7 @@ function buildSocTraces(intents, forecast, evDeviceIds) {
     const y = devIntents.map(i => i.stored_energy_kwh / caps.capacity_kwh * 100)
 
     if (x.length) {
-      traces.push({ name: did, mode: 'lines', x, y, hovertemplate: '%{y:.1f}%' })
+      traces.push({ name: did, mode: 'lines', x, y, hovertemplate: '%{x|%H:%M}  %{y:.1f}%<extra></extra>' })
     }
   }
   return traces
@@ -191,7 +191,7 @@ export default defineComponent({
       <div class="full panel">
         <h2>Energy Flow — Supply &amp; Demand</h2>
         <PlotlyChart :traces="flowTraces"
-          :layout="{ yaxis: { title: 'kW' }, xaxis: XAXIS }"
+          :layout="{ yaxis: { title: 'kW' }, xaxis: XAXIS, bargap: 0.05 }"
           barmode="relative" height="280px" />
       </div>
 
