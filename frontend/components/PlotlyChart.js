@@ -14,6 +14,11 @@ function mkLayout(extra = {}) {
   }
 }
 
+function xNticks(widthPx) {
+  // ~55 px per hour label; at least 3, at most 24
+  return Math.min(24, Math.max(3, Math.floor(widthPx / 55)))
+}
+
 export default defineComponent({
   name: 'PlotlyChart',
   props: {
@@ -25,10 +30,17 @@ export default defineComponent({
   setup(props) {
     const el = ref(null)
     let initialized = false
+    let ro = null
+
+    function buildLayout() {
+      const width = el.value?.offsetWidth ?? 600
+      const xaxis = { ...props.layout.xaxis, nticks: xNticks(width) }
+      return mkLayout({ ...props.layout, xaxis, ...(props.barmode ? { barmode: props.barmode } : {}) })
+    }
 
     function draw() {
       if (!el.value || !props.traces.length) return
-      const layout = mkLayout({ ...props.layout, ...(props.barmode ? { barmode: props.barmode } : {}) })
+      const layout = buildLayout()
       if (initialized) {
         Plotly.react(el.value, props.traces, layout, PLT_OPT)
       } else {
@@ -38,8 +50,20 @@ export default defineComponent({
     }
 
     watch(() => [props.traces, props.layout], draw, { deep: true })
-    onMounted(draw)
-    onUnmounted(() => { if (el.value) Plotly.purge(el.value) })
+
+    onMounted(() => {
+      draw()
+      ro = new ResizeObserver(entries => {
+        const w = entries[0]?.contentRect.width
+        if (w && initialized) Plotly.relayout(el.value, { 'xaxis.nticks': xNticks(w) })
+      })
+      ro.observe(el.value)
+    })
+
+    onUnmounted(() => {
+      ro?.disconnect()
+      if (el.value) Plotly.purge(el.value)
+    })
 
     return () => h('div', { ref: el, style: { height: props.height } })
   },

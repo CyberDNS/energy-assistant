@@ -167,9 +167,55 @@ tbody tr:last-child td { border-bottom:none; }
 .ev-chargepoint-actions { display:flex; gap:6px; justify-content: flex-end; }
 .ev-error { font-size:.78rem; color:var(--bad); }
 
+/* ── live view: freshness ── */
+.live-fresh { display:flex; align-items:center; justify-content:flex-end; gap:6px; color:var(--muted); font-size:.75rem; margin-bottom:6px; }
+.pulse-dot { width:8px; height:8px; border-radius:50%; background:var(--ok); animation:pulse 2.5s ease-in-out infinite; }
+@keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.35; } }
+
+/* ── live view: power-flow strip ── */
+.flow-strip { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:8px; margin-bottom:10px; }
+.flow-tile { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:8px 12px; box-shadow:0 1px 2px rgba(0,0,0,.04); }
+.flow-tile .v { font-variant-numeric:tabular-nums; }
+.flow-dir { font-size:.73rem; font-weight:600; margin-top:2px; color:var(--muted); }
+.flow-dir.ok { color:var(--ok); }
+.flow-dir.bad { color:var(--bad); }
+.flow-dir.accent { color:var(--accent); }
+.flow-dir.muted { color:var(--muted); }
+
+/* ── live view: device cards ── */
+.dev-cards { display:grid; grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); gap:10px; }
+.dev-card { border:1px solid var(--line); border-radius:8px; padding:10px 12px; display:flex; flex-direction:column; gap:8px; }
+.dev-card-header { display:flex; align-items:center; gap:8px; }
+.dev-label { font-weight:600; font-size:.88rem; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.dev-power { font-size:.86rem; font-weight:600; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.dev-power.producing { color:var(--ok); }
+.status-dot { width:9px; height:9px; border-radius:50%; flex-shrink:0; }
+.status-dot.on { background:var(--ok); }
+.status-dot.off { background:var(--bad); }
+.dev-sp { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.dev-sp-w { font-size:.8rem; color:var(--muted); font-variant-numeric:tabular-nums; }
+.dev-flag { font-size:.72rem; color:var(--ok); white-space:nowrap; }
+.dev-flag.off { color:var(--muted); }
+
+/* ── SoC bars (device cards + ledger) ── */
+.soc-row { display:flex; align-items:center; gap:8px; }
+.soc-num { font-size:.82rem; font-weight:700; min-width:36px; font-variant-numeric:tabular-nums; }
+.soc-bar { flex:1; height:8px; background:var(--line); border-radius:4px; overflow:hidden; min-width:60px; }
+.soc-fill { height:100%; border-radius:4px; background:var(--ok); transition:width .4s; }
+
+/* ── responsive tables ── */
+.table-scroll { overflow-x:auto; -webkit-overflow-scrolling:touch; }
+.table-scroll table { min-width:440px; }
+th.num, td.num { text-align:right; font-variant-numeric:tabular-nums; }
+.ledger-stored { min-width:170px; }
+.ledger-stored .soc-bar { margin-top:4px; }
+
 /* ── inline edit ── */
-.basis-edit { display:flex; gap:6px; align-items:center; }
-.basis-edit input { width:90px; padding:3px 6px; border:1px solid var(--line); border-radius:5px; font-size:.83rem; }
+.basis-edit { display:flex; gap:6px; align-items:center; justify-content:flex-end; }
+.basis-edit input { width:90px; padding:6px 8px; border:1px solid var(--line); border-radius:5px; font-size:.83rem; }
+.basis-edit .btn { min-height:34px; }
+.btn-edit { padding:4px 8px; margin-left:6px; font-size:.8rem; min-height:30px; }
+.basis-value { font-variant-numeric:tabular-nums; }
 
 /* ── controllable devices list ── */
 .ctrl-list { display:flex; flex-direction:column; gap:0; }
@@ -183,6 +229,16 @@ tbody tr:last-child td { border-bottom:none; }
 /* ── responsive ── */
 @media (max-width: 900px) {
   .row2, .row2-eq, .row3 { grid-template-columns: 1fr; }
+}
+@media (max-width: 600px) {
+  /* KPI bar: one horizontally scrollable row instead of a tall grid */
+  .kpis { display:flex; overflow-x:auto; -webkit-overflow-scrolling:touch; padding-bottom:2px; }
+  .kpis .card { flex:0 0 auto; min-width:120px; }
+  .dev-cards { grid-template-columns:1fr; }
+  .flow-strip { grid-template-columns:repeat(auto-fit,minmax(105px,1fr)); }
+  /* comfortable touch targets */
+  .btn { min-height:38px; }
+  .basis-edit input { min-height:38px; }
 }
 @media (max-width: 500px) {
   .ev-inputs { grid-template-columns: 1fr; }

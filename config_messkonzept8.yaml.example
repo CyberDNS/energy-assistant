@@ -140,6 +140,11 @@ assets: {}
 optimizer:
   algorithm: milp
   horizon_hours: 24
+  # Speed/accuracy trade-off, 0.0 (fast/coarse) … 1.0 (slow/exact).
+  # Controls the solver's MIP gap (0.0 → 1e-2, 0.5 → ~3e-6, 1.0 → 1e-9)
+  # and a solve time limit (5 s at 0.0 → 60 s near 1.0; 1.0 = unlimited).
+  # On timeout the best plan found so far is used.
+  precision: 0.5
   baseline_load_kw: 0.3           # assumed household background load (no forecast)
   feed_in_eur_per_kwh: 0.082      # must match export_tariff above
 

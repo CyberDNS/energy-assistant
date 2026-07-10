@@ -45,18 +45,23 @@ def parse_ev_assets(raw_assets: dict[str, Any]) -> list[EvChargingAsset]:
     return result
 
 
-def parse_threshold_assets(raw_assets: dict[str, Any]) -> list[ThresholdConstraints]:
+def parse_threshold_assets(
+    raw_assets: dict[str, Any],
+    devices: dict[str, dict[str, Any]] | None = None,
+) -> list[ThresholdConstraints]:
     """Parse ``type: threshold`` entries from the ``assets:`` config section.
 
     Each entry must supply:
     - ``device``            — device_id matching a registered device.
     - ``bottom_threshold``  — lower bound of the allowed range.
     - ``top_threshold``     — upper bound of the allowed range.
-    - ``rated_power_kw``    — electrical power when running (kW).
     - ``active_rate_per_h`` — rate of value change while running (units/h).
     - ``drift_rate_per_h``  — rate of natural drift when off (units/h).
 
     Optional:
+    - ``rated_power_kw``    — electrical power when running (kW).  Falls back
+      to the referenced device's ``rated_power_w`` (from *devices*) so the
+      value only needs to be declared once, on the device.
     - ``unit``          — display unit (default "").
     - ``direction``     — "reduces" (default) or "increases".
     - ``min_runtime_h`` — minimum on-time for compressor protection (h).
@@ -69,21 +74,35 @@ def parse_threshold_assets(raw_assets: dict[str, Any]) -> list[ThresholdConstrai
         if cfg.get("type") != _THRESHOLD_TYPE:
             continue
         try:
-            result.append(_parse_threshold_one(asset_id, cfg))
+            result.append(_parse_threshold_one(asset_id, cfg, devices or {}))
         except Exception as exc:  # noqa: BLE001
             _log.warning("assets[%r] (threshold): parse failed — %s", asset_id, exc)
     return result
 
 
-def _parse_threshold_one(asset_id: str, cfg: dict[str, Any]) -> ThresholdConstraints:
-    device_id = cfg.get("device") or asset_id
+def _parse_threshold_one(
+    asset_id: str,
+    cfg: dict[str, Any],
+    devices: dict[str, dict[str, Any]],
+) -> ThresholdConstraints:
+    device_id = str(cfg.get("device") or asset_id)
+
+    rated_power_kw = cfg.get("rated_power_kw")
+    if rated_power_kw is None:
+        rated_power_w = (devices.get(device_id) or {}).get("rated_power_w")
+        if rated_power_w is None:
+            raise ValueError(
+                f"no rated_power_kw on the asset and no rated_power_w on device {device_id!r}"
+            )
+        rated_power_kw = float(rated_power_w) / 1000.0
+
     return ThresholdConstraints(
-        device_id=str(device_id),
+        device_id=device_id,
         bottom_threshold=float(cfg["bottom_threshold"]),
         top_threshold=float(cfg["top_threshold"]),
         unit=str(cfg.get("unit", "")),
         direction=str(cfg.get("direction", "reduces")),  # type: ignore[arg-type]
-        rated_power_kw=float(cfg["rated_power_kw"]),
+        rated_power_kw=float(rated_power_kw),
         active_rate_per_h=float(cfg["active_rate_per_h"]),
         drift_rate_per_h=float(cfg["drift_rate_per_h"]),
         min_runtime_h=float(cfg.get("min_runtime_h", 0.0)),
@@ -96,6 +115,7 @@ def _parse_one(asset_id: str, cfg: dict[str, Any]) -> EvChargingAsset:
     device_id = cfg["device"]
     capacity = float(cfg["capacity_kwh"])
     max_charge = float(cfg.get("max_charge_kw", 11.0))
+    min_charge = float(cfg.get("min_charge_kw", 1.38))  # 6 A × 230 V single-phase default
     charge_limit = float(cfg.get("charge_limit_soc_pct", 100.0))
     label = str(cfg.get("label", asset_id))
     tz = str(cfg.get("timezone", "Europe/Berlin"))
@@ -122,6 +142,7 @@ def _parse_one(asset_id: str, cfg: dict[str, Any]) -> EvChargingAsset:
         label=label,
         capacity_kwh=capacity,
         max_charge_kw=max_charge,
+        min_charge_kw=min_charge,
         charge_limit_soc_pct=charge_limit,
         charge_curve=curve,
         schedule=schedule,
@@ -161,20 +182,22 @@ def resolve_active_goals(
         # Determine target from override or schedule
         target_info = _resolve_target(asset, overrides, now)
         if target_info is None:
-            # No target → generate a "connected, no deadline" goal
-            # (contributor will set PV Charging opportunistically)
+            # No schedule: include connected EV as PV-only absorber so the plan
+            # shows estimated surplus charging with real kW values.
             if connected:
                 goals.append(build_goal_from_parts(
                     asset_id=asset.asset_id,
                     device_id=asset.device_id,
                     capacity_kwh=asset.capacity_kwh,
                     max_charge_kw=asset.max_charge_kw,
+                    min_charge_kw=asset.min_charge_kw,
                     charge_limit_soc_pct=asset.charge_limit_soc_pct,
                     target_soc_pct=asset.charge_limit_soc_pct,
-                    target_by=now + timedelta(hours=168),  # far future
+                    target_by=now + timedelta(hours=168),  # far future — no deadline
                     charge_curve=asset.charge_curve,
                     current_soc_pct=current_soc,
                     connected=connected,
+                    pv_only=True,
                 ))
             continue
 
@@ -191,6 +214,7 @@ def resolve_active_goals(
             device_id=asset.device_id,
             capacity_kwh=asset.capacity_kwh,
             max_charge_kw=asset.max_charge_kw,
+            min_charge_kw=asset.min_charge_kw,
             charge_limit_soc_pct=asset.charge_limit_soc_pct,
             target_soc_pct=target_soc,
             target_by=target_by,

@@ -146,7 +146,20 @@ async def _run(config_path: Path, db_path: Path) -> None:
     await app.run_forever()
 
 
+_HELP = """\
+Usage: python -m energy_assistant [config.yaml] [--db path/to/history.db]
+
+Options:
+  -c, --config FILE   Path to config YAML (default: ./config.yaml or /config/config.yaml in HA)
+  --db FILE           Path to SQLite database (default: ./data/history.db or /data/energy-assistant.db in HA)
+  -h, --help          Show this message and exit
+"""
+
+
 def main() -> None:
+    if any(a in sys.argv[1:] for a in ("-h", "--help")):
+        print(_HELP, end="")
+        return
     _configure_logging()
     config_path, db_path = _parse_args()
     asyncio.run(_run(config_path, db_path))

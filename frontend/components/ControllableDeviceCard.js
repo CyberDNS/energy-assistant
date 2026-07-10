@@ -14,8 +14,9 @@ function fmt(v, dec = 1) {
 
 const MODE_COLOR = {
   'run':              '#4caf7d',
-  'charge_from_pv':   '#f0c040',
-  'charge_from_grid': '#e07070',
+  'charge_from_pv':   '#8bc34a',  // EV PV surplus — yellow-green
+  'charge_from_grid': '#00acc1',  // EV Phase 1 — teal
+  'charge_phase2':    '#f57c00',  // EV Phase 2 mandatory — deep orange
   'discharge':        '#4caf7d',
   'grid_feed_in':     '#3a9ad9',
   'idle':             'rgba(130,130,130,0.18)',
@@ -36,9 +37,13 @@ function buildPowerTraces(device) {
       x: xs,
       y: ys,
       marker: { color: colors },
-      hovertemplate: '%{y:.3f} kW<extra></extra>',
+      hovertemplate: '%{x|%H:%M}  %{y:.3f} kW<extra></extra>',
     }],
   }
+}
+
+function miniNticks(widthPx) {
+  return Math.min(12, Math.max(2, Math.floor(widthPx / 55)))
 }
 
 const MiniChart = defineComponent({
@@ -49,29 +54,52 @@ const MiniChart = defineComponent({
   setup(props) {
     const el = ref(null)
     let initialized = false
+    let ro = null
 
-    function draw() {
-      if (!el.value || !props.traces.length) return
-      const layout = {
+    function buildLayout() {
+      const width = el.value?.offsetWidth ?? 300
+      return {
         margin: { t: 4, r: 10, b: 36, l: 50 },
         paper_bgcolor: 'transparent',
         plot_bgcolor: 'transparent',
         font: { size: 9, color: '#586660' },
         showlegend: false,
-        xaxis: { type: 'date', tickformat: '%H:%M', nticks: 8, tickangle: 0 },
+        xaxis: {
+          type: 'date',
+          tickformat: '%H',
+          tickangle: 0,
+          nticks: miniNticks(width),
+          minor: { dtick: 900000, ticks: 'outside', ticklen: 3 },
+        },
         ...props.layout,
       }
+    }
+
+    function draw() {
+      if (!el.value || !props.traces.length) return
       if (initialized) {
-        Plotly.react(el.value, props.traces, layout, PLT_OPT)
+        Plotly.react(el.value, props.traces, buildLayout(), PLT_OPT)
       } else {
-        Plotly.newPlot(el.value, props.traces, layout, PLT_OPT)
+        Plotly.newPlot(el.value, props.traces, buildLayout(), PLT_OPT)
         initialized = true
       }
     }
 
     watch(() => [props.traces, props.layout], draw, { deep: true })
-    onMounted(draw)
-    onUnmounted(() => { if (el.value) Plotly.purge(el.value) })
+
+    onMounted(() => {
+      draw()
+      ro = new ResizeObserver(entries => {
+        const w = entries[0]?.contentRect.width
+        if (w && initialized) Plotly.relayout(el.value, { 'xaxis.nticks': miniNticks(w) })
+      })
+      ro.observe(el.value)
+    })
+
+    onUnmounted(() => {
+      ro?.disconnect()
+      if (el.value) Plotly.purge(el.value)
+    })
 
     return () => h('div', { ref: el, style: { height: '120px', minWidth: 0 } })
   },
