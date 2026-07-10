@@ -8,6 +8,10 @@ on the ``entity_mode`` entity.  The mode is determined by interpreting the
   0 < value ≤ 500 W  → mode_pv    ("PV Charging")
   value == 0.0   → mode_stop      ("Stop")
 
+When ``entity_current_instant`` is configured, the target charging current
+(in A) is written to that HA number entity whenever instant mode is activated.
+The watt value is converted using: amps = round(power_w / (voltage_v * phases)).
+
 See ``assets/ev.py`` for the full encoding contract.
 """
 
@@ -70,6 +74,9 @@ class OpenWBDevice:
         entity_power: str | None = None,
         entity_plugged: str | None = None,
         entity_soc_limit_instant: str | None = None,
+        entity_current_instant: str | None = None,
+        phases: int = 3,
+        voltage_v: float = 230.0,
         mode_pv: str = "PV Charging",
         mode_instant: str = "Instant Charging",
         mode_stop: str = "Stop",
@@ -81,6 +88,9 @@ class OpenWBDevice:
         self._entity_power = entity_power
         self._entity_plugged = entity_plugged
         self._entity_soc_limit_instant = entity_soc_limit_instant
+        self._entity_current_instant = entity_current_instant
+        self._phases = phases
+        self._voltage_v = voltage_v
         self._mode_pv = mode_pv
         self._mode_instant = mode_instant
         self._mode_stop = mode_stop
@@ -178,5 +188,25 @@ class OpenWBDevice:
             except Exception:
                 _log.warning(
                     "OpenWBDevice %r: failed to set instant SoC limit", self._device_id,
+                    exc_info=True,
+                )
+
+        # Set the target charging current for instant mode so openWB charges
+        # at the planned power rather than its own default.
+        if mode == self._mode_instant and self._entity_current_instant and value > 0:
+            target_a = max(6, min(16, round(value / (self._voltage_v * self._phases))))
+            try:
+                await self._client.call_service(
+                    "number",
+                    "set_value",
+                    {"entity_id": self._entity_current_instant, "value": target_a},
+                )
+                _log.debug(
+                    "OpenWBDevice %r: set instant charging current to %d A (%.0f W / %d phases)",
+                    self._device_id, target_a, value, self._phases,
+                )
+            except Exception:
+                _log.warning(
+                    "OpenWBDevice %r: failed to set instant charging current", self._device_id,
                     exc_info=True,
                 )

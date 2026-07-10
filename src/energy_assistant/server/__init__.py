@@ -65,6 +65,7 @@ from ..core.models import (
     StorageConstraints,
     TariffPoint,
     ThresholdConstraints,
+    intent_display_mode,
 )
 from ..core.optimizer import OptimizationContext
 from ..core.plugin_registry import BuildContext
@@ -501,7 +502,15 @@ class Application:
         # 6 — Storage constraints + optimizer
         self._storage_constraints = _storage_constraints_from_config(self._cfg)
         self._optimizer = MilpHigsOptimizer(
-            step_minutes=int(opt.get("step_minutes", 60))
+            step_minutes=int(opt.get("step_minutes", 60)),
+            precision=float(opt.get("precision", 0.5)),
+        )
+        # Coarse-but-instant optimizer for the first pass after startup:
+        # publishes a plan within ~a second so the UI is never empty while
+        # the configured-precision solve runs.
+        self._fast_optimizer = MilpHigsOptimizer(
+            step_minutes=int(opt.get("step_minutes", 60)),
+            precision=0.0,
         )
 
         # 7 — Ledger + control loop
@@ -529,7 +538,7 @@ class Application:
         )
 
         # 7c — Threshold assets + contributors
-        self._threshold_constraints = parse_threshold_assets(self._cfg.assets)
+        self._threshold_constraints = parse_threshold_assets(self._cfg.assets, self._cfg.devices)
         self._threshold_contributors = [
             ThresholdControlContributor(tc) for tc in self._threshold_constraints
         ]
@@ -831,6 +840,23 @@ class Application:
             },
         )
 
+        # Two-stage solve: when no plan is active yet (first run after
+        # startup), publish a coarse fast-pass plan immediately so the UI
+        # has data, then refine with the configured-precision solve below.
+        active = self._control_loop._active_plan
+        if active is None or not active.intents:
+            try:
+                fast_plan = await self._fast_optimizer.optimize(context)
+                if fast_plan.intents:
+                    _log.info(
+                        "Fast first-pass plan: %d intents — refining at full precision…",
+                        len(fast_plan.intents),
+                    )
+                    await self._bus.publish(PlanUpdatedEvent(plan=fast_plan))
+                    await self._bus.flush()
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("Fast first-pass optimizer failed: %s", exc)
+
         try:
             plan = await self._optimizer.optimize(context)
         except Exception as exc:  # noqa: BLE001
@@ -1042,6 +1068,8 @@ class Application:
                 devices_payload.append(
                     {
                         "device_id": s.device_id,
+                        "label": cfg.get("label") or s.device_id.replace("_", " ").title(),
+                        "role": cfg.get("role"),
                         "power_w": s.power_w,
                         "soc_pct": s.soc_pct,
                         "available": s.available,
@@ -1059,8 +1087,19 @@ class Application:
                 "dry_run": self._dry_run,
                 "devices": devices_payload,
                 "setpoints": [
-                    {"device_id": did, "setpoint_w": sp, "mode": mode}
-                    for did, sp, mode in self._control_loop.describe_setpoints(live)
+                    {
+                        "device_id": did,
+                        "setpoint_w": sp,
+                        "mode": mode,
+                        "grid_allowed": intent.grid_allowed if intent is not None else None,
+                        "export_allowed": intent.export_allowed if intent is not None else None,
+                        "role": (
+                            dev.role.value
+                            if (dev := self._registry.get(did)) is not None
+                            else None
+                        ),
+                    }
+                    for did, sp, mode, intent in self._control_loop._compute_setpoints(live)
                 ],
                 "ledger": [
                     {
@@ -1091,12 +1130,10 @@ class Application:
                     {
                         "device_id": i.device_id,
                         "timestep": i.timestep.isoformat(),
-                        "mode": i.mode,
-                        "charge_policy": i.charge_policy,
-                        "discharge_policy": i.discharge_policy,
-                        "planned_kw": i.planned_kw,
-                        "min_power_w": i.min_power_w,
-                        "max_power_w": i.max_power_w,
+                        "mode": intent_display_mode(i),
+                        "planned_kw": i.power_kw,
+                        "grid_allowed": i.grid_allowed,
+                        "export_allowed": i.export_allowed,
                         "reserved_kwh": i.reserved_kwh,
                         "stored_energy_kwh": i.stored_energy_kwh,
                     }
@@ -1465,13 +1502,20 @@ class Application:
                 # EV intents are sparse (only charging steps); build a lookup
                 # and walk every plan timestamp to reconstruct the SoC trajectory.
                 intent_by_ts = {i.timestep: i for i in _sorted_intents(asset.device_id)}
+                ev_goal = next((g for g in self._last_ev_goals if g.asset_id == asset.asset_id), None)
+                phase2_start = ev_goal.phase2_start_time if ev_goal else None
                 energy_kwh = (soc_pct or 0.0) / 100.0 * asset.capacity_kwh
                 cap_limit = asset.capacity_kwh * asset.charge_limit_soc_pct / 100.0
                 steps = []
                 for ts in all_plan_ts:
                     intent = intent_by_ts.get(ts)
-                    mode = intent.mode if intent else "idle"
-                    planned_kw = intent.planned_kw if (intent and intent.planned_kw) else 0.0
+                    if intent is None:
+                        mode = "idle"
+                    elif phase2_start is not None and ts >= phase2_start:
+                        mode = "charge_phase2"
+                    else:
+                        mode = intent_display_mode(intent)
+                    planned_kw = intent.power_kw if intent else 0.0
                     if planned_kw > 0:
                         energy_kwh = min(cap_limit, energy_kwh + planned_kw * step_h)
                     steps.append({
@@ -1506,14 +1550,13 @@ class Application:
                 power_w = state.power_w if state is not None else None
 
                 all_intents = _sorted_intents(sc.device_id)
-                future = [i for i in all_intents if i.timestep >= now]
-                current_mode = future[0].mode if future else "idle"
+                current_mode = intent_display_mode(next((i for i in all_intents if i.timestep >= now), None) or all_intents[0]) if all_intents else "idle"
 
                 steps = [
                     {
                         "ts": i.timestep.isoformat(),
-                        "mode": i.mode,
-                        "planned_kw": i.planned_kw,
+                        "mode": intent_display_mode(i),
+                        "planned_kw": i.power_kw,
                         "soc_pct": (
                             round(i.stored_energy_kwh / sc.capacity_kwh * 100, 1)
                             if i.stored_energy_kwh is not None else None
@@ -1521,6 +1564,7 @@ class Application:
                     }
                     for i in all_intents
                 ]
+                future_steps = [s for s in steps if datetime.fromisoformat(s["ts"]) >= now]
 
                 devices.append({
                     "device_id": sc.device_id,
@@ -1534,7 +1578,7 @@ class Application:
                     "plan": {
                         "current_mode": current_mode,
                         "steps": steps,
-                        "next_change": _next_change(future),
+                        "next_change": _next_change(future_steps),
                     },
                 })
 
@@ -1549,18 +1593,18 @@ class Application:
                     power_w = state.power_w
 
                 all_intents = _sorted_intents(tc.device_id)
-                future = [i for i in all_intents if i.timestep >= now]
-                current_mode = future[0].mode if future else "standby"
+                current_mode = intent_display_mode(next((i for i in all_intents if i.timestep >= now), None) or (all_intents[0] if all_intents else None), is_threshold=True) if all_intents else "standby"
 
                 steps = [
                     {
                         "ts": i.timestep.isoformat(),
-                        "mode": i.mode,
-                        "planned_kw": tc.rated_power_kw if i.mode == "run" else 0.0,
+                        "mode": intent_display_mode(i, is_threshold=True),
+                        "planned_kw": i.power_kw,
                         "predicted_value": i.stored_energy_kwh,
                     }
                     for i in all_intents
                 ]
+                future_steps = [s for s in steps if datetime.fromisoformat(s["ts"]) >= now]
 
                 devices.append({
                     "device_id": tc.device_id,
@@ -1576,7 +1620,7 @@ class Application:
                     "plan": {
                         "current_mode": current_mode,
                         "steps": steps,
-                        "next_change": _next_change(future),
+                        "next_change": _next_change(future_steps),
                     },
                 })
 

@@ -6,10 +6,16 @@ Time is discretised into fixed-length steps of ``step_minutes`` (default 60).
 For each storage device *b* (taken from ``context.storage_constraints``) and
 each time step *t* the model introduces four groups of decision variables:
 
-    c[b,t]  — AC energy charged into the battery   (kWh, ≥ 0)
-    d[b,t]  — AC energy discharged from the battery (kWh, ≥ 0)
+    c[b,t]  — AC energy charged into the battery   (Wh, ≥ 0)
+    d[b,t]  — AC energy discharged from the battery (Wh, ≥ 0)
     u[b,t]  — binary: 1 = charging, 0 = discharging/idle
-    e[b,t]  — stored energy at END of step *t*       (kWh)
+    e[b,t]  — stored energy at END of step *t*       (Wh)
+
+All LP variables use Wh (not kWh) for better numerical conditioning: whole-watt
+power values produce exact integer Wh coefficients (e.g. 4140 W × 0.25 h = 1035 Wh
+exactly, vs 4.14 kW × 0.25 h = 1.0350000000000001 kWh with float rounding).
+Prices are scaled to €/Wh internally. Public APIs (ControlIntent, StorageConstraints)
+still use kW and kWh; conversion happens at the _build_model boundary.
 
 Grid energy consumed per step (positive = import, negative = export):
 
@@ -21,8 +27,8 @@ SoC dynamics (with charge efficiency ηc and discharge efficiency ηd):
 
 Grid energy split into import and export (both ≥ 0):
 
-    g_imp[t]  — energy drawn from the grid  (kWh, ≥ 0)
-    g_exp[t]  — energy fed into the grid    (kWh, ≥ 0)
+    g_imp[t]  — energy drawn from the grid  (Wh, ≥ 0)
+    g_exp[t]  — energy fed into the grid    (Wh, ≥ 0)
     g_imp[t] − g_exp[t] = net_load[t] + Σ_b c[b,t] − Σ_b d[b,t]
 
 Objective (minimise net electricity cost over the horizon):
@@ -60,7 +66,10 @@ An ``EnergyPlan`` whose ``intents`` contain one ``ControlIntent`` per
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import math
+import time
 from datetime import datetime, timedelta, timezone
 
 import pulp
@@ -82,6 +91,13 @@ _log = logging.getLogger(__name__)
 # Default electricity price used when no tariff or forecast is available.
 _DEFAULT_PRICE_EUR_KWH = 0.30
 
+# Internal LP unit scale: all energy variables are in Wh, not kWh.
+# Prices are divided by this factor (€/kWh → €/Wh); energies are multiplied
+# by it (kWh → Wh) at the _build_model boundary and divided back in the
+# extract functions. Using Wh lets whole-watt power values produce exact
+# integer energy coefficients, improving LP numerical conditioning.
+_WH = 1000.0
+
 
 class MilpHigsOptimizer:
     """Cost-minimising MILP optimizer backed by the HiGHS solver (via PuLP).
@@ -91,10 +107,26 @@ class MilpHigsOptimizer:
     step_minutes:
         Duration of each planning time step in minutes.  Must be a divisor
         of 60 or a multiple of 60.  Default is 60 (one-hour steps).
+    precision:
+        Speed/accuracy trade-off in [0, 1], controlling two solver knobs:
+
+        * MIP gap tolerance, log-linear: 0.0 → 1e-2 (may leave ~a cent on
+          the table), 0.5 → ~3e-6, 1.0 → 1e-9 (nano-euro exact).
+        * Solve time limit: 5 s at 0.0 rising linearly to 60 s at ~1.0;
+          exactly 1.0 disables the limit. When the limit is reached HiGHS
+          returns the best plan found so far (still typically within a few
+          cents of optimal — good incumbents are found in the first
+          seconds; the long tail is spent *proving* optimality against
+          the tiny battery tie-break terms).
+
+        Below ~0.45 the gap exceeds the ~1e-4 € tie-break terms, so
+        battery dispatch *ordering* may become arbitrary among cost-equal
+        plans; plan economics are unaffected beyond the gap itself.
     """
 
-    def __init__(self, step_minutes: int = 60) -> None:
+    def __init__(self, step_minutes: int = 60, precision: float = 0.5) -> None:
         self._step_min = step_minutes
+        self._precision = min(max(float(precision), 0.0), 1.0)
 
     # ------------------------------------------------------------------
     # Public interface — Optimizer protocol
@@ -110,7 +142,9 @@ class MilpHigsOptimizer:
         if n_steps == 0:
             return EnergyPlan(horizon_hours=horizon_h)
 
-        now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        _now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        # Floor to the step boundary so timestamps align with price/PV forecasts
+        now = _now - timedelta(minutes=_now.minute % self._step_min)
         timestamps = [now + step_td * t for t in range(n_steps)]
 
         # ── Prices ────────────────────────────────────────────────────
@@ -237,6 +271,7 @@ class MilpHigsOptimizer:
         # ── Threshold devices ──────────────────────────────────────────
         threshold_devices = context.threshold_constraints
         initial_threshold_values = self._initial_threshold_values(threshold_devices, context)
+        initial_threshold_running = self._initial_threshold_running(threshold_devices, context)
 
         # ── Build and solve the MILP model ─────────────────────────────
         prob, variables = self._build_model(
@@ -245,8 +280,21 @@ class MilpHigsOptimizer:
             ev_goals=ev_goals, timestamps=timestamps,
             threshold_devices=threshold_devices,
             initial_threshold_values=initial_threshold_values,
+            initial_threshold_running=initial_threshold_running,
         )
-        status = prob.solve(self._get_solver())
+        t0 = time.monotonic()
+        # Solve in a worker thread: prob.solve() blocks for up to the full
+        # time limit, and running it on the event loop would freeze every
+        # API endpoint (and the control loop) for the duration.
+        status = await asyncio.to_thread(prob.solve, self._get_solver())
+        _log.info(
+            "MilpHigsOptimizer: solved in %.2fs — %d steps, %d batteries, %d EVs, status=%s",
+            time.monotonic() - t0,
+            n_steps,
+            len(batteries),
+            len([g for g in (ev_goals or []) if g.connected]),
+            pulp.LpStatus[status],
+        )
 
         if pulp.LpStatus[status] not in ("Optimal", "Feasible"):
             _log.warning(
@@ -269,10 +317,9 @@ class MilpHigsOptimizer:
                     ev_intents.append(ControlIntent(
                         device_id=goal.device_id,
                         timestep=ts,
-                        mode="charge_from_grid",
-                        planned_kw=round(goal.max_charge_kw, 4),
+                        power_kw=round(goal.max_charge_kw, 4),
+                        grid_allowed=True,
                         reserved_kwh=round(goal.max_charge_kw * step_h, 4),
-                        charge_policy="grid_allowed",
                     ))
         threshold_intents = _extract_threshold_intents(threshold_devices, variables, timestamps)
         return EnergyPlan(horizon_hours=horizon_h, intents=intents + ev_intents + threshold_intents)
@@ -296,6 +343,7 @@ class MilpHigsOptimizer:
         timestamps: list[datetime] | None = None,
         threshold_devices: list[ThresholdConstraints] | None = None,
         initial_threshold_values: dict[str, float] | None = None,
+        initial_threshold_running: dict[str, bool] | None = None,
     ) -> tuple[pulp.LpProblem, dict]:
         """Construct the PuLP problem and return (problem, variables dict).
 
@@ -314,45 +362,74 @@ class MilpHigsOptimizer:
         prob = pulp.LpProblem("energy_cost_optimizer", pulp.LpMinimize)
         T = range(n_steps)
 
-        # ── Decision variables ─────────────────────────────────────────
-        c: dict[tuple[str, int], pulp.LpVariable] = {}  # charge energy (kWh)
-        d: dict[tuple[str, int], pulp.LpVariable] = {}  # discharge energy (kWh)
+        # ── Input boundary: kW → W, kWh → Wh, €/kWh → €/Wh ─────────────
+        # Everything inside the model uses W (power) and Wh (energy).
+        # Inputs are converted here once; extract functions convert back.
+        net_load_wh = [nl * _WH for nl in net_load]
+        p_imp = [p / _WH for p in prices]          # €/kWh → €/Wh
+        p_exp = [p / _WH for p in export_prices]   # €/kWh → €/Wh
+
+        active_ev_goals = [g for g in (ev_goals or []) if g.connected]
+        active_threshold_devices = list(threshold_devices or [])
+        initial_vals = initial_threshold_values or {}
+        initial_running = initial_threshold_running or {}
+        ts_list = timestamps or []
+
+        # Per-battery W / Wh limits (power_w × step_h = energy_wh)
+        bat_max_charge_w    = {sc.device_id: sc.max_charge_kw    * _WH for sc in batteries}
+        bat_max_discharge_w = {sc.device_id: sc.max_discharge_kw * _WH for sc in batteries}
+        bat_e_min_wh        = {sc.device_id: sc.capacity_kwh * sc.min_soc_pct / 100.0 * _WH for sc in batteries}
+        bat_e_max_wh        = {sc.device_id: sc.capacity_kwh * sc.max_soc_pct / 100.0 * _WH for sc in batteries}
+        bat_e_init_wh       = {b: e * _WH for b, e in initial_energy.items()}
+
+        # Per-EV W / Wh limits
+        ev_min_w          = {g.asset_id: g.min_charge_kw      * _WH for g in active_ev_goals}
+        ev_max_w          = {g.asset_id: g.max_charge_kw      * _WH for g in active_ev_goals}
+        ev_phase1_req_wh  = {g.asset_id: g.phase1_required_kwh * _WH for g in active_ev_goals}
+
+        # Per-threshold device W
+        thresh_rated_w = {tc.device_id: tc.rated_power_kw * _WH for tc in active_threshold_devices}
+
+        # ── Decision variables (all energy in Wh) ─────────────────────
+        c: dict[tuple[str, int], pulp.LpVariable] = {}  # charge energy (Wh)
+        d: dict[tuple[str, int], pulp.LpVariable] = {}  # discharge energy (Wh)
         u: dict[tuple[str, int], pulp.LpVariable] = {}  # binary: 1 = charging
-        e: dict[tuple[str, int], pulp.LpVariable] = {}  # stored energy (kWh)
+        e: dict[tuple[str, int], pulp.LpVariable] = {}  # stored energy (Wh)
 
         for sc in batteries:
             b = sc.device_id
-            e_min = sc.capacity_kwh * sc.min_soc_pct / 100.0
-            e_max = sc.capacity_kwh * sc.max_soc_pct / 100.0
             for t in T:
                 c[(b, t)] = pulp.LpVariable(f"c__{b}__{t}", lowBound=0)
                 d[(b, t)] = pulp.LpVariable(f"d__{b}__{t}", lowBound=0)
                 u[(b, t)] = pulp.LpVariable(f"u__{b}__{t}", cat="Binary")
-                e[(b, t)] = pulp.LpVariable(f"e__{b}__{t}", lowBound=e_min, upBound=e_max)
+                e[(b, t)] = pulp.LpVariable(f"e__{b}__{t}", lowBound=bat_e_min_wh[b], upBound=bat_e_max_wh[b])
 
-        # ── EV charging variables ──────────────────────────────────────
-        # ev[asset_id, t] — AC energy charged into the EV in step t (kWh).
-        # Upper bound is 0 for steps at or after phase2_start_time (those
-        # slots are already represented as a fixed load in net_load).
-        ev: dict[tuple[str, int], pulp.LpVariable] = {}
-        active_ev_goals = [g for g in (ev_goals or []) if g.connected]
-        ts_list = timestamps or []
+        # ── EV charging variables (energy in Wh) ──────────────────────
+        # ev[asset_id, t]    — AC energy charged into the EV in step t (Wh).
+        # ev_on[asset_id, t] — binary: 1 = charger is active this step.
+        #
+        # Semi-continuous constraint: ev is either 0 (charger off) or in
+        # [ev_min_w * step_h, ev_max_w * step_h] (charger on).
+        # This prevents the optimizer from planning sub-minimum currents that
+        # the charger cannot physically deliver (openWB requires ≥ 6 A).
+        #
+        # Phase-2 slots are excluded: they are fixed loads in net_load already.
+        ev:    dict[tuple[str, int], pulp.LpVariable] = {}
+        ev_on: dict[tuple[str, int], pulp.LpVariable] = {}
         for goal in active_ev_goals:
+            max_wh = ev_max_w[goal.asset_id] * step_h
             for t in T:
                 ts = ts_list[t] if t < len(ts_list) else None
+                key = (goal.asset_id, t)
                 if ts is not None and ts < goal.phase2_start_time:
-                    upbound = goal.max_charge_kw * step_h
+                    ev[key]    = pulp.LpVariable(f"ev__{goal.asset_id}__{t}",    lowBound=0, upBound=max_wh)
+                    ev_on[key] = pulp.LpVariable(f"ev_on__{goal.asset_id}__{t}", cat="Binary")
                 else:
-                    upbound = 0.0
-                ev[(goal.asset_id, t)] = pulp.LpVariable(
-                    f"ev__{goal.asset_id}__{t}", lowBound=0, upBound=upbound
-                )
+                    ev[key] = pulp.LpVariable(f"ev__{goal.asset_id}__{t}", lowBound=0, upBound=0.0)
 
         # ── Threshold device variables ─────────────────────────────────
         # run[device_id, t] — binary: 1 = device is running this step
         # val[device_id, t] — measured value at END of this step
-        active_threshold_devices = list(threshold_devices or [])
-        initial_vals = initial_threshold_values or {}
         run: dict[tuple[str, int], pulp.LpVariable] = {}
         val: dict[tuple[str, int], pulp.LpVariable] = {}
         for tc in active_threshold_devices:
@@ -365,14 +442,14 @@ class MilpHigsOptimizer:
                     upBound=tc.top_threshold,
                 )
 
-        # Grid energy per step: split into import (≥0) and export (≥0)
+        # Grid energy per step: split into import (≥0) and export (≥0) — Wh
         g_imp = {t: pulp.LpVariable(f"g_imp__{t}", lowBound=0) for t in T}
         g_exp = {t: pulp.LpVariable(f"g_exp__{t}", lowBound=0) for t in T}
 
         # ── Objective ─────────────────────────────────────────────────
-        # Grid cost over the horizon
+        # Grid cost: p_imp/p_exp are €/Wh, g_imp/g_exp are Wh → product is €.
         grid_cost = pulp.lpSum(
-            prices[t] * g_imp[t] - export_prices[t] * g_exp[t] for t in T
+            p_imp[t] * g_imp[t] - p_exp[t] * g_exp[t] for t in T
         )
         # Terminal value: energy remaining at end of horizon is worth
         # tv_basis €/kWh — subtract it (it reduces net cost).
@@ -380,17 +457,16 @@ class MilpHigsOptimizer:
         # it should reflect the expected *future market value* of stored energy
         # so the optimizer is incentivised to refill from PV whenever future
         # dispatch prices exceed the effective charging cost.
+        # e is in Wh, tv_basis in €/kWh → coefficient = tv_basis / _WH (€/Wh).
         tv_basis = terminal_value_basis if terminal_value_basis is not None else (battery_cost_basis or {})
         terminal_value = pulp.lpSum(
-            tv_basis.get(sc.device_id, 0.0) * e[(sc.device_id, n_steps - 1)]
+            tv_basis.get(sc.device_id, 0.0) / _WH * e[(sc.device_id, n_steps - 1)]
             for sc in batteries
         )
-        # Degradation cost: each kWh stored costs purchase_price/(cycle_life*capacity)
-        # Applied to η_c × c[b,t] (the kWh actually stored per AC kWh charged).
-        # This prevents the optimizer from cycling cheaply-charged energy out at a
-        # small margin that doesn't cover battery wear.
+        # Degradation cost: each Wh stored costs degradation_cost_per_kwh / _WH per Wh.
+        # Applied to η_c × c[b,t] (the Wh actually stored per AC Wh charged).
         degradation_cost = pulp.lpSum(
-            sc.degradation_cost_per_kwh * sc.charge_efficiency * c[(sc.device_id, t)]
+            sc.degradation_cost_per_kwh / _WH * sc.charge_efficiency * c[(sc.device_id, t)]
             for sc in batteries
             for t in T
         )
@@ -403,18 +479,16 @@ class MilpHigsOptimizer:
         #   +ε × Σ_t  e[priority, t]
         # Minimising this forces the priority battery (lowest degradation cost)
         # to hold as little energy as possible across the horizon, i.e. it
-        # discharges first and fastest.  Swapping which battery fires at step t
-        # vs t+1 changes this integral, so the degeneracy is broken.
+        # discharges first and fastest.
         #
-        # Scale ε = 1e-5:
-        #   • Benefit of one step of early Zendure discharge (at step t of T):
-        #       ε × (0.175/0.95) × (T − t)  ≈  1e-5 × 0.184 × 48  ≈  8.8e-5 €
-        #   • Well above HiGHS gapAbs=1e-9 → tie always resolved.
+        # Scale ε = 1e-5 / _WH = 1e-8 (e now in Wh, not kWh):
+        #   • Benefit of one step of early Zendure discharge:
+        #       1e-8 × (0.175/0.95) × 1000 Wh × 48  ≈  8.8e-5 € — above gapAbs=1e-9.
         #   • Well below price economics (~1e-3 €/step) → no real decisions changed.
         sorted_by_deg = sorted(batteries, key=lambda sc: sc.degradation_cost_per_kwh)
         if len(sorted_by_deg) >= 2:
             pb = sorted_by_deg[0].device_id   # cheapest-to-wear battery
-            priority_tiebreak = 1e-5 * pulp.lpSum(e[(pb, t)] for t in T)
+            priority_tiebreak = 1e-5 / _WH * pulp.lpSum(e[(pb, t)] for t in T)
         else:
             priority_tiebreak = 0
 
@@ -424,14 +498,15 @@ class MilpHigsOptimizer:
         # (e.g. Zendure), prefer allocating that surplus to the constrained
         # batteries first. This keeps flexible batteries available for later
         # grid charging windows.
+        # Scale 1e-4 / _WH = 1e-7 (c now in Wh, not kWh).
         no_grid_ids = [sc.device_id for sc in batteries if sc.no_grid_charge]
         flexible_ids = [sc.device_id for sc in batteries if not sc.no_grid_charge]
         if no_grid_ids and flexible_ids:
-            pv_priority_tiebreak = 1e-4 * pulp.lpSum(
+            pv_priority_tiebreak = 1e-4 / _WH * pulp.lpSum(
                 pulp.lpSum(c[(b, t)] for b in flexible_ids)
                 - pulp.lpSum(c[(b, t)] for b in no_grid_ids)
                 for t in T
-                if net_load[t] < 0.0
+                if net_load_wh[t] < 0.0
             )
         else:
             pv_priority_tiebreak = 0
@@ -446,23 +521,35 @@ class MilpHigsOptimizer:
 
         # ── Constraints ───────────────────────────────────────────────
         for t in T:
-            # Grid energy balance: import − export = net demand
+            # Grid energy balance: import − export = net demand (all Wh)
             prob += (
                 g_imp[t] - g_exp[t]
-                == net_load[t]
+                == net_load_wh[t]
                 + pulp.lpSum(c[(sc.device_id, t)] for sc in batteries)
                 - pulp.lpSum(d[(sc.device_id, t)] for sc in batteries)
                 + pulp.lpSum(ev[(goal.asset_id, t)] for goal in active_ev_goals)
                 + pulp.lpSum(
-                    run[(tc.device_id, t)] * tc.rated_power_kw * step_h
+                    run[(tc.device_id, t)] * thresh_rated_w[tc.device_id] * step_h
                     for tc in active_threshold_devices
                 ),
                 f"grid_balance__{t}",
             )
 
+        # ── EV semi-continuous constraints (min current) ───────────────
+        # ev is either 0 or ≥ ev_min_w * step_h (no sub-minimum charging).
+        for goal in active_ev_goals:
+            min_wh = ev_min_w[goal.asset_id] * step_h
+            max_wh = ev_max_w[goal.asset_id] * step_h
+            for t in T:
+                key = (goal.asset_id, t)
+                if key not in ev_on:
+                    continue
+                prob += ev[key] >= min_wh * ev_on[key], f"ev_min__{goal.asset_id}__{t}"
+                prob += ev[key] <= max_wh * ev_on[key], f"ev_max__{goal.asset_id}__{t}"
+
         # ── EV phase-1 deadline constraints ───────────────────────────
         for goal in active_ev_goals:
-            if goal.phase1_required_kwh <= 0.01:
+            if ev_phase1_req_wh[goal.asset_id] <= 10.0:   # < 10 Wh ≈ negligible
                 continue
             phase1_slots = [
                 t for t in T
@@ -472,31 +559,32 @@ class MilpHigsOptimizer:
                 continue
             prob += (
                 pulp.lpSum(ev[(goal.asset_id, t)] for t in phase1_slots)
-                >= goal.phase1_required_kwh,
+                >= ev_phase1_req_wh[goal.asset_id],
                 f"ev_phase1_deadline__{goal.asset_id}",
             )
 
-        # Tight per-step big-M: max possible grid import = consumption surplus + all charging.
-        # Used for the no_grid_charge constraint below.
+        # Tight per-step big-M (Wh): max possible grid import = consumption surplus
+        # + max charge capacity of all batteries + max charge capacity of all EVs.
+        # Used for the no_grid_charge constraints below.
         big_m = [
-            max(0.0, net_load[t])
-            + sum(s.max_charge_kw * step_h for s in batteries)
-            + sum(g.max_charge_kw * step_h for g in active_ev_goals)
+            max(0.0, net_load_wh[t])
+            + sum(bat_max_charge_w[s.device_id] * step_h for s in batteries)
+            + sum(ev_max_w[g.asset_id] * step_h for g in active_ev_goals)
             for t in T
         ]
 
         for sc in batteries:
             b = sc.device_id
-            c_max_kwh = sc.max_charge_kw * step_h
-            d_max_kwh = sc.max_discharge_kw * step_h
+            c_max_wh = bat_max_charge_w[b] * step_h
+            d_max_wh = bat_max_discharge_w[b] * step_h
             eta_c = sc.charge_efficiency
             eta_d = sc.discharge_efficiency
-            e_init = initial_energy[b]
+            e_init_wh = bat_e_init_wh[b]
 
             for t in T:
                 # Charge only when u=1; discharge only when u=0
-                prob += c[(b, t)] <= c_max_kwh * u[(b, t)], f"c_max__{b}__{t}"
-                prob += d[(b, t)] <= d_max_kwh * (1 - u[(b, t)]), f"d_max__{b}__{t}"
+                prob += c[(b, t)] <= c_max_wh * u[(b, t)], f"c_max__{b}__{t}"
+                prob += d[(b, t)] <= d_max_wh * (1 - u[(b, t)]), f"d_max__{b}__{t}"
                 # PV-only charging: when this battery is charging (u=1), grid import must
                 # be zero.  Via the energy balance this automatically caps total battery
                 # charging to the available PV surplus and correctly accounts for all other
@@ -506,12 +594,24 @@ class MilpHigsOptimizer:
                 if sc.no_grid_charge:
                     prob += g_imp[t] <= big_m[t] * (1 - u[(b, t)]), f"no_grid_charge__{b}__{t}"
 
-                # SoC dynamics
-                e_prev = e_init if t == 0 else e[(b, t - 1)]
+                # SoC dynamics (all in Wh; efficiency η is dimensionless — unchanged)
+                e_prev = e_init_wh if t == 0 else e[(b, t - 1)]
                 prob += (
                     e[(b, t)] == e_prev + eta_c * c[(b, t)] - d[(b, t)] / eta_d,
                     f"soc__{b}__{t}",
                 )
+
+        # ── EV PV-only constraint ──────────────────────────────────────
+        # For pv_only goals (no schedule): EV may not increase grid import.
+        # Same big-M approach as battery no_grid_charge.
+        for goal in active_ev_goals:
+            if not goal.pv_only:
+                continue
+            for t in T:
+                key = (goal.asset_id, t)
+                if key not in ev_on:
+                    continue
+                prob += g_imp[t] <= big_m[t] * (1 - ev_on[key]), f"no_grid_charge_ev__{goal.asset_id}__{t}"
 
         # ── Threshold device value dynamics ───────────────────────────
         # v[d, t] = v[d, t-1]  ± drift × dt  ∓ (active + drift) × dt × run[d, t]
@@ -543,7 +643,43 @@ class MilpHigsOptimizer:
                         f"val_dynamics__{td_id}__{t}",
                     )
 
-        variables = {"c": c, "d": d, "u": u, "e": e, "g_imp": g_imp, "g_exp": g_exp, "ev": ev, "run": run, "val": val}
+        # ── Threshold min-runtime / min-offtime ────────────────────────
+        # Compressor protection at the plan level (mirrors the live
+        # ``ThresholdControlContributor`` safeguards): a start at step t
+        # forces run=1 for ceil(min_runtime_h / step_h) steps, a stop
+        # forces run=0 for ceil(min_offtime_h / step_h) steps.
+        #
+        # Standard min up/down-time formulation on the run[] binaries:
+        #   start at t (run[t] − run[t−1] = 1) ⇒ run[t+k] ≥ 1  for k < up
+        #   stop  at t (run[t−1] − run[t] = 1) ⇒ run[t+k] ≤ 0  for k < down
+        # The t=0 transition uses the device's live on/off state, so a
+        # plan-start blip is caught too. How long the device has already
+        # been on/off is unknown here; the contributor covers that window.
+        for tc in active_threshold_devices:
+            td_id = tc.device_id
+            up_steps = math.ceil(round(tc.min_runtime_h / step_h, 6))
+            down_steps = math.ceil(round(tc.min_offtime_h / step_h, 6))
+            if up_steps <= 1 and down_steps <= 1:
+                continue
+            run_init = 1.0 if initial_running.get(td_id) else 0.0
+            for t in T:
+                r_prev = run_init if t == 0 else run[(td_id, t - 1)]
+                for k in range(1, up_steps):
+                    if t + k >= n_steps:
+                        break
+                    prob += (
+                        run[(td_id, t + k)] >= run[(td_id, t)] - r_prev,
+                        f"min_runtime__{td_id}__{t}__{k}",
+                    )
+                for k in range(1, down_steps):
+                    if t + k >= n_steps:
+                        break
+                    prob += (
+                        run[(td_id, t + k)] <= 1 - r_prev + run[(td_id, t)],
+                        f"min_offtime__{td_id}__{t}__{k}",
+                    )
+
+        variables = {"c": c, "d": d, "u": u, "e": e, "g_imp": g_imp, "g_exp": g_exp, "ev": ev, "ev_on": ev_on, "run": run, "val": val}
         return prob, variables
 
     # ------------------------------------------------------------------
@@ -682,19 +818,65 @@ class MilpHigsOptimizer:
                     measured,
                     tc.unit,
                 )
+            # Clamp into the allowed band: an out-of-bounds live value (sensor
+            # overshoot past a threshold) would otherwise make the val[] bounds
+            # infeasible and collapse the entire plan. The emergency override
+            # in the contributor handles the real out-of-bounds correction.
+            if not (tc.bottom_threshold <= measured <= tc.top_threshold):
+                clamped = min(max(measured, tc.bottom_threshold), tc.top_threshold)
+                _log.warning(
+                    "MilpHigsOptimizer: measured value %.2f %s for %r is outside"
+                    " [%.2f, %.2f] — clamping to %.2f for planning",
+                    measured,
+                    tc.unit,
+                    tc.device_id,
+                    tc.bottom_threshold,
+                    tc.top_threshold,
+                    clamped,
+                )
+                measured = clamped
             result[tc.device_id] = measured
         return result
 
     @staticmethod
-    def _get_solver() -> pulp.LpSolver:
-        """Return the HiGHS solver; fall back to CBC if unavailable."""
+    def _initial_threshold_running(
+        threshold_devices: list[ThresholdConstraints],
+        context: OptimizationContext,
+    ) -> dict[str, bool]:
+        """Return whether each threshold device is currently running.
+
+        Uses the same >50%-of-rated-power heuristic as the control
+        contributor. Needed so the min-runtime/offtime constraints see the
+        correct on/off state at the plan boundary (step 0).
+        """
+        result: dict[str, bool] = {}
+        for tc in threshold_devices:
+            state = context.device_states.get(tc.device_id)
+            result[tc.device_id] = (
+                state is not None
+                and state.power_w is not None
+                and state.power_w > tc.rated_power_kw * 500.0
+            )
+        return result
+
+    def _get_solver(self) -> pulp.LpSolver:
+        """Return the HiGHS solver; fall back to CBC if unavailable.
+
+        Both the MIP gap and the time limit follow ``precision`` (see class
+        docstring). The time limit is the safety net: pulp maps a HiGHS
+        time-limit stop to LpStatusOptimal with the best incumbent, so the
+        plan degrades to "best found in N seconds" instead of going empty.
+        The limit is only omitted at precision 1.0 (legacy exact mode).
+        """
+        p = self._precision
+        gap = 10.0 ** -(2.0 + 7.0 * p)
+        time_limit = None if p >= 1.0 else 5.0 + 55.0 * p
         if "HiGHS" in pulp.listSolvers(onlyAvailable=True):
-            # gapAbs=1e-9 ensures the solver resolves degenerate battery-dispatch
-            # tie-breaks (preference differences ~1e-4 €) that would otherwise be
-            # swallowed by the default absolute MIP gap tolerance (~5e-4 €).
-            return pulp.HiGHS(msg=False, gapAbs=1e-9, gapRel=1e-9)
+            return pulp.HiGHS(msg=False, gapAbs=gap, gapRel=gap, timeLimit=time_limit)
         _log.warning("MilpHigsOptimizer: HiGHS not available — falling back to CBC")
-        return pulp.PULP_CBC_CMD(msg=False)
+        # No timeLimit for CBC: pulp maps its time-limit stop to "Not Solved",
+        # which the caller would turn into an empty plan.
+        return pulp.PULP_CBC_CMD(msg=False, gapRel=gap)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -725,8 +907,8 @@ def _extract_threshold_intents(
             intents.append(ControlIntent(
                 device_id=d,
                 timestep=ts,
-                mode="run" if is_running else "standby",
-                planned_kw=round(tc.rated_power_kw, 4) if is_running else 0.0,
+                power_kw=round(tc.rated_power_kw, 4) if is_running else 0.0,
+                grid_allowed=True,
                 # stored_energy_kwh repurposed here to carry the predicted
                 # measured value at end of step (°C, %RH, etc.) for UI display.
                 stored_energy_kwh=round(predicted_value, 4) if predicted_value is not None else None,
@@ -764,11 +946,18 @@ def _extract_ev_intents(
     """Convert EV solver values into ``ControlIntent`` objects (phase-1 only).
 
     Phase-2 intents (mandatory top-off) are appended by the caller.
-    Every planned step uses charge_from_grid (instant charging) so openWB
-    delivers the planned rate.  Unplanned steps are left to the contributor's
-    PV-charging fallback.
+
+    ``grid_allowed`` is derived from the solved ``g_imp`` variable:
+    - pv_only goals: always False (constraint already prevents grid import)
+    - scheduled goals: False when g_imp ≈ 0 (EV charged from PV surplus),
+      True when grid import was positive (EV drew from grid)
+
+    Execution maps these to: Instant Charging when grid_allowed=True (scheduled),
+    or PV Charging sentinel for pv_only goals (plan shows estimate, openWB tracks
+    real surplus).  Unplanned steps fall through to PV mode in EvChargerContributor.
     """
     ev = variables.get("ev", {})
+    g_imp = variables.get("g_imp", {})
     intents: list[ControlIntent] = []
 
     for goal in ev_goals:
@@ -777,22 +966,21 @@ def _extract_ev_intents(
         for t, ts in enumerate(timestamps):
             if ts >= goal.phase2_start_time:
                 continue  # phase2 intents added separately
-            ev_kwh = pulp.value(ev.get((goal.asset_id, t))) or 0.0
+            # ev variables are in Wh — convert to kWh for ControlIntent
+            ev_wh = pulp.value(ev.get((goal.asset_id, t))) or 0.0
+            ev_kwh = ev_wh / _WH
             if ev_kwh > 0.01:
-                # Planned charging always uses instant (grid) mode.
-                # openWB's PV mode only charges at the net grid surplus, which is
-                # unreliable when the MILP also dispatches battery storage from the
-                # same PV. Instant mode delivers the planned rate regardless.
-                # Unplanned steps fall through to PV mode in EvChargerContributor.
-                mode = "charge_from_grid"
-                policy = "grid_allowed"
+                if goal.pv_only:
+                    grid_allowed = False
+                else:
+                    g_imp_wh = pulp.value(g_imp.get(t)) or 0.0
+                    grid_allowed = g_imp_wh > 10.0   # > ~10 Wh ≈ 40 W average
                 intents.append(ControlIntent(
                     device_id=goal.device_id,
                     timestep=ts,
-                    mode=mode,
-                    planned_kw=round(ev_kwh / step_h, 4),
+                    power_kw=round(ev_wh / step_h / _WH, 4),   # Wh/h / 1000 = kW
+                    grid_allowed=grid_allowed,
                     reserved_kwh=round(ev_kwh, 4),
-                    charge_policy=policy,
                 ))
     return intents
 
@@ -813,67 +1001,52 @@ def _extract_intents(
     for sc in batteries:
         b = sc.device_id
         for t, ts in enumerate(timestamps):
-            c_kwh = pulp.value(c[(b, t)]) or 0.0
-            d_kwh = pulp.value(d[(b, t)]) or 0.0
-            e_kwh = pulp.value(e[(b, t)]) or 0.0
-            # Convert from kWh per step back to average W
-            c_w = c_kwh / step_h * 1000.0
-            d_w = d_kwh / step_h * 1000.0
+            # All LP energy variables are in Wh — convert to kW/kWh for ControlIntent.
+            c_wh = pulp.value(c[(b, t)]) or 0.0
+            d_wh = pulp.value(d[(b, t)]) or 0.0
+            e_wh = pulp.value(e[(b, t)]) or 0.0
+            # Wh / h = W (average power over the step)
+            c_w = c_wh / step_h
+            d_w = d_wh / step_h
+            c_kwh = c_wh / _WH
+            d_kwh = d_wh / _WH
+            e_kwh = e_wh / _WH
 
             if c_w > 1.0:
-                # charge_from_pv: battery is constrained to PV-only sources.
-                # charge_from_grid: battery may also draw from grid import.
-                if sc.no_grid_charge:
-                    mode = "charge_from_pv"
-                    charge_policy = "pv_only"   # informational
-                else:
-                    mode = "charge_from_grid"
-                    charge_policy = "grid_allowed"  # informational
                 intents.append(
                     ControlIntent(
                         device_id=b,
                         timestep=ts,
-                        mode=mode,
-                        min_power_w=0.0,
-                        max_power_w=round(c_w, 1),
-                        planned_kw=round(c_w / 1000.0, 4),
+                        power_kw=round(c_w / _WH, 4),
+                        grid_allowed=not sc.no_grid_charge,
                         reserved_kwh=round(c_kwh, 4),
                         stored_energy_kwh=round(e_kwh, 4),
-                        charge_policy=charge_policy,
                     )
                 )
             elif d_w > 1.0:
-                # grid_feed_in when the site is net-exporting this step;
-                # otherwise discharge (reduce import, no export crossing).
-                g_exp_kwh = pulp.value(g_exp[t]) or 0.0
-                is_feed_in = g_exp_kwh > 0.001  # ~1 W average threshold
-                mode = "grid_feed_in" if is_feed_in else "discharge"
+                g_exp_wh = pulp.value(g_exp[t]) or 0.0
+                is_feed_in = g_exp_wh > 1.0   # > 1 Wh per step ≈ 4 W average
                 intents.append(
                     ControlIntent(
                         device_id=b,
                         timestep=ts,
-                        mode=mode,
-                        zone_id=None,   # site-level; zone assignment is future
-                        min_power_w=round(-d_w, 1),
-                        max_power_w=0.0,
-                        planned_kw=round(-d_w / 1000.0, 4),
+                        power_kw=round(-d_w / _WH, 4),
+                        grid_allowed=False,
+                        export_allowed=is_feed_in,
                         reserved_kwh=round(-d_kwh, 4),
                         stored_energy_kwh=round(e_kwh, 4),
                     )
                 )
             else:
-                # No optimizer action planned: default resting mode is
-                # charge_from_pv — absorb whatever PV surplus arrives.
-                # planned_kw=0 signals "nothing reserved; follow physics."
+                # Idle: absorb whatever PV surplus arrives (power_kw=0, grid_allowed=False).
                 intents.append(
                     ControlIntent(
                         device_id=b,
                         timestep=ts,
-                        mode="charge_from_pv",
-                        planned_kw=0.0,
+                        power_kw=0.0,
+                        grid_allowed=False,
                         reserved_kwh=0.0,
                         stored_energy_kwh=round(e_kwh, 4),
-                        charge_policy="pv_only",  # informational
                     )
                 )
 

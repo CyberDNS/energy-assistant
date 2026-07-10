@@ -77,6 +77,7 @@ class EvChargingAsset:
     label: str
     capacity_kwh: float
     max_charge_kw: float
+    min_charge_kw: float = 1.38   # 6 A × 230 V single-phase; override per charger
     charge_limit_soc_pct: float = 100.0
     charge_curve: list[ChargeCurvePoint] = field(default_factory=list)
     schedule: list[EvScheduleEntry] = field(default_factory=list)
@@ -95,6 +96,7 @@ class EvChargingGoal:
     device_id: str
     capacity_kwh: float
     max_charge_kw: float
+    min_charge_kw: float
     charge_limit_soc_pct: float
     target_soc_pct: float
     target_by: datetime          # UTC
@@ -106,6 +108,8 @@ class EvChargingGoal:
     phase2_required_kwh: float   # charge_limit → target_soc, wall energy
     phase2_duration_h: float     # time at max_charge_kw to complete phase2
     phase2_start_time: datetime  # = target_by − phase2_duration_h, UTC
+    # True when no schedule is active: MILP plans PV-only absorption; execution uses PV sentinel
+    pv_only: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -156,12 +160,14 @@ def build_goal_from_parts(
     device_id: str,
     capacity_kwh: float,
     max_charge_kw: float,
+    min_charge_kw: float,
     charge_limit_soc_pct: float,
     target_soc_pct: float,
     target_by: datetime,
     charge_curve: list[ChargeCurvePoint],
     current_soc_pct: float,
     connected: bool,
+    pv_only: bool = False,
 ) -> EvChargingGoal:
     """Construct an ``EvChargingGoal`` with pre-computed phase fields."""
     effective_limit = min(charge_limit_soc_pct, target_soc_pct)
@@ -180,6 +186,7 @@ def build_goal_from_parts(
         device_id=device_id,
         capacity_kwh=capacity_kwh,
         max_charge_kw=max_charge_kw,
+        min_charge_kw=min_charge_kw,
         charge_limit_soc_pct=effective_limit,
         target_soc_pct=target_soc_pct,
         target_by=target_by,
@@ -190,6 +197,7 @@ def build_goal_from_parts(
         phase2_required_kwh=phase2_kwh,
         phase2_duration_h=phase2_h,
         phase2_start_time=phase2_start,
+        pv_only=pv_only,
     )
 
 
@@ -258,11 +266,15 @@ class EvChargerContributor:
         if goal is None:
             return _PV_SENTINEL_W
 
-        # Active goal, optimizer issued charge_from_grid → Instant Charging
-        if intent is not None and intent.mode == "charge_from_grid":
-            return self._asset.max_charge_kw * 1000.0
+        # Optimizer planned a charging step
+        if intent is not None and intent.power_kw > 0:
+            if goal.pv_only:
+                # No-schedule goal: plan shows estimated kW but openWB tracks real surplus
+                return _PV_SENTINEL_W
+            planned = intent.power_kw
+            return max(self._asset.min_charge_kw, min(self._asset.max_charge_kw, planned)) * 1000.0
 
-        # charge_from_pv, idle, or no intent → PV Charging
+        # Idle or no intent → PV Charging
         return _PV_SENTINEL_W
 
     def charge_price_eur_per_kwh(
