@@ -106,7 +106,7 @@ class ThresholdControlContributor:
                     self._mark_stopped(now, is_currently_running)
                     return 0.0
 
-        wants_to_run = intent is not None and intent.mode == "run"
+        wants_to_run = intent is not None and intent.power_kw > 0.001
 
         # ── 2. Compressor min-runtime ─────────────────────────────────
         if (

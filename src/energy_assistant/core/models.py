@@ -199,55 +199,35 @@ class ForecastPoint(BaseModel):
 class ControlIntent(BaseModel):
     """A single timestep intent within an EnergyPlan.
 
-    Describes *what* a device should do and within *what* power bounds.
-    The fast control loop resolves these bounds against live measurements.
+    Two orthogonal fields fully describe what a device should do:
 
-    Canonical modes (emitted by the MILP optimizer)
-    ------------------------------------------------
-    ``charge_from_pv``    Absorb PV surplus only; never increase grid import.
-                          ``planned_kw`` is the optimizer's forecast allocation
-                          for this battery (0 = absorb whatever arrives).
-    ``charge_from_grid``  Charge at ``planned_kw``; grid import is allowed.
-    ``discharge``         Reduce import on the ``zone_id`` meter up to
-                          ``planned_kw``.  No export permitted.
-    ``grid_feed_in``      Actively push stored energy past the site boundary
-                          into the grid.  Zone context is irrelevant.
-
-    Deprecated aliases (still accepted by the controller for backward-compat)
-    --------------------------------------------------------------------------
-    ``idle``       → treated as ``charge_from_pv`` at 0 planned kW.
-    ``grid_fill``  → treated as ``charge_from_grid`` (or ``charge_from_pv``
-                      when ``charge_policy == "pv_only"`` or device has
-                      ``no_grid_charge``).
+    ``power_kw``       Signed planned power (kW).
+                       Positive  = charge / consume (battery charging, EV, threshold device on).
+                       Negative  = discharge / produce (battery discharging).
+                       Zero      = idle; for storage this means "absorb whatever PV surplus
+                                   arrives" rather than "do nothing".
+    ``grid_allowed``   True  → grid import is permitted to meet ``power_kw``.
+                       False → charging is capped to live PV surplus only.
+    ``export_allowed`` True  → device may actively push power past the site boundary
+                               into the grid (battery feed-in).
+                       False → discharge is capped to live site import (no export).
     """
 
     device_id: str
     timestep: datetime
-    mode: str
+    power_kw: float
+    """Signed planned power (kW). + = charge/consume, − = discharge/produce."""
+
+    grid_allowed: bool = True
+    """False → PV surplus only; no grid import for charging."""
+
+    export_allowed: bool = False
+    """True → may actively export past the site boundary into the grid."""
+
     zone_id: str | None = None
-    """Zone / meter context for ``discharge`` intents.
-
-    Identifies which sub-meter the optimizer targets when requesting discharge.
-    ``None`` in ``charge_from_pv``, ``charge_from_grid``, and ``grid_feed_in``
-    intents (zone is irrelevant for those modes).
-    """
-    min_power_w: float | None = None
-    max_power_w: float | None = None
-    planned_kw: float | None = None
-    """Average power the optimizer planned for this timestep (kW).
-
-    Sign convention mirrors the platform: positive = charging/consuming,
-    negative = discharging/generating.  Populated by the MILP optimizer;
-    ``None`` for intents produced outside the MILP (e.g. rule-based fallbacks).
-    """
     reserved_kwh: float | None = None
-    """Energy budget reserved by the optimizer for this timestep (kWh).
+    """Energy budget reserved by the optimizer for this timestep (kWh)."""
 
-    Positive = charge budget allocated; negative = discharge budget allocated.
-    The fast control loop uses this to track how much of the planned energy
-    has actually been delivered so it can decide whether to allow PV overflow
-    on top of a partially-filled slot.
-    """
     stored_energy_kwh: float | None = None
     """Stored energy in the battery at the END of this timestep (kWh).
 
@@ -255,33 +235,19 @@ class ControlIntent(BaseModel):
     UI to display the SoC trajectory chart.
     """
 
-    charge_policy: str = "auto"
-    """Charging source policy — informational / backward-compat for legacy modes.
 
-    When ``mode`` is one of the canonical values (``charge_from_pv``,
-    ``charge_from_grid``, ``discharge``, ``grid_feed_in``) the mode itself fully
-    encodes the charge source and this field is only kept for observability.
+def intent_display_mode(intent: ControlIntent, is_threshold: bool = False) -> str:
+    """Derive a human-readable mode string from an intent's numeric fields.
 
-    For legacy ``grid_fill`` / ``idle`` intents the controller still reads this:
-    - ``auto``          → resolve from device capability (``no_grid_charge`` flag).
-    - ``pv_only``       → charge only from live PV surplus.
-    - ``grid_allowed``  → allow grid import to meet the planned power.
-    - ``grid_only``     → grid source explicit (best-effort; source separation
-                          is difficult to enforce in AC-coupled systems).
+    Used by the API layer to produce backward-compatible JSON for the frontend.
     """
-
-    discharge_policy: str = "meet_load_only"
-    """Discharge/export policy — informational / backward-compat for legacy modes.
-
-    When ``mode`` is one of the canonical values the mode itself encodes export
-    intent (``discharge`` = no export; ``grid_feed_in`` = export allowed).
-
-    For legacy ``discharge`` intents the controller still reads this:
-    - ``meet_load_only``             → cap to live import demand (no export).
-    - ``forbid_export``              → identical to ``meet_load_only``.
-    - ``allow_export_if_profitable`` → export when battery basis ≤ export price.
-    - ``auto``                       → treated as ``meet_load_only`` for safety.
-    """
+    if is_threshold:
+        return "run" if intent.power_kw > 0.001 else "standby"
+    if intent.power_kw > 0.001:
+        return "charge_from_grid" if intent.grid_allowed else "charge_from_pv"
+    if intent.power_kw < -0.001:
+        return "grid_feed_in" if intent.export_allowed else "discharge"
+    return "idle"
 
 
 class EnergyPlan(BaseModel):

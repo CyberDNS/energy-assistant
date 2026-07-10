@@ -25,11 +25,9 @@ class StorageSliceInput:
     max_charge_w: float
     max_discharge_w: float
     no_grid_charge: bool
-    mode: str
+    export_allowed: bool
     planned_w: float
     reserved_kwh: float
-    charge_policy: str
-    discharge_policy: str
     prev_setpoint_w: float = 0.0
 
 
@@ -88,10 +86,11 @@ def optimize_storage_slice(
         prob += d[did] <= inp.max_discharge_w * (1 - u[did]), f"discharge_mode__{did}"
 
         # Respect strict PV-only charging requests from the current plan slice.
-        if inp.charge_policy == "pv_only" or inp.no_grid_charge or inp.mode == "charge_from_pv":
+        if inp.no_grid_charge:
             prob += c[did] <= surplus_w, f"pv_only__{did}"
 
-        if inp.mode in ("idle", "no_plan", "charge_from_pv") and inp.charge_policy != "grid_only":
+        # Idle (no planned charge or discharge) → absorb PV surplus opportunistically.
+        if abs(inp.planned_w) <= 1.0:
             idle_absorb_ids.append(did)
 
         # Track current plan power as a soft target.
@@ -107,38 +106,27 @@ def optimize_storage_slice(
             f"setpoint_slew__{did}",
         )
 
-        # Make planned charging sticky so short control ticks do not keep deferring it.
-        if (
-            inp.mode in ("grid_fill", "charge_from_grid")
-            and inp.planned_w > 1.0
-            and inp.charge_policy != "pv_only"
-            and not inp.no_grid_charge
-        ):
+        # Make planned grid charging sticky so short control ticks do not keep deferring it.
+        if not inp.no_grid_charge and inp.planned_w > 1.0:
             min_follow_w = min(inp.max_charge_w, 0.6 * inp.planned_w)
             prob += c[did] >= min_follow_w, f"grid_fill_anchor__{did}"
 
-        # If the long-term plan says discharge (meet-load mode) but we
-        # currently export PV, absorb that surplus instead of forcing a rigid
-        # discharge lock. For explicit grid_feed_in mode we keep export intent.
-        if inp.mode == "discharge" and surplus_w > 1.0 and inp.charge_policy != "grid_only":
+        # If the long-term plan says discharge but we currently export PV,
+        # absorb that surplus instead of forcing a rigid discharge lock.
+        # For explicit export_allowed mode we keep the export intent.
+        if inp.planned_w < -1.0 and surplus_w > 1.0 and not inp.export_allowed:
             pv_absorb_w = min(inp.max_charge_w, surplus_w)
             prob += c[did] >= pv_absorb_w, f"discharge_pv_absorb__{did}"
 
-        # In charge_from_grid / grid_fill mode with PV surplus, absorb that
-        # surplus first (up to planned_w) before drawing from the grid.
+        # In grid-charging mode with PV surplus, absorb that surplus first
+        # (up to planned_w) before drawing from the grid.
         # Without this, the optimizer prefers exporting PV (earns exp_p revenue)
         # while only meeting the 60 % anchor floor, leaving PV on the table.
-        if (
-            inp.mode in ("grid_fill", "charge_from_grid")
-            and surplus_w > 1.0
-            and inp.planned_w > 1.0
-            and inp.charge_policy != "pv_only"
-            and not inp.no_grid_charge
-        ):
+        if not inp.no_grid_charge and surplus_w > 1.0 and inp.planned_w > 1.0:
             pv_absorb_w = min(inp.max_charge_w, surplus_w)
             prob += c[did] >= pv_absorb_w, f"charge_grid_pv_absorb__{did}"
 
-    # Preserve legacy idle behavior: absorb currently-exported PV surplus.
+    # Preserve idle behavior: absorb currently-exported PV surplus.
     # This keeps idle/auto intuitive at runtime (exporting while battery idles
     # would otherwise look like a broken mode decision).
     if idle_absorb_ids and surplus_w > 1.0:
@@ -163,41 +151,32 @@ def optimize_storage_slice(
     # but should not force additional export unless explicitly profitable.
     allow_export = False
     for inp in inputs:
-        # grid_feed_in: long-term optimizer already determined export is
-        # profitable; trust that decision without re-checking cost basis.
-        if inp.mode == "grid_feed_in":
+        if inp.export_allowed:
             allow_export = True
             break
-        if inp.discharge_policy != "allow_export_if_profitable":
-            continue
         basis = cost_basis_eur_per_kwh.get(inp.device_id)
         if basis is not None and basis <= exp_p:
             allow_export = True
             break
 
     if not allow_export:
-        # Keep a small positive import buffer in meet_load_only mode so the
-        # controller does not chase exactly 0 W import and oscillate.
-        all_meet_load_only = all(
-            inp.discharge_policy in ("meet_load_only", "forbid_export", "auto")
-            and inp.mode != "grid_feed_in"
-            for inp in inputs
-        )
+        # Keep a small positive import buffer so the controller does not chase
+        # exactly 0 W import and oscillate.
+        all_no_export = all(not inp.export_allowed for inp in inputs)
         near_zero_import = abs(grid_power_w) <= 200.0
-        import_buffer_w = 120.0 if (all_meet_load_only and near_zero_import) else 0.0
+        import_buffer_w = 120.0 if (all_no_export and near_zero_import) else 0.0
         prob += (
             pulp.lpSum(d[did] for did in d)
             <= max(0.0, grid_power_w + import_buffer_w) + pulp.lpSum(c[did] for did in c),
             "no_export_from_battery",
         )
 
-    # In meet_load_only discharge mode, strongly discourage under-delivery of
-    # discharge relative to currently controllable import demand.
+    # In discharge mode without export rights, strongly discourage under-delivery
+    # relative to currently controllable import demand.
     meet_load_discharge_ids = [
         inp.device_id
         for inp in inputs
-        if inp.mode in ("discharge",)
-        and inp.discharge_policy in ("meet_load_only", "forbid_export", "auto")
+        if inp.planned_w < -1.0 and not inp.export_allowed
     ]
     unmet_import_w = None
     if meet_load_discharge_ids:
@@ -218,22 +197,23 @@ def optimize_storage_slice(
     slew_cost = 0.0
     for inp in inputs:
         did = inp.device_id
-        if inp.mode in ("discharge", "grid_feed_in"):
+        is_discharge = inp.planned_w < -1.0
+        if is_discharge:
             track_cost += 0.05 * (dev_pos[did] + dev_neg[did]) / 1000.0
             slew_cost += 0.015 * (slew_pos[did] + slew_neg[did]) / 1000.0
         else:
             track_cost += 0.2 * (dev_pos[did] + dev_neg[did]) / 1000.0
             slew_cost += 0.08 * (slew_pos[did] + slew_neg[did]) / 1000.0
 
-        if inp.mode in ("discharge", "grid_feed_in"):
+        if is_discharge:
             # In discharge/feed_in mode, discourage grid charging. If PV surplus
             # exists, relax this and add a small PV-capture credit.
             penalty = 0.25 if surplus_w < 1.0 else 0.0
             mode_cost += penalty * c[did] / 1000.0
             if surplus_w > 1.0:
                 mode_cost += -0.05 * c[did] / 1000.0
-        elif inp.mode in ("grid_fill", "charge_from_grid"):
-            # In charging mode, discourage discharging against plan intent.
+        elif inp.planned_w > 1.0 and not inp.no_grid_charge:
+            # In grid-charging mode, discourage discharging against plan intent.
             mode_cost += 0.2 * d[did] / 1000.0
 
     unmet_cost = 0.0 if unmet_import_w is None else 0.6 * unmet_import_w / 1000.0

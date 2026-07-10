@@ -57,9 +57,8 @@ async def test_pv_only_charge_is_capped_to_live_surplus() -> None:
                 ControlIntent(
                     device_id="bat",
                     timestep=now,
-                    mode="charge_from_pv",
-                    min_power_w=0.0,
-                    max_power_w=3000.0,
+                    power_kw=3.0,
+                    grid_allowed=False,
                 )
             ]
         )
@@ -98,10 +97,7 @@ async def test_discharge_meet_load_only_caps_to_import() -> None:
                 ControlIntent(
                     device_id="bat",
                     timestep=now,
-                    mode="discharge",
-                    min_power_w=-3000.0,
-                    max_power_w=0.0,
-                    discharge_policy="meet_load_only",
+                    power_kw=-3.0,
                 )
             ]
         )
@@ -140,10 +136,8 @@ async def test_discharge_export_allowed_when_profitable() -> None:
                 ControlIntent(
                     device_id="bat",
                     timestep=now,
-                    mode="discharge",
-                    min_power_w=-3000.0,
-                    max_power_w=0.0,
-                    discharge_policy="allow_export_if_profitable",
+                    power_kw=-3.0,
+                    export_allowed=True,
                 )
             ]
         )
@@ -181,11 +175,7 @@ async def test_discharge_mode_may_absorb_pv_surplus() -> None:
                 ControlIntent(
                     device_id="bat",
                     timestep=now,
-                    mode="discharge",
-                    min_power_w=-3000.0,
-                    max_power_w=0.0,
-                    planned_kw=-3.0,
-                    discharge_policy="meet_load_only",
+                    power_kw=-3.0,
                 )
             ]
         )
@@ -224,10 +214,8 @@ async def test_idle_auto_absorbs_pv_surplus() -> None:
                 ControlIntent(
                     device_id="bat",
                     timestep=now,
-                    mode="charge_from_pv",
-                    min_power_w=0.0,
-                    max_power_w=0.0,
-                    charge_policy="auto",
+                    power_kw=0.0,
+                    grid_allowed=False,
                 )
             ]
         )
@@ -265,10 +253,7 @@ def test_describe_setpoints_discharge_with_zero_dt() -> None:
                 ControlIntent(
                     device_id="bat",
                     timestep=now,
-                    mode="discharge",
-                    min_power_w=-3000.0,
-                    max_power_w=0.0,
-                    discharge_policy="meet_load_only",
+                    power_kw=-3.0,
                 )
             ]
         )
@@ -302,10 +287,7 @@ def test_describe_setpoints_uses_default_zone_grid_reference() -> None:
                 ControlIntent(
                     device_id="bat",
                     timestep=now,
-                    mode="discharge",
-                    min_power_w=-3000.0,
-                    max_power_w=0.0,
-                    discharge_policy="meet_load_only",
+                    power_kw=-3.0,
                 )
             ]
         )
@@ -340,10 +322,7 @@ def test_describe_setpoints_uses_existing_discharge_headroom() -> None:
                 ControlIntent(
                     device_id="bat",
                     timestep=now,
-                    mode="discharge",
-                    min_power_w=-3000.0,
-                    max_power_w=0.0,
-                    discharge_policy="meet_load_only",
+                    power_kw=-3.0,
                 )
             ]
         )
@@ -377,11 +356,7 @@ def test_describe_setpoints_discharge_scales_with_import() -> None:
                 ControlIntent(
                     device_id="bat",
                     timestep=now,
-                    mode="discharge",
-                    min_power_w=-3000.0,
-                    max_power_w=0.0,
-                    planned_kw=-0.2,
-                    discharge_policy="meet_load_only",
+                    power_kw=-3.0,
                 )
             ]
         )
@@ -426,10 +401,7 @@ async def test_discharge_does_not_jojo_to_zero_on_next_tick() -> None:
                 ControlIntent(
                     device_id="bat",
                     timestep=now,
-                    mode="discharge",
-                    min_power_w=-3000.0,
-                    max_power_w=0.0,
-                    discharge_policy="meet_load_only",
+                    power_kw=-3.0,
                 )
             ]
         )
@@ -480,10 +452,8 @@ async def test_charge_from_grid_follows_planned_power() -> None:
                 ControlIntent(
                     device_id="bat",
                     timestep=now,
-                    mode="charge_from_grid",
-                    min_power_w=0.0,
-                    max_power_w=2000.0,
-                    planned_kw=2.0,
+                    power_kw=2.0,
+                    grid_allowed=True,
                 )
             ]
         )
@@ -523,10 +493,8 @@ async def test_grid_feed_in_allows_export() -> None:
                 ControlIntent(
                     device_id="bat",
                     timestep=now,
-                    mode="grid_feed_in",
-                    min_power_w=-2000.0,
-                    max_power_w=0.0,
-                    planned_kw=-2.0,
+                    power_kw=-2.0,
+                    export_allowed=True,
                 )
             ]
         )

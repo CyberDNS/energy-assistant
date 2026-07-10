@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from energy_assistant.assets.loader import parse_threshold_assets
 from energy_assistant.assets.threshold import ThresholdControlContributor
 from energy_assistant.core.control import ControlIntent, LiveSituation
 from energy_assistant.core.models import (
@@ -33,6 +34,8 @@ def _cooler(
     rated_power_kw: float = 0.2,
     active_rate: float = 2.0,
     drift_rate: float = 1.0,
+    min_runtime_h: float = 0.0,
+    min_offtime_h: float = 0.0,
 ) -> ThresholdConstraints:
     return ThresholdConstraints(
         device_id=device_id,
@@ -43,6 +46,8 @@ def _cooler(
         rated_power_kw=rated_power_kw,
         active_rate_per_h=active_rate,
         drift_rate_per_h=drift_rate,
+        min_runtime_h=min_runtime_h,
+        min_offtime_h=min_offtime_h,
     )
 
 
@@ -103,7 +108,7 @@ def _intent(device_id: str, mode: str) -> ControlIntent:
     return ControlIntent(
         device_id=device_id,
         timestep=datetime.now(timezone.utc),
-        mode=mode,
+        power_kw=1.0 if mode == "run" else 0.0,
     )
 
 
@@ -134,8 +139,9 @@ class TestThresholdMilp:
         plan = await optimizer.optimize(ctx)
         threshold_intents = [i for i in plan.intents if i.device_id == "cooler"]
         assert len(threshold_intents) == 24
-        modes = {i.mode for i in threshold_intents}
-        assert modes <= {"run", "standby"}
+        assert all(i.power_kw >= 0 for i in threshold_intents)
+        assert any(i.power_kw > 0 for i in threshold_intents)
+        assert any(i.power_kw == 0 for i in threshold_intents)
 
     async def test_near_top_threshold_forces_more_running(self) -> None:
         """Value near top threshold causes optimizer to schedule more runtime than mid-range."""
@@ -158,8 +164,8 @@ class TestThresholdMilp:
         plan_mid = await optimizer.optimize(_ctx(26.0))   # mid-range
         plan_hot = await optimizer.optimize(_ctx(27.5))   # near top (28)
 
-        run_mid = sum(1 for i in plan_mid.intents if i.device_id == "cooler" and i.mode == "run")
-        run_hot = sum(1 for i in plan_hot.intents if i.device_id == "cooler" and i.mode == "run")
+        run_mid = sum(1 for i in plan_mid.intents if i.device_id == "cooler" and i.power_kw > 0)
+        run_hot = sum(1 for i in plan_hot.intents if i.device_id == "cooler" and i.power_kw > 0)
 
         assert run_hot >= run_mid, (
             f"Near-top should need ≥ as many run slots as mid-range ({run_hot} vs {run_mid})"
@@ -188,15 +194,100 @@ class TestThresholdMilp:
         cooler_intents = {i.timestep: i for i in plan.intents if i.device_id == "cooler"}
         expensive_runs = sum(
             1 for t, i in cooler_intents.items()
-            if i.mode == "run" and t < now + timedelta(hours=12)
+            if i.power_kw > 0 and t < now + timedelta(hours=12)
         )
         cheap_runs = sum(
             1 for t, i in cooler_intents.items()
-            if i.mode == "run" and t >= now + timedelta(hours=12)
+            if i.power_kw > 0 and t >= now + timedelta(hours=12)
         )
         assert cheap_runs >= expensive_runs, (
             f"Optimizer should prefer cheap hours: cheap={cheap_runs}, expensive={expensive_runs}"
         )
+
+    async def test_min_runtime_and_offtime_respected_in_plan(self) -> None:
+        """With 15-min steps and 0.5 h min run/off time, every planned run and
+        off block spans at least two steps — no single-slot blips in the plan."""
+        optimizer = MilpHigsOptimizer(step_minutes=15)
+        now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        # Aquarium-cooler-like physics: ~31% duty cycle, must cycle repeatedly.
+        tc = _cooler(
+            bottom=18.0, top=20.5,
+            active_rate=0.417, drift_rate=0.185,
+            rated_power_kw=0.15,
+            min_runtime_h=0.5, min_offtime_h=0.5,
+        )
+        # Alternating cheap/expensive 15-min prices tempt the solver into
+        # single-step runs on the cheap slots — the constraints must forbid it.
+        prices = [
+            ForecastPoint(
+                timestamp=now + timedelta(minutes=15 * i),
+                value=0.10 if i % 2 == 0 else 0.40,
+            )
+            for i in range(96)
+        ]
+        ctx = OptimizationContext(
+            device_states={
+                "bat": DeviceState(device_id="bat", soc_pct=50.0),
+                "cooler": DeviceState(device_id="cooler", extra={"measured_value": 19.25}),
+            },
+            storage_constraints=[_battery()],
+            threshold_constraints=[tc],
+            forecasts={ForecastQuantity.PRICE: prices},
+            horizon=timedelta(hours=24),
+        )
+        plan = await optimizer.optimize(ctx)
+        states = [
+            i.power_kw > 0
+            for i in sorted(
+                (i for i in plan.intents if i.device_id == "cooler"),
+                key=lambda i: i.timestep,
+            )
+        ]
+        assert len(states) == 96
+        assert any(states), "cooler must run at some point over 24 h"
+
+        # Collect (is_running, length) blocks of consecutive equal states.
+        blocks: list[tuple[bool, int]] = []
+        for s in states:
+            if blocks and blocks[-1][0] == s:
+                blocks[-1] = (s, blocks[-1][1] + 1)
+            else:
+                blocks.append((s, 1))
+
+        # Run blocks: all ≥ 2 steps (last may be truncated by horizon end).
+        # Off blocks: interior ones ≥ 2 steps (the first isn't a planned stop,
+        # the last may be truncated by the horizon).
+        for idx, (running, length) in enumerate(blocks):
+            truncated = idx == len(blocks) - 1
+            if running and not truncated:
+                assert length >= 2, f"run block of {length} step(s) violates min_runtime"
+            if not running and idx > 0 and not truncated:
+                assert length >= 2, f"off block of {length} step(s) violates min_offtime"
+
+    async def test_out_of_bounds_measured_value_does_not_collapse_plan(self) -> None:
+        """A live value past the top threshold is clamped for planning instead
+        of making the MILP infeasible (which would return an empty plan)."""
+        optimizer = MilpHigsOptimizer(step_minutes=60)
+        now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        tc = _cooler(bottom=24.0, top=28.0)
+        ctx = OptimizationContext(
+            device_states={
+                "bat": DeviceState(device_id="bat", soc_pct=50.0),
+                "cooler": DeviceState(device_id="cooler", extra={"measured_value": 29.3}),
+            },
+            storage_constraints=[_battery()],
+            threshold_constraints=[tc],
+            forecasts={ForecastQuantity.PRICE: _prices(now, [0.25] * 24)},
+            horizon=timedelta(hours=24),
+        )
+        plan = await optimizer.optimize(ctx)
+        cooler_intents = sorted(
+            (i for i in plan.intents if i.device_id == "cooler"),
+            key=lambda i: i.timestep,
+        )
+        assert len(cooler_intents) == 24, "plan must not collapse to empty"
+        # Clamped to the top threshold, the only feasible first step is to run.
+        assert cooler_intents[0].power_kw > 0
 
     async def test_no_threshold_devices_still_works(self) -> None:
         """Plan succeeds when no threshold constraints are passed (backward compat)."""
@@ -232,6 +323,38 @@ class TestThresholdMilp:
         dehum_intents = [i for i in plan.intents if i.device_id == "dehum"]
         assert len(cooler_intents) == 24
         assert len(dehum_intents) == 24
+
+
+# ── Config parsing tests ─────────────────────────────────────────────────────
+
+
+class TestParseThresholdAssets:
+    """Tests for rated power resolution between asset and device config."""
+
+    _BASE_ASSET = {
+        "type": "threshold",
+        "device": "cooler",
+        "bottom_threshold": 18.0,
+        "top_threshold": 20.5,
+        "active_rate_per_h": 0.417,
+        "drift_rate_per_h": 0.185,
+    }
+
+    def test_rated_power_falls_back_to_device(self) -> None:
+        devices = {"cooler": {"type": "threshold_homeassistant", "rated_power_w": 150}}
+        parsed = parse_threshold_assets({"aquarium": dict(self._BASE_ASSET)}, devices)
+        assert len(parsed) == 1
+        assert parsed[0].rated_power_kw == pytest.approx(0.150)
+
+    def test_asset_rated_power_overrides_device(self) -> None:
+        asset = dict(self._BASE_ASSET, rated_power_kw=0.2)
+        devices = {"cooler": {"rated_power_w": 150}}
+        parsed = parse_threshold_assets({"aquarium": asset}, devices)
+        assert parsed[0].rated_power_kw == pytest.approx(0.2)
+
+    def test_missing_rated_power_everywhere_skips_asset(self) -> None:
+        parsed = parse_threshold_assets({"aquarium": dict(self._BASE_ASSET)}, {})
+        assert parsed == []
 
 
 # ── ThresholdControlContributor tests ────────────────────────────────────────
