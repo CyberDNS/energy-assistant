@@ -108,6 +108,8 @@ class EvChargingGoal:
     phase2_required_kwh: float   # charge_limit → target_soc, wall energy
     phase2_duration_h: float     # time at max_charge_kw to complete phase2
     phase2_start_time: datetime  # = target_by − phase2_duration_h, UTC
+    # True when no schedule is active: MILP plans PV-only absorption; execution uses PV sentinel
+    pv_only: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +167,7 @@ def build_goal_from_parts(
     charge_curve: list[ChargeCurvePoint],
     current_soc_pct: float,
     connected: bool,
+    pv_only: bool = False,
 ) -> EvChargingGoal:
     """Construct an ``EvChargingGoal`` with pre-computed phase fields."""
     effective_limit = min(charge_limit_soc_pct, target_soc_pct)
@@ -194,6 +197,7 @@ def build_goal_from_parts(
         phase2_required_kwh=phase2_kwh,
         phase2_duration_h=phase2_h,
         phase2_start_time=phase2_start,
+        pv_only=pv_only,
     )
 
 
@@ -262,12 +266,15 @@ class EvChargerContributor:
         if goal is None:
             return _PV_SENTINEL_W
 
-        # Active goal, optimizer issued charge_from_grid → Instant Charging
-        if intent is not None and intent.mode == "charge_from_grid":
-            planned = intent.planned_kw if intent.planned_kw is not None and intent.planned_kw > 0 else self._asset.max_charge_kw
+        # Optimizer planned a charging step
+        if intent is not None and intent.power_kw > 0:
+            if goal.pv_only:
+                # No-schedule goal: plan shows estimated kW but openWB tracks real surplus
+                return _PV_SENTINEL_W
+            planned = intent.power_kw
             return max(self._asset.min_charge_kw, min(self._asset.max_charge_kw, planned)) * 1000.0
 
-        # charge_from_pv, idle, or no intent → PV Charging
+        # Idle or no intent → PV Charging
         return _PV_SENTINEL_W
 
     def charge_price_eur_per_kwh(

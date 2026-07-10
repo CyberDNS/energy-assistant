@@ -140,12 +140,12 @@ export default defineComponent({
           fetchPlan(), fetchForecast(), fetchEv(), fetchControllable(),
         ])
 
-        evList.value       = evs
         controllable.value = ctrl?.devices ?? []
         planMeta.value = plan.created_at
           ? `Plan created: ${new Date(plan.created_at).toLocaleString()} · step ${plan.step_minutes} min`
           : 'No plan yet'
 
+        evList.value = evs
         const evDeviceIds = new Set(evs.map(e => e.device_id))
         const { flowTraces: ft, forecastTraces: fct, priceTraces: pt } =
           buildFlowTraces(plan.intents, forecast, evDeviceIds)
