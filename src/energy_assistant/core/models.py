@@ -250,6 +250,22 @@ def intent_display_mode(intent: ControlIntent, is_threshold: bool = False) -> st
     return "idle"
 
 
+class PlanFlow(BaseModel):
+    """Solved site-level energy flows for one plan timestep.
+
+    Carries the values the optimizer actually solved with — including
+    internal adjustments like the live-PV floor for the current hour —
+    so the UI can display grid import/export consistent with the plan
+    instead of re-deriving them from the raw forecast series.
+    """
+
+    timestep: datetime
+    pv_kw: float
+    """Effective PV used by the solver (forecast, possibly live-floored)."""
+    grid_import_kw: float
+    grid_export_kw: float
+
+
 class EnergyPlan(BaseModel):
     """Time-indexed schedule of control intents for all controllable devices.
 
@@ -258,7 +274,14 @@ class EnergyPlan(BaseModel):
 
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     horizon_hours: int = 24
+    step_minutes: int = 15
+    """Slot length of the plan grid.  An intent is active from its timestep
+    for exactly one step — critical for sparse intent sets (EVs only get
+    intents for charging slots), where the most-recent-≤-now lookup would
+    otherwise keep a stale intent active until the end of the plan."""
     intents: list[ControlIntent] = Field(default_factory=list)
+    flows: list[PlanFlow] = Field(default_factory=list)
+    """Solved per-timestep site flows (empty for plans without a solve)."""
 
 
 class ConfigEntry(BaseModel):

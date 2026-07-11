@@ -11,6 +11,7 @@ async function call(url, options) {
 }
 
 export const fetchStatus   = ()           => call('/api/status')
+export const streamUrl     = _apiBase + '/api/stream'
 export const fetchPlan     = ()           => call('/api/plan')
 export const fetchForecast = ()           => call('/api/forecast')
 export const fetchHistory  = (hours)      => call(`/api/history?hours=${hours}`)

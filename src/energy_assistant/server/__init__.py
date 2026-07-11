@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 from collections import defaultdict
 import logging
 import os
@@ -43,8 +44,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
@@ -559,8 +560,13 @@ class Application:
             _log.info("MQTT publisher started")
 
         # 8 — Subscribe control loop to plan updates via event bus
+        # _plan_seq lets the /api/stream SSE endpoint notify UI clients the
+        # moment a new plan is published.
+        self._plan_seq = 0
+
         async def _on_plan_updated(event: PlanUpdatedEvent) -> None:
             self._control_loop.update_plan(event.plan)
+            self._plan_seq += 1
 
         self._bus.subscribe(PlanUpdatedEvent, _on_plan_updated)
 
@@ -660,6 +666,18 @@ class Application:
 
     async def _polling_loop(self) -> None:
         """Read every device, persist to SQLite, publish DeviceStateEvents."""
+        # Warm-up: some devices connect lazily on their first get_state()
+        # (e.g. the openWB MQTT bridge).  Poll everything once and give those
+        # connections a moment to establish, so the *first* recorded poll —
+        # which gates the first plan — already sees EVs as connected.
+        # Without this the first plan always ran without EV goals.
+        for device in self._registry.all():
+            try:
+                await device.get_state()
+            except Exception:  # noqa: BLE001
+                pass
+        await asyncio.sleep(3.0)
+
         first_tick = True
         while True:
             states = {}
@@ -1012,9 +1030,11 @@ class Application:
             """Liveness probe endpoint used by container health checks."""
             return {"status": "ok"}
 
-        @api.get("/api/status")
-        async def get_status() -> dict:
-            """Live snapshot: grid power, price, device states, setpoints, ledger."""
+        async def _status_payload() -> dict:
+            """Live snapshot: grid power, price, device states, setpoints, ledger.
+
+            Shared by ``GET /api/status`` (poll) and ``GET /api/stream`` (SSE push).
+            """
             now = datetime.now(timezone.utc)
 
             self._sync_ledger_stored_energy_from_soc()
@@ -1117,6 +1137,45 @@ class Application:
                 "market_price_breakdown": market_breakdown,
             }
 
+        @api.get("/api/status")
+        async def get_status() -> dict:
+            """Live snapshot (poll variant of /api/stream)."""
+            return await _status_payload()
+
+        @api.get("/api/stream")
+        async def stream(request: Request) -> StreamingResponse:
+            """Server-Sent Events: pushes a ``status`` event every few seconds
+            and a ``plan`` event whenever a new plan is published, so the UI
+            updates without polling."""
+            interval_s = 3.0
+
+            async def gen():
+                last_plan_seq = self._plan_seq
+                while True:
+                    if await request.is_disconnected():
+                        return
+                    try:
+                        payload = await _status_payload()
+                        yield f"event: status\ndata: {json.dumps(payload)}\n\n"
+                    except Exception:  # noqa: BLE001
+                        _log.debug("SSE status payload failed", exc_info=True)
+                    if self._plan_seq != last_plan_seq:
+                        last_plan_seq = self._plan_seq
+                        yield "event: plan\ndata: {}\n\n"
+                    await asyncio.sleep(interval_s)
+
+            return StreamingResponse(
+                gen(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-store",
+                    "Connection": "keep-alive",
+                    # Disable proxy buffering (nginx / HASS ingress) so events
+                    # arrive immediately.
+                    "X-Accel-Buffering": "no",
+                },
+            )
+
         @api.get("/api/plan")
         async def get_plan() -> dict:
             """Active EnergyPlan: all intents with planned power and mode."""
@@ -1126,6 +1185,18 @@ class Application:
             return {
                 "created_at": plan.created_at.isoformat(),
                 "step_minutes": self._optimizer._step_min,
+                # Solved site flows (effective PV incl. live floor, grid
+                # import/export) — the UI should use these instead of
+                # re-deriving import from the raw forecast series.
+                "flows": [
+                    {
+                        "timestep": f.timestep.isoformat(),
+                        "pv_kw": f.pv_kw,
+                        "grid_import_kw": f.grid_import_kw,
+                        "grid_export_kw": f.grid_export_kw,
+                    }
+                    for f in plan.flows
+                ],
                 "intents": [
                     {
                         "device_id": i.device_id,
@@ -1470,19 +1541,37 @@ class Application:
                     key=lambda i: i.timestep,
                 )
 
-            def _next_change(future_steps: list) -> dict | None:
-                """Works with both ControlIntent objects and plain step dicts."""
-                if not future_steps:
+            def _next_change(steps_from_active: list) -> dict | None:
+                """First upcoming mode different from the ACTIVE slot's mode.
+
+                ``steps_from_active[0]`` must be the currently active slot
+                (greatest timestamp ≤ now) so the comparison is anchored to
+                what the device is doing right now, not to the next slot.
+                Works with both ControlIntent objects and plain step dicts.
+                """
+                if not steps_from_active:
                     return None
                 def _mode(s):  return s["mode"] if isinstance(s, dict) else s.mode
                 def _ts(s):    return datetime.fromisoformat(s["ts"]) if isinstance(s, dict) else s.timestep
-                current = _mode(future_steps[0])
-                for step in future_steps[1:]:
+                current = _mode(steps_from_active[0])
+                for step in steps_from_active[1:]:
                     m = _mode(step)
                     if m != current:
                         delta_min = int((_ts(step) - now).total_seconds() / 60)
                         return {"mode": m, "in_minutes": max(0, delta_min)}
                 return None
+
+            def _split_active(steps: list[dict]) -> tuple[dict | None, list[dict]]:
+                """Return (active_step, steps_from_active) for plain step dicts.
+
+                The active slot is the one with the greatest timestamp ≤ now —
+                slot timestamps mark slot *starts*; same semantics as the
+                control loop's ``_find_intent()``.
+                """
+                past   = [s for s in steps if datetime.fromisoformat(s["ts"]) <= now]
+                future = [s for s in steps if datetime.fromisoformat(s["ts"]) > now]
+                active = past[-1] if past else None
+                return active, ([active] if active else []) + future
 
             # All plan timestamps in order (used to fill EV idle gaps)
             all_plan_ts: list[datetime] = sorted(
@@ -1525,8 +1614,11 @@ class Application:
                         "soc_pct": round(energy_kwh / asset.capacity_kwh * 100, 1),
                     })
 
-                future = [s for s in steps if datetime.fromisoformat(s["ts"]) >= now]
-                current_mode = future[0]["mode"] if future else "idle"
+                active, from_active = _split_active(steps)
+                current_mode = (
+                    active["mode"] if active
+                    else (from_active[0]["mode"] if from_active else "idle")
+                )
 
                 devices.append({
                     "device_id": asset.device_id,
@@ -1539,7 +1631,7 @@ class Application:
                     "plan": {
                         "current_mode": current_mode,
                         "steps": steps,
-                        "next_change": _next_change(future),
+                        "next_change": _next_change(from_active),
                     },
                 })
 
@@ -1550,7 +1642,6 @@ class Application:
                 power_w = state.power_w if state is not None else None
 
                 all_intents = _sorted_intents(sc.device_id)
-                current_mode = intent_display_mode(next((i for i in all_intents if i.timestep >= now), None) or all_intents[0]) if all_intents else "idle"
 
                 steps = [
                     {
@@ -1564,7 +1655,11 @@ class Application:
                     }
                     for i in all_intents
                 ]
-                future_steps = [s for s in steps if datetime.fromisoformat(s["ts"]) >= now]
+                active, from_active = _split_active(steps)
+                current_mode = (
+                    active["mode"] if active
+                    else (from_active[0]["mode"] if from_active else "idle")
+                )
 
                 devices.append({
                     "device_id": sc.device_id,
@@ -1578,7 +1673,7 @@ class Application:
                     "plan": {
                         "current_mode": current_mode,
                         "steps": steps,
-                        "next_change": _next_change(future_steps),
+                        "next_change": _next_change(from_active),
                     },
                 })
 
@@ -1593,7 +1688,6 @@ class Application:
                     power_w = state.power_w
 
                 all_intents = _sorted_intents(tc.device_id)
-                current_mode = intent_display_mode(next((i for i in all_intents if i.timestep >= now), None) or (all_intents[0] if all_intents else None), is_threshold=True) if all_intents else "standby"
 
                 steps = [
                     {
@@ -1604,7 +1698,11 @@ class Application:
                     }
                     for i in all_intents
                 ]
-                future_steps = [s for s in steps if datetime.fromisoformat(s["ts"]) >= now]
+                active, from_active = _split_active(steps)
+                current_mode = (
+                    active["mode"] if active
+                    else (from_active[0]["mode"] if from_active else "standby")
+                )
 
                 devices.append({
                     "device_id": tc.device_id,
@@ -1620,7 +1718,7 @@ class Application:
                     "plan": {
                         "current_mode": current_mode,
                         "steps": steps,
-                        "next_change": _next_change(future_steps),
+                        "next_change": _next_change(from_active),
                     },
                 })
 
@@ -2231,7 +2329,15 @@ class Application:
         Export-only tariffs (e.g. the ``grid`` feed-in tariff whose import
         price is 0.0) are skipped so the market-price cards only show
         metering zones where the import price is meaningful.
+
+        Cached for 30 s: prices change hourly, but this is called for every
+        /api/status request AND every ~3 s per SSE stream client, and each
+        tariff lookup may be a remote ioBroker read.
         """
+        cached = getattr(self, "_tariff_price_cache", None)
+        if cached is not None and (time.monotonic() - cached[0]) < 30.0:
+            return cached[1]
+
         prices: dict[str, float] = {}
         for tariff_id, tariff in self._tariffs.items():
             try:
@@ -2240,6 +2346,7 @@ class Application:
                     prices[tariff_id] = p
             except Exception:  # noqa: BLE001
                 pass
+        self._tariff_price_cache = (time.monotonic(), prices)
         return prices
 
     async def _build_tariff_weighted_price_forecast(self) -> tuple[list[ForecastPoint], dict[datetime, bool]]:

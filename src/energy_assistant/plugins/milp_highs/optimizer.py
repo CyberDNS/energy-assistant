@@ -78,6 +78,7 @@ from ...assets.ev import EvChargingGoal
 from ...core.models import (
     ControlIntent,
     EnergyPlan,
+    PlanFlow,
     ForecastPoint,
     ForecastQuantity,
     StorageConstraints,
@@ -140,7 +141,7 @@ class MilpHigsOptimizer:
 
         n_steps = max(0, int(context.horizon / step_td))
         if n_steps == 0:
-            return EnergyPlan(horizon_hours=horizon_h)
+            return EnergyPlan(horizon_hours=horizon_h, step_minutes=self._step_min)
 
         _now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
         # Floor to the step boundary so timestamps align with price/PV forecasts
@@ -161,12 +162,13 @@ class MilpHigsOptimizer:
             context.forecasts.get(ForecastQuantity.PV_GENERATION, []), timestamps
         )
 
-        # ── Live-PV floor for the first hour ──────────────────────────
-        # Hourly PV forecasts (e.g. pvforecast iobroker) often return 0 for
-        # the current clock-hour because that slot has already partially
-        # elapsed.  Use the live device reading as a floor so the MILP sees
-        # actual production rather than planning a false grid-import for the
-        # first few slots.
+        # ── Live-PV blend for the current hour ────────────────────────
+        # Hourly PV forecasts (e.g. pvforecast iobroker) often return 0 or a
+        # stale value for the current clock-hour.  Anchor the current slot to
+        # the live device reading (ground truth), then approach the forecast
+        # linearly so the series lands on the forecast value at the end of
+        # the hour — correcting both under- and over-forecasts without
+        # distorting anything beyond the current hour.
         storage_ids = {sc.device_id for sc in context.storage_constraints}
         ev_ids = {g.device_id for g in context.ev_charging_goals}
         producer_ids = context.producer_device_ids
@@ -184,10 +186,22 @@ class MilpHigsOptimizer:
         )
         if live_pv_kw > 0.1:
             current_hour_end = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-            pv_kw = [
-                max(p, live_pv_kw) if ts < current_hour_end else p
-                for ts, p in zip(timestamps, pv_kw)
-            ]
+            # Forecast value we blend toward: the first slot at/after hour end.
+            fc_end = next(
+                (p for ts, p in zip(timestamps, pv_kw) if ts >= current_hour_end),
+                None,
+            )
+            span_s = max(1.0, (current_hour_end - now).total_seconds())
+            blended: list[float] = []
+            for ts, p in zip(timestamps, pv_kw):
+                if ts >= current_hour_end:
+                    blended.append(p)
+                elif fc_end is None:
+                    blended.append(max(p, live_pv_kw))  # no anchor — legacy floor
+                else:
+                    frac = min(1.0, max(0.0, (ts - now).total_seconds() / span_s))
+                    blended.append(live_pv_kw * (1.0 - frac) + fc_end * frac)
+            pv_kw = blended
 
         net_load = [(c - p) * step_h for c, p in zip(consumption_kw, pv_kw)]
         # Keep a copy of the baseline net_load for EV mode classification later.
@@ -209,7 +223,7 @@ class MilpHigsOptimizer:
         batteries = context.storage_constraints
         if not batteries:
             _log.info("MilpHigsOptimizer: no storage constraints — returning empty plan")
-            return EnergyPlan(horizon_hours=horizon_h)
+            return EnergyPlan(horizon_hours=horizon_h, step_minutes=self._step_min)
 
         initial_energy = self._initial_energy(batteries, context)
 
@@ -301,7 +315,7 @@ class MilpHigsOptimizer:
                 "MilpHigsOptimizer: solver returned %r — emitting empty plan",
                 pulp.LpStatus[status],
             )
-            return EnergyPlan(horizon_hours=horizon_h)
+            return EnergyPlan(horizon_hours=horizon_h, step_minutes=self._step_min)
 
         # ── Extract schedule → EnergyPlan ─────────────────────────────
         intents = _extract_intents(batteries, variables, timestamps, step_h)
@@ -322,7 +336,28 @@ class MilpHigsOptimizer:
                         reserved_kwh=round(goal.max_charge_kw * step_h, 4),
                     ))
         threshold_intents = _extract_threshold_intents(threshold_devices, variables, timestamps)
-        return EnergyPlan(horizon_hours=horizon_h, intents=intents + ev_intents + threshold_intents)
+
+        # Solved site-level flows per step — includes internal adjustments
+        # (live-PV floor, phase-2 loads) so the UI shows grid import/export
+        # consistent with the plan instead of re-deriving from raw forecasts.
+        g_imp_v = variables["g_imp"]
+        g_exp_v = variables["g_exp"]
+        flows = [
+            PlanFlow(
+                timestep=ts,
+                pv_kw=round(pv_kw[t], 4),
+                grid_import_kw=round((pulp.value(g_imp_v[t]) or 0.0) / _WH / step_h, 4),
+                grid_export_kw=round((pulp.value(g_exp_v[t]) or 0.0) / _WH / step_h, 4),
+            )
+            for t, ts in enumerate(timestamps)
+        ]
+
+        return EnergyPlan(
+            horizon_hours=horizon_h,
+            step_minutes=self._step_min,
+            intents=intents + ev_intents + threshold_intents,
+            flows=flows,
+        )
 
     # ------------------------------------------------------------------
     # Model construction
@@ -405,8 +440,13 @@ class MilpHigsOptimizer:
                 e[(b, t)] = pulp.LpVariable(f"e__{b}__{t}", lowBound=bat_e_min_wh[b], upBound=bat_e_max_wh[b])
 
         # ── EV charging variables (energy in Wh) ──────────────────────
-        # ev[asset_id, t]    — AC energy charged into the EV in step t (Wh).
-        # ev_on[asset_id, t] — binary: 1 = charger is active this step.
+        # ev[asset_id, t]      — AC energy charged into the EV in step t (Wh).
+        # ev_on[asset_id, t]   — binary: 1 = charger is active this step.
+        # ev_grid[asset_id, t] — binary: 1 = grid-sourced slot (executes as
+        #                        Instant Charging); 0 = PV slot, where the EV
+        #                        energy is capped to the forecast PV surplus
+        #                        because execution (openWB PV mode) can only
+        #                        track the real live surplus.
         #
         # Semi-continuous constraint: ev is either 0 (charger off) or in
         # [ev_min_w * step_h, ev_max_w * step_h] (charger on).
@@ -414,8 +454,9 @@ class MilpHigsOptimizer:
         # the charger cannot physically deliver (openWB requires ≥ 6 A).
         #
         # Phase-2 slots are excluded: they are fixed loads in net_load already.
-        ev:    dict[tuple[str, int], pulp.LpVariable] = {}
-        ev_on: dict[tuple[str, int], pulp.LpVariable] = {}
+        ev:      dict[tuple[str, int], pulp.LpVariable] = {}
+        ev_on:   dict[tuple[str, int], pulp.LpVariable] = {}
+        ev_grid: dict[tuple[str, int], pulp.LpVariable] = {}
         for goal in active_ev_goals:
             max_wh = ev_max_w[goal.asset_id] * step_h
             for t in T:
@@ -424,6 +465,11 @@ class MilpHigsOptimizer:
                 if ts is not None and ts < goal.phase2_start_time:
                     ev[key]    = pulp.LpVariable(f"ev__{goal.asset_id}__{t}",    lowBound=0, upBound=max_wh)
                     ev_on[key] = pulp.LpVariable(f"ev_on__{goal.asset_id}__{t}", cat="Binary")
+                    # pv_only goals may never use the grid → fix the binary to 0.
+                    ev_grid[key] = pulp.LpVariable(
+                        f"ev_grid__{goal.asset_id}__{t}", cat="Binary",
+                        upBound=0 if goal.pv_only else 1,
+                    )
                 else:
                     ev[key] = pulp.LpVariable(f"ev__{goal.asset_id}__{t}", lowBound=0, upBound=0.0)
 
@@ -511,11 +557,17 @@ class MilpHigsOptimizer:
         else:
             pv_priority_tiebreak = 0
 
+        # Tiny penalty on grid-sourced EV slots so the solver labels a slot
+        # PV whenever the surplus cap alone would satisfy it (without this,
+        # ev_grid=1 is free and labels become arbitrary when ev ≤ surplus).
+        ev_grid_tiebreak = 1e-3 * pulp.lpSum(ev_grid.values()) if ev_grid else 0
+
         prob += (
             grid_cost
             + degradation_cost
             + priority_tiebreak
             + pv_priority_tiebreak
+            + ev_grid_tiebreak
             - terminal_value
         ), "total_cost"
 
@@ -546,6 +598,25 @@ class MilpHigsOptimizer:
                     continue
                 prob += ev[key] >= min_wh * ev_on[key], f"ev_min__{goal.asset_id}__{t}"
                 prob += ev[key] <= max_wh * ev_on[key], f"ev_max__{goal.asset_id}__{t}"
+
+        # ── EV source constraint: PV slot ⇒ capped to forecast surplus ─
+        # A slot is either grid-sourced (ev_grid=1 → Instant Charging, power
+        # up to max) or PV-sourced (ev_grid=0 → openWB PV mode).  PV mode can
+        # only track the real live surplus, so the plan must not assign more
+        # than the forecast surplus — otherwise the planned energy silently
+        # never materialises (and battery discharge would appear to "fill"
+        # PV slots, mislabelling grid/battery energy as PV in the UI).
+        for goal in active_ev_goals:
+            max_wh = ev_max_w[goal.asset_id] * step_h
+            for t in T:
+                key = (goal.asset_id, t)
+                if key not in ev_grid:
+                    continue
+                pv_surplus_wh = max(0.0, -net_load_wh[t])
+                prob += (
+                    ev[key] <= pv_surplus_wh + max_wh * ev_grid[key],
+                    f"ev_pv_surplus__{goal.asset_id}__{t}",
+                )
 
         # ── EV phase-1 deadline constraints ───────────────────────────
         for goal in active_ev_goals:
@@ -679,7 +750,7 @@ class MilpHigsOptimizer:
                         f"min_offtime__{td_id}__{t}__{k}",
                     )
 
-        variables = {"c": c, "d": d, "u": u, "e": e, "g_imp": g_imp, "g_exp": g_exp, "ev": ev, "ev_on": ev_on, "run": run, "val": val}
+        variables = {"c": c, "d": d, "u": u, "e": e, "g_imp": g_imp, "g_exp": g_exp, "ev": ev, "ev_on": ev_on, "ev_grid": ev_grid, "run": run, "val": val}
         return prob, variables
 
     # ------------------------------------------------------------------
@@ -916,25 +987,31 @@ def _extract_threshold_intents(
     return intents
 
 
-def _nearest(
-    sorted_points: list[ForecastPoint], ts: datetime
-) -> float:
-    """Return the value from the nearest point (by time) to *ts*."""
-    best = min(sorted_points, key=lambda p: abs((p.timestamp - ts).total_seconds()))
-    return best.value
-
-
 def _interpolate_kw(
     points: list[ForecastPoint], timestamps: list[datetime]
 ) -> list[float]:
-    """Map forecast points onto *timestamps* via nearest-neighbour lookup.
+    """Map forecast points onto *timestamps* via forward-fill (hold-previous).
 
-    Returns ``0.0`` for every timestamp when *points* is empty.
+    A point's value holds from its timestamp until the next point — the
+    natural semantics of hourly forecasts and prices (the 13:00 value applies
+    to the whole 13:00–14:00 hour) and the same convention the UI's
+    ``/api/forecast`` series uses, so plan bars and forecast lines stay
+    aligned.  (Nearest-neighbour shifted everything half a step early:
+    12:45 took 13:00's value.)  Before the first point the first value is
+    held.  Returns ``0.0`` for every timestamp when *points* is empty.
     """
     if not points:
         return [0.0] * len(timestamps)
-    sorted_pts = sorted(points, key=lambda p: p.timestamp)
-    return [_nearest(sorted_pts, ts) for ts in timestamps]
+    pts = sorted(points, key=lambda p: p.timestamp)
+    out: list[float] = []
+    j = 0
+    prev = pts[0]
+    for ts in timestamps:  # timestamps are ascending
+        while j < len(pts) and pts[j].timestamp <= ts:
+            prev = pts[j]
+            j += 1
+        out.append(float(prev.value))
+    return out
 
 
 def _extract_ev_intents(
@@ -947,17 +1024,15 @@ def _extract_ev_intents(
 
     Phase-2 intents (mandatory top-off) are appended by the caller.
 
-    ``grid_allowed`` is derived from the solved ``g_imp`` variable:
-    - pv_only goals: always False (constraint already prevents grid import)
-    - scheduled goals: False when g_imp ≈ 0 (EV charged from PV surplus),
-      True when grid import was positive (EV drew from grid)
-
-    Execution maps these to: Instant Charging when grid_allowed=True (scheduled),
-    or PV Charging sentinel for pv_only goals (plan shows estimate, openWB tracks
-    real surplus).  Unplanned steps fall through to PV mode in EvChargerContributor.
+    ``grid_allowed`` comes directly from the solved ``ev_grid`` decision
+    binary: 1 = grid-sourced slot (Instant Charging), 0 = PV slot where the
+    planned energy was constrained to the forecast PV surplus (executes as
+    openWB PV mode tracking the real surplus).  pv_only goals have the
+    binary fixed to 0.  Unplanned steps fall through to PV mode in
+    EvChargerContributor.
     """
     ev = variables.get("ev", {})
-    g_imp = variables.get("g_imp", {})
+    ev_grid = variables.get("ev_grid", {})
     intents: list[ControlIntent] = []
 
     for goal in ev_goals:
@@ -967,14 +1042,11 @@ def _extract_ev_intents(
             if ts >= goal.phase2_start_time:
                 continue  # phase2 intents added separately
             # ev variables are in Wh — convert to kWh for ControlIntent
-            ev_wh = pulp.value(ev.get((goal.asset_id, t))) or 0.0
+            key = (goal.asset_id, t)
+            ev_wh = pulp.value(ev.get(key)) or 0.0
             ev_kwh = ev_wh / _WH
             if ev_kwh > 0.01:
-                if goal.pv_only:
-                    grid_allowed = False
-                else:
-                    g_imp_wh = pulp.value(g_imp.get(t)) or 0.0
-                    grid_allowed = g_imp_wh > 10.0   # > ~10 Wh ≈ 40 W average
+                grid_allowed = (pulp.value(ev_grid.get(key)) or 0.0) > 0.5
                 intents.append(ControlIntent(
                     device_id=goal.device_id,
                     timestep=ts,
