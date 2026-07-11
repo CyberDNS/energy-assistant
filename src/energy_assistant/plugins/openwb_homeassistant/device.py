@@ -156,57 +156,75 @@ class OpenWBDevice:
         else:
             mode = self._mode_stop
 
+        # Reconcile: read the current mode first and only write on mismatch.
+        # If the read fails, fall through and write unconditionally.
+        current_mode: str | None = None
         try:
-            await self._client.call_service(
-                "select",
-                "select_option",
-                {"entity_id": self._entity_mode, "option": mode},
-            )
-            _log.debug(
-                "OpenWBDevice %r: set mode %r (value=%.0f W)",
-                self._device_id, mode, value,
-            )
+            raw = await self._client.get_entity_state(self._entity_mode)
+            current_mode = str(raw) if raw is not None else None
         except Exception:
-            _log.warning(
-                "OpenWBDevice %r: failed to set mode %r", self._device_id, mode,
-                exc_info=True,
+            _log.debug(
+                "OpenWBDevice %r: could not read current mode — writing anyway",
+                self._device_id,
             )
+
+        if current_mode != mode:
+            try:
+                await self._client.call_service(
+                    "select",
+                    "select_option",
+                    {"entity_id": self._entity_mode, "option": mode},
+                )
+                _log.info(
+                    "OpenWBDevice %r: mode %r → %r (value=%.0f W)",
+                    self._device_id, current_mode, mode, value,
+                )
+            except Exception:
+                _log.warning(
+                    "OpenWBDevice %r: failed to set mode %r", self._device_id, mode,
+                    exc_info=True,
+                )
 
         # When switching to instant charging, also write the SoC limit so
         # openWB stops at the planned target SoC.
         if mode == self._mode_instant and self._entity_soc_limit_instant and self._target_soc_pct is not None:
-            try:
-                await self._client.call_service(
-                    "number",
-                    "set_value",
-                    {"entity_id": self._entity_soc_limit_instant, "value": round(self._target_soc_pct)},
-                )
-                _log.debug(
-                    "OpenWBDevice %r: set instant SoC limit to %.0f%%",
-                    self._device_id, self._target_soc_pct,
-                )
-            except Exception:
-                _log.warning(
-                    "OpenWBDevice %r: failed to set instant SoC limit", self._device_id,
-                    exc_info=True,
-                )
+            await self._reconcile_number(
+                self._entity_soc_limit_instant,
+                float(round(self._target_soc_pct)),
+                "instant SoC limit",
+            )
 
         # Set the target charging current for instant mode so openWB charges
         # at the planned power rather than its own default.
         if mode == self._mode_instant and self._entity_current_instant and value > 0:
             target_a = max(6, min(16, round(value / (self._voltage_v * self._phases))))
-            try:
-                await self._client.call_service(
-                    "number",
-                    "set_value",
-                    {"entity_id": self._entity_current_instant, "value": target_a},
-                )
-                _log.debug(
-                    "OpenWBDevice %r: set instant charging current to %d A (%.0f W / %d phases)",
-                    self._device_id, target_a, value, self._phases,
-                )
-            except Exception:
-                _log.warning(
-                    "OpenWBDevice %r: failed to set instant charging current", self._device_id,
-                    exc_info=True,
-                )
+            await self._reconcile_number(
+                self._entity_current_instant,
+                float(target_a),
+                "instant charging current",
+            )
+
+    async def _reconcile_number(self, entity_id: str, desired: float, label: str) -> None:
+        """Write *desired* to a HA number entity, skipping when it already matches."""
+        try:
+            raw = await self._client.get_entity_state(entity_id)
+            current = _to_float(raw)
+            if current is not None and abs(current - desired) < 0.5:
+                return
+        except Exception:
+            pass  # read failed — write unconditionally
+
+        try:
+            await self._client.call_service(
+                "number",
+                "set_value",
+                {"entity_id": entity_id, "value": desired},
+            )
+            _log.info(
+                "OpenWBDevice %r: set %s to %.0f", self._device_id, label, desired,
+            )
+        except Exception:
+            _log.warning(
+                "OpenWBDevice %r: failed to set %s", self._device_id, label,
+                exc_info=True,
+            )

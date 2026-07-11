@@ -471,3 +471,48 @@ class TestThresholdControlContributor:
         )
         result = contrib.desired_setpoint_w(_intent("cooler", "run"), live)
         assert result == 0.0, "Should stay off — min_offtime not elapsed"
+
+
+class TestThresholdHADeviceReconciliation:
+    """send_command must check the actual switch state before calling HA."""
+
+    @staticmethod
+    def _device(client):
+        from energy_assistant.plugins.threshold_homeassistant.device import ThresholdHADevice
+        return ThresholdHADevice(
+            "cooler", client,
+            entity_sensor="sensor.temp", entity_switch="switch.cooler",
+            rated_power_w=150.0,
+        )
+
+    async def test_skips_service_call_when_already_in_desired_state(self) -> None:
+        from helpers.fake_ha_client import FakeHAClient
+        from energy_assistant.core.models import DeviceCommand
+        client = FakeHAClient(states={"switch.cooler": "on"})
+        await self._device(client).send_command(
+            DeviceCommand(device_id="cooler", command="set_power_w", value=150.0)
+        )
+        assert client.calls == []
+
+    async def test_corrects_mismatched_switch(self) -> None:
+        """Should be on but is off (e.g. manually toggled) → turn_on sent."""
+        from helpers.fake_ha_client import FakeHAClient
+        from energy_assistant.core.models import DeviceCommand
+        client = FakeHAClient(states={"switch.cooler": "off"})
+        await self._device(client).send_command(
+            DeviceCommand(device_id="cooler", command="set_power_w", value=150.0)
+        )
+        assert client.calls == [
+            ("homeassistant", "turn_on", {"entity_id": "switch.cooler"}),
+        ]
+
+    async def test_turns_off_when_running_but_standby_desired(self) -> None:
+        from helpers.fake_ha_client import FakeHAClient
+        from energy_assistant.core.models import DeviceCommand
+        client = FakeHAClient(states={"switch.cooler": "on"})
+        await self._device(client).send_command(
+            DeviceCommand(device_id="cooler", command="set_power_w", value=0.0)
+        )
+        assert client.calls == [
+            ("homeassistant", "turn_off", {"entity_id": "switch.cooler"}),
+        ]
