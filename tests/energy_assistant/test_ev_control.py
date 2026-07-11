@@ -21,7 +21,7 @@ from energy_assistant.core.models import (
     StorageConstraints,
 )
 from energy_assistant.plugins.openwb_homeassistant.device import OpenWBDevice
-from tests.helpers.fake_ha_client import FakeHAClient
+from helpers.fake_ha_client import FakeHAClient
 
 
 def _asset(device_id: str = "wallbox") -> EvChargingAsset:
