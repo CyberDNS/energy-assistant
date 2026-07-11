@@ -110,20 +110,38 @@ class ThresholdHADevice:
             return DeviceState(device_id=self._device_id, available=False)
 
     async def send_command(self, command: DeviceCommand) -> None:
-        """Turn the switch on or off based on the ``set_power_w`` value."""
+        """Turn the switch on or off based on the ``set_power_w`` value.
+
+        Reconciles first: reads the current switch state and only calls the
+        HA service on mismatch, so the 5 s control tick doesn't spam
+        turn_on/turn_off — and an actual correction (e.g. someone toggled
+        the plug manually) is visible in the log at INFO level.  If the
+        read fails the command is sent unconditionally.
+        """
         if command.command != "set_power_w":
             return
+        want_on = command.value is not None and float(command.value) > 0
+
+        current: str | None = None
         try:
-            if command.value is not None and float(command.value) > 0:
-                _log.debug("ThresholdHADevice %r: turning ON %s", self._device_id, self._entity_switch)
-                await self._client.call_service(
-                    "homeassistant", "turn_on", {"entity_id": self._entity_switch}
-                )
-            else:
-                _log.debug("ThresholdHADevice %r: turning OFF %s", self._device_id, self._entity_switch)
-                await self._client.call_service(
-                    "homeassistant", "turn_off", {"entity_id": self._entity_switch}
-                )
+            raw = await self._client.get_entity_state(self._entity_switch)
+            current = str(raw).lower() if raw is not None else None
+        except Exception:  # noqa: BLE001
+            pass  # read failed — write unconditionally
+
+        if current == ("on" if want_on else "off"):
+            return  # already in the desired state
+
+        try:
+            service = "turn_on" if want_on else "turn_off"
+            await self._client.call_service(
+                "homeassistant", service, {"entity_id": self._entity_switch}
+            )
+            _log.info(
+                "ThresholdHADevice %r: switch %s → %s (was %r)",
+                self._device_id, self._entity_switch,
+                "on" if want_on else "off", current,
+            )
         except Exception:
             _log.warning(
                 "ThresholdHADevice %r: failed to send command to %s",

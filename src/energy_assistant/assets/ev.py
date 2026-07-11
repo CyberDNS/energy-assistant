@@ -23,7 +23,18 @@ Charger mode encoding
   value > 500 W  → "Instant Charging" (charges at max_charge_kw)
   0 < value ≤ 500 W  → "PV Charging"  (openWB manages surplus & phases)
   value == 0.0   → "Stop"
-  None           → no command sent (car not connected)
+  None           → no command sent (car not connected, or chargepoint disabled)
+
+A disabled chargepoint always returns None: the assistant is fully hands-off
+so the wallbox (or the user via the openWB UI) controls charging itself.
+Disabling does not stop an in-progress charge — the last commanded mode
+simply remains under wallbox control.
+
+PV priority between multiple EVs: when the optimizer allocated the PV
+surplus of the current slot to one EV (``LiveSituation.ev_pv_planned_ids``),
+EVs *without* a planned charging slot yield by commanding Stop instead of
+opportunistic PV mode — otherwise both wallboxes sit in PV mode and openWB
+splits the surplus by its own priority rules, overriding the plan.
 
 This encoding stays inside the existing ``ControlContributor`` protocol
 (``desired_setpoint_w`` returns ``float | None``) without changing the
@@ -217,6 +228,10 @@ class EvChargerContributor:
     override is applied.
     """
 
+    # Marks EV contributors for the control loop's PV-priority resolution
+    # (see LiveSituation.ev_pv_planned_ids) without a core → assets import.
+    is_ev = True
+
     def __init__(self, asset: EvChargingAsset) -> None:
         self._asset = asset
         self._active_goal: EvChargingGoal | None = None
@@ -241,7 +256,10 @@ class EvChargerContributor:
     ) -> float | None:
         """Return a mode-encoding sentinel (see module docstring)."""
         if self._disabled:
-            return None  # chargepoint disabled — hands off, no commands sent
+            # Chargepoint disabled — hands off entirely, not even Stop.
+            # The user hands control to the wallbox itself (manual mode
+            # selection in openWB); the assistant must not intervene.
+            return None
         state = live.device_states.get(self.device_id)
         if state is None or not state.available:
             return None  # car not connected — don't send any command
@@ -262,20 +280,28 @@ class EvChargerContributor:
         if goal is not None and current_soc >= goal.charge_limit_soc_pct:
             return _STOP_W
 
-        # No active goal → opportunistic PV charging, openWB handles priority
+        # When another EV holds the PV allocation for this slot, yield:
+        # command Stop instead of opportunistic PV so openWB gives the whole
+        # surplus to the chargepoint the optimizer planned it for.
+        others_hold_pv = bool(live.ev_pv_planned_ids - {self.device_id})
+
+        # No active goal → opportunistic PV charging (unless yielding)
         if goal is None:
-            return _PV_SENTINEL_W
+            return _STOP_W if others_hold_pv else _PV_SENTINEL_W
 
         # Optimizer planned a charging step
         if intent is not None and intent.power_kw > 0:
-            if goal.pv_only:
-                # No-schedule goal: plan shows estimated kW but openWB tracks real surplus
+            if goal.pv_only or not intent.grid_allowed:
+                # PV-sourced slot (or no-schedule goal): the plan shows an
+                # estimated kW, but execution must not draw from the grid —
+                # PV mode lets openWB track the real live surplus.  Instant
+                # charging would pull the shortfall from the grid.
                 return _PV_SENTINEL_W
             planned = intent.power_kw
             return max(self._asset.min_charge_kw, min(self._asset.max_charge_kw, planned)) * 1000.0
 
-        # Idle or no intent → PV Charging
-        return _PV_SENTINEL_W
+        # Idle or no intent → opportunistic PV charging (unless yielding)
+        return _STOP_W if others_hold_pv else _PV_SENTINEL_W
 
     def charge_price_eur_per_kwh(
         self,

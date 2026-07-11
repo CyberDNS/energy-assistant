@@ -1,5 +1,6 @@
-import { defineComponent, ref, onMounted, onUnmounted } from 'vue'
+import { defineComponent, ref, watch, onMounted, onUnmounted } from 'vue'
 import { fetchPlan, fetchForecast, fetchEv, fetchControllable, triggerPlanRefresh } from '../api.js'
+import { planVersion } from '../composables/useStatus.js'
 import PlotlyChart from '../components/PlotlyChart.js'
 import EvCard from '../components/EvCard.js'
 import ControllableDeviceCard from '../components/ControllableDeviceCard.js'
@@ -24,11 +25,23 @@ const XAXIS = {
   minor: { dtick: 900000, ticks: 'outside', ticklen: 4 },
 }
 
-function buildFlowTraces(intents, forecast, evDeviceIds) {
+function buildFlowTraces(intents, forecast, evDeviceIds, planFlows) {
   const tsMap = {}
   forecast.timestamps.forEach((t, i) => { tsMap[t] = i })
 
-  const pvKw      = forecast.pv_kw
+  // Prefer the solver's effective PV series (includes the live-PV floor for
+  // the current hour) — the raw forecast can be lower than what the plan was
+  // actually solved with, which made derived grid import look impossible.
+  const pvKw = [...forecast.pv_kw]
+  const solvedImport = new Array(pvKw.length).fill(null)
+  const solvedExport = new Array(pvKw.length).fill(null)
+  for (const f of planFlows ?? []) {
+    const i = tsMap[f.timestep]
+    if (i == null) continue
+    pvKw[i] = f.pv_kw
+    solvedImport[i] = f.grid_import_kw
+    solvedExport[i] = f.grid_export_kw
+  }
   const consKw    = forecast.consumption_kw
   const expPrices = forecast.export_prices
   // Use Tibber variable prices when available (15-min granularity);
@@ -58,11 +71,13 @@ function buildFlowTraces(intents, forecast, evDeviceIds) {
 
   const ts = localTs(forecast.timestamps)
 
+  // Grid import/export: use the solver's own values when available (always
+  // consistent with the plan); derive from the series only as fallback.
   const gridImport = pvKw.map((pv, i) =>
-    Math.max(0, consKw[i] + chargeKw[i] + evChargeKw[i] - pv - dischargeKw[i])
+    solvedImport[i] ?? Math.max(0, consKw[i] + chargeKw[i] + evChargeKw[i] - pv - dischargeKw[i])
   )
   const gridExport = pvKw.map((pv, i) =>
-    Math.max(0, pv + dischargeKw[i] - consKw[i] - chargeKw[i] - evChargeKw[i])
+    solvedExport[i] ?? Math.max(0, pv + dischargeKw[i] - consKw[i] - chargeKw[i] - evChargeKw[i])
   )
 
   return {
@@ -148,7 +163,7 @@ export default defineComponent({
         evList.value = evs
         const evDeviceIds = new Set(evs.map(e => e.device_id))
         const { flowTraces: ft, forecastTraces: fct, priceTraces: pt } =
-          buildFlowTraces(plan.intents, forecast, evDeviceIds)
+          buildFlowTraces(plan.intents, forecast, evDeviceIds, plan.flows)
 
         flowTraces.value  = ft
         fcastTraces.value = fct
@@ -161,6 +176,9 @@ export default defineComponent({
 
     onMounted(() => { refresh(); timer = setInterval(refresh, 60_000) })
     onUnmounted(() => clearInterval(timer))
+    // Refetch immediately when the server pushes a new plan (SSE 'plan'
+    // event) — e.g. after '↺ Refresh plan' finishes or a scheduled re-solve.
+    watch(planVersion, () => refresh())
 
     return { evList, controllable, planMeta, flowTraces, fcastTraces, priceTraces, socTraces, refresh, triggerRefresh, refreshing, XAXIS }
   },

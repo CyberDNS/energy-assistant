@@ -7,7 +7,8 @@ tick it:
 
 1. Receives a ``LiveSituation`` snapshot (grid power, spot price, elapsed dt).
 2. Finds the *active* ``ControlIntent`` for each registered contributor
-   (the most recent intent whose ``timestep ≤ now``).
+   (the most recent intent whose ``timestep ≤ now`` and whose slot has not
+   ended — sparse intent sets like EVs have gaps between charging slots).
 3. Asks each contributor for its **desired power setpoint**.
 4. Sends a ``DeviceCommand(set_power_w=…)`` for every non-None setpoint.
 5. Updates the ``BatteryCostLedger`` based on the *actual* measured power
@@ -74,7 +75,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from .ledger import BatteryCostLedger
@@ -146,6 +147,31 @@ class LiveSituation:
 
     Keyed by ``device_id``.  Used by ``market_price_eur_per_kwh`` to include
     the opportunity cost of discharging batteries as a third supply source.
+    """
+
+    ev_pv_planned_ids: set[str] = field(default_factory=set)
+    """Device ids of EV chargers with a PV-sourced charging intent in the
+    current slot (``power_kw > 0`` and ``grid_allowed=False``).
+
+    Populated by ``ControlLoop._compute_setpoints`` each tick.  EV
+    contributors WITHOUT a planned charging slot use this to yield: they
+    command Stop instead of opportunistic PV mode, so openWB gives the whole
+    live surplus to the chargepoint the optimizer allocated it to instead of
+    splitting it by its own internal priority.
+    """
+
+    ev_pv_reserved_w: float = 0.0
+    """PV surplus (W) reserved for PV-planned EVs this tick.
+
+    Sum over ``ev_pv_planned_ids`` of ``max(0, planned_w − actual_w)`` — the
+    part of each EV's allocation it has not yet ramped up to.  Storage must
+    not absorb this: openWB PV mode reacts to *visible* grid export, both to
+    start charging at all and to decide 1→3 phase switching (which takes
+    minutes).  A battery grabbing the reserved surplus would starve the EV
+    at startup or pin it at its single-phase ceiling.  As the EV ramps up
+    (including after a phase switch) the reservation shrinks to 0 and
+    batteries get the genuine leftover.  Populated by
+    ``ControlLoop._compute_setpoints``.
     """
 
     default_zone_grid_power_w: float | None = None
@@ -323,11 +349,13 @@ class StorageControlContributor:
                 return 0.0
             return power_kw * 1000.0
 
-        # power_kw == 0 → idle: absorb whatever PV surplus arrives
+        # power_kw == 0 → idle: absorb whatever PV surplus arrives —
+        # minus the share reserved for PV-planned EVs (openWB PV mode needs
+        # to see the export to start charging).
         if at_max_soc:
             return 0.0
         max_charge_w = self._constraints.max_charge_kw * 1000.0
-        surplus_w = max(0.0, -live.grid_power_w)
+        surplus_w = max(0.0, -live.grid_power_w - live.ev_pv_reserved_w)
         return min(surplus_w, max_charge_w) if surplus_w > 1.0 else 0.0
 
     def charge_price_eur_per_kwh(
@@ -578,6 +606,27 @@ class ControlLoop:
             c.device_id: self._find_intent(c.device_id, live.timestamp)
             for c in self._contributors
         }
+        # Which EV chargers hold a PV-sourced charging slot right now —
+        # lets unplanned EV contributors yield the surplus (see LiveSituation).
+        live.ev_pv_planned_ids = {
+            c.device_id
+            for c in self._contributors
+            if getattr(c, "is_ev", False)
+            and (i := intents[c.device_id]) is not None
+            and i.power_kw > 0.001
+            and not i.grid_allowed
+        }
+        # Surplus reserved for those EVs: the part of each allocation the EV
+        # has not yet ramped up to.  Batteries must leave this exported so
+        # openWB PV mode can start charging (see LiveSituation docstring).
+        live.ev_pv_reserved_w = sum(
+            max(
+                0.0,
+                intents[did].power_kw * 1000.0
+                - max(0.0, (st.power_w or 0.0) if (st := live.device_states.get(did)) else 0.0),
+            )
+            for did in live.ev_pv_planned_ids
+        )
         grid_ref_w = (
             live.default_zone_grid_power_w
             if live.default_zone_grid_power_w is not None
@@ -590,16 +639,22 @@ class ControlLoop:
         # Charge: grid export appears lower than real PV surplus — subtract it
         #   back so the optimizer sees the full surplus available for charging
         #   (e.g. -1000 W grid + 789 W battery charge → -1789 W true base).
+        # Only storage contributions are removed: the slice optimizer re-adds
+        # storage power itself, whereas EV / threshold consumption is real
+        # load that stays on the grid regardless of what we command.
+        storage_contributors = [
+            c for c in self._contributors if isinstance(c, StorageControlContributor)
+        ]
         current_discharge_w = sum(
             -live.device_states[c.device_id].power_w
-            for c in self._contributors
+            for c in storage_contributors
             if c.device_id in live.device_states
             and live.device_states[c.device_id].power_w is not None
             and live.device_states[c.device_id].power_w < 0
         )
         current_charge_w = sum(
             live.device_states[c.device_id].power_w
-            for c in self._contributors
+            for c in storage_contributors
             if c.device_id in live.device_states
             and live.device_states[c.device_id].power_w is not None
             and live.device_states[c.device_id].power_w > 0
@@ -662,7 +717,9 @@ class ControlLoop:
             optimized_storage = optimize_storage_slice(
                 storage_inputs,
                 grid_power_w=effective_grid_w,
-                pv_surplus_w=max(0.0, -effective_grid_w),
+                # Surplus available to storage = live surplus minus what the
+                # PV-planned EVs still need to ramp up to.
+                pv_surplus_w=max(0.0, -effective_grid_w - live.ev_pv_reserved_w),
                 dt_hours=max(1e-6, live.dt_hours),
                 import_price_eur_per_kwh=live.current_price_eur_per_kwh,
                 export_price_eur_per_kwh=live.pv_opportunity_price_eur_per_kwh,
@@ -741,7 +798,11 @@ class ControlLoop:
         """Return the active ``ControlIntent`` for *device_id* at *now*.
 
         "Active" means the intent with the *greatest* ``timestep`` that is
-        still ≤ *now* (i.e. we are inside that planning slot).
+        still ≤ *now* AND whose slot has not ended (``timestep +
+        step_minutes > now``).  The expiry matters for sparse intent sets —
+        EVs only get intents for their charging slots, so without it a
+        finished PV-charging slot would stay "active" until the end of the
+        plan and e.g. keep claiming the PV surplus allocation.
         Returns ``None`` when no plan is active or no matching intent exists.
         """
         if self._active_plan is None:
@@ -754,4 +815,8 @@ class ControlLoop:
         ]
         if not relevant:
             return None
-        return max(relevant, key=lambda i: i.timestep)
+        best = max(relevant, key=lambda i: i.timestep)
+        slot = timedelta(minutes=self._active_plan.step_minutes)
+        if now >= best.timestep + slot:
+            return None  # slot has ended — sparse plans have gaps
+        return best
