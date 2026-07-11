@@ -486,7 +486,7 @@ class TestThresholdHADeviceReconciliation:
         )
 
     async def test_skips_service_call_when_already_in_desired_state(self) -> None:
-        from tests.helpers.fake_ha_client import FakeHAClient
+        from helpers.fake_ha_client import FakeHAClient
         from energy_assistant.core.models import DeviceCommand
         client = FakeHAClient(states={"switch.cooler": "on"})
         await self._device(client).send_command(
@@ -496,7 +496,7 @@ class TestThresholdHADeviceReconciliation:
 
     async def test_corrects_mismatched_switch(self) -> None:
         """Should be on but is off (e.g. manually toggled) → turn_on sent."""
-        from tests.helpers.fake_ha_client import FakeHAClient
+        from helpers.fake_ha_client import FakeHAClient
         from energy_assistant.core.models import DeviceCommand
         client = FakeHAClient(states={"switch.cooler": "off"})
         await self._device(client).send_command(
@@ -507,7 +507,7 @@ class TestThresholdHADeviceReconciliation:
         ]
 
     async def test_turns_off_when_running_but_standby_desired(self) -> None:
-        from tests.helpers.fake_ha_client import FakeHAClient
+        from helpers.fake_ha_client import FakeHAClient
         from energy_assistant.core.models import DeviceCommand
         client = FakeHAClient(states={"switch.cooler": "on"})
         await self._device(client).send_command(
