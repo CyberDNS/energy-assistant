@@ -615,3 +615,161 @@ class TestMilpHigsOptimizerTerminalValue:
         # With zero basis, discharging to serve load or export is always profitable
         discharge_intents = [i for i in plan.intents if i.power_kw < 0]
         assert discharge_intents, "Expected discharge when stored energy was free"
+
+
+class TestEvPvSourceConstraint:
+    """PV-labeled EV slots must stay within the forecast PV surplus.
+
+    Regression: the solver used to fill grid_allowed=False slots with
+    battery/grid energy far beyond the available PV, which execution
+    (openWB PV mode = real-surplus tracking) can never deliver.
+    """
+
+    # PV window: hours 1–8 relative to the forecast start.  The optimizer
+    # plans from real wall-clock now, so the window must lie in the future.
+    PV_WINDOW = range(1, 9)
+    CONS_KW = 0.4
+
+    @staticmethod
+    def _now() -> datetime:
+        return datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+
+    @staticmethod
+    def _goal(now: datetime, deadline_h: int = 20):
+        from energy_assistant.assets.ev import build_goal_from_parts
+        return build_goal_from_parts(
+            asset_id="ev1", device_id="cp", capacity_kwh=40.0,
+            max_charge_kw=7.4, min_charge_kw=4.14, charge_limit_soc_pct=90.0,
+            target_soc_pct=90.0, target_by=now + timedelta(hours=deadline_h),
+            charge_curve=[], current_soc_pct=60.0, connected=True,
+        )
+
+    @classmethod
+    def _pv_kw_at(cls, now: datetime, ts: datetime, pv_kw: float) -> float:
+        h = int((ts - now).total_seconds() // 3600)
+        return pv_kw if h in cls.PV_WINDOW else 0.0
+
+    @classmethod
+    def _ctx(cls, now: datetime, pv_kw: float, goal) -> OptimizationContext:
+        from energy_assistant.plugins.flat_rate.tariff import FlatRateTariff
+        pv = [ForecastPoint(timestamp=now + timedelta(hours=h),
+                            value=pv_kw if h in cls.PV_WINDOW else 0.0) for h in range(24)]
+        cons = [ForecastPoint(timestamp=now + timedelta(hours=h), value=cls.CONS_KW)
+                for h in range(24)]
+        return OptimizationContext(
+            device_states={"cp": DeviceState(device_id="cp", soc_pct=60.0, available=True),
+                           "bat": _state("bat", soc_pct=90.0)},
+            storage_constraints=[_battery("bat", capacity_kwh=10.0)],
+            tariffs={"grid": FlatRateTariff("grid", import_price_eur_per_kwh=0.30,
+                                            export_price_eur_per_kwh=0.08)},
+            forecasts={
+                ForecastQuantity.PRICE: _hourly_prices(now, [0.30] * 24),
+                ForecastQuantity.PV_GENERATION: pv,
+                ForecastQuantity.CONSUMPTION: cons,
+            },
+            horizon=timedelta(hours=24),
+            ev_charging_goals=[goal],
+        )
+
+    async def test_pv_labeled_slots_never_exceed_forecast_surplus(self) -> None:
+        now = self._now()
+        goal = self._goal(now)
+        # PV 2 kW < min charge 4.14 kW: PV slots are impossible, every
+        # planned charging slot must be grid_allowed=True.
+        plan = await MilpHigsOptimizer(step_minutes=60, precision=0.5).optimize(
+            self._ctx(now, pv_kw=2.0, goal=goal)
+        )
+        ev_intents = [i for i in plan.intents if i.device_id == "cp" and i.power_kw > 0]
+        assert ev_intents, "expected planned EV charging"
+        for i in ev_intents:
+            surplus = self._pv_kw_at(now, i.timestep, 2.0) - self.CONS_KW
+            if not i.grid_allowed:
+                assert i.power_kw <= max(0.0, surplus) + 0.05, (
+                    f"pv-labeled slot {i.timestep} plans {i.power_kw} kW "
+                    f"but only {surplus:.1f} kW PV surplus is available"
+                )
+
+    async def test_ample_pv_yields_pv_labeled_slots_within_surplus(self) -> None:
+        now = self._now()
+        goal = self._goal(now)
+        plan = await MilpHigsOptimizer(step_minutes=60, precision=0.5).optimize(
+            self._ctx(now, pv_kw=6.0, goal=goal)
+        )
+        ev_intents = [i for i in plan.intents if i.device_id == "cp" and i.power_kw > 0]
+        pv_slots = [i for i in ev_intents if not i.grid_allowed]
+        assert pv_slots, "with 6 kW PV the solver should plan PV-sourced slots"
+        for i in pv_slots:
+            assert i.power_kw <= 6.0 - self.CONS_KW + 0.05
+
+    async def test_plan_carries_solved_flows(self) -> None:
+        """Plans must expose the solver's per-slot site flows (effective PV,
+        grid import/export) so the UI doesn't re-derive them from raw
+        forecasts (which diverge e.g. via the live-PV floor)."""
+        now = self._now()
+        goal = self._goal(now)
+        plan = await MilpHigsOptimizer(step_minutes=60, precision=0.5).optimize(
+            self._ctx(now, pv_kw=6.0, goal=goal)
+        )
+        assert plan.flows, "expected solved flows on the plan"
+        by_ts = {f.timestep: f for f in plan.flows}
+        for i in plan.intents:
+            if i.device_id == "cp" and i.power_kw > 0 and not i.grid_allowed:
+                f = by_ts[i.timestep]
+                # PV slot: solver reports no grid import beyond tolerance.
+                assert f.grid_import_kw <= 0.05, (
+                    f"pv slot {i.timestep} has solved grid import {f.grid_import_kw} kW"
+                )
+                assert f.pv_kw > 0.0
+
+
+class TestLivePvBlend:
+    """Current-hour PV: anchored at the live reading, linearly approaching
+    the forecast value by the end of the hour (both directions)."""
+
+    @staticmethod
+    async def _flows(live_pv_w: float, forecast_kw: float):
+        from energy_assistant.plugins.flat_rate.tariff import FlatRateTariff
+        now = datetime.now(timezone.utc)
+        pv = [ForecastPoint(timestamp=now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=h),
+                            value=forecast_kw) for h in range(24)]
+        ctx = OptimizationContext(
+            device_states={
+                "bat": _state("bat", soc_pct=50.0),
+                "pv": DeviceState(device_id="pv", power_w=-live_pv_w),
+            },
+            storage_constraints=[_battery("bat")],
+            tariffs={"grid": FlatRateTariff("grid", import_price_eur_per_kwh=0.30,
+                                            export_price_eur_per_kwh=0.08)},
+            forecasts={
+                ForecastQuantity.PRICE: _hourly_prices(now, [0.30] * 24),
+                ForecastQuantity.PV_GENERATION: pv,
+            },
+            horizon=timedelta(hours=24),
+            producer_device_ids={"pv"},
+        )
+        plan = await MilpHigsOptimizer(step_minutes=15, precision=0.5).optimize(ctx)
+        hour_end = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        in_hour = [f for f in plan.flows if f.timestep < hour_end]
+        after = [f for f in plan.flows if f.timestep >= hour_end]
+        return in_hour, after
+
+    async def test_live_above_forecast_blends_down(self) -> None:
+        in_hour, after = await self._flows(live_pv_w=5_000.0, forecast_kw=2.0)
+        assert in_hour, "expected slots in the current hour"
+        # First slot anchored at (or near) the live 5 kW reading.
+        assert in_hour[0].pv_kw >= 4.0
+        # Monotonically approaching the forecast, never leaving [2, 5].
+        vals = [f.pv_kw for f in in_hour]
+        assert all(2.0 - 1e-6 <= v <= 5.0 + 1e-6 for v in vals)
+        assert all(a >= b - 1e-6 for a, b in zip(vals, vals[1:]))
+        # Beyond the hour: pure forecast.
+        assert all(abs(f.pv_kw - 2.0) < 1e-6 for f in after[:8])
+
+    async def test_live_below_forecast_blends_up(self) -> None:
+        in_hour, after = await self._flows(live_pv_w=1_000.0, forecast_kw=4.0)
+        assert in_hour
+        assert in_hour[0].pv_kw <= 2.0   # anchored near the live 1 kW
+        vals = [f.pv_kw for f in in_hour]
+        assert all(1.0 - 1e-6 <= v <= 4.0 + 1e-6 for v in vals)
+        assert all(a <= b + 1e-6 for a, b in zip(vals, vals[1:]))
+        assert all(abs(f.pv_kw - 4.0) < 1e-6 for f in after[:8])

@@ -29,6 +29,7 @@ from . import (  # noqa: E402
     generic_homeassistant,
     generic_iobroker,
     openwb_homeassistant,
+    openwb_mqtt,
     pvforecast_iobroker,
     sma_modbus_iobroker,
     static_profile,
@@ -43,6 +44,7 @@ generic_consumer.register(registry)
 generic_homeassistant.register(registry)
 generic_iobroker.register(registry)
 openwb_homeassistant.register(registry)
+openwb_mqtt.register(registry)
 pvforecast_iobroker.register(registry)
 sma_modbus_iobroker.register(registry)
 static_profile.register(registry)
