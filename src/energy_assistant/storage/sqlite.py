@@ -22,11 +22,12 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import aiosqlite
 
+from ..assets.ev import EvDayOverride, EvWeeklyTarget
 from ..core.models import Measurement
 
 _log = logging.getLogger(__name__)
@@ -84,29 +85,73 @@ CREATE INDEX IF NOT EXISTS idx_device_timestamp
     ON measurements (device_id, timestamp)
 """
 
-_CREATE_EV_TARGETS_TABLE = """
-CREATE TABLE IF NOT EXISTS ev_targets (
-    asset_id       TEXT PRIMARY KEY,
+_CREATE_EV_WEEKLY_PLAN_TABLE = """
+CREATE TABLE IF NOT EXISTS ev_weekly_plan (
+    asset_id       TEXT NOT NULL,
+    weekday        INTEGER NOT NULL,
+    enabled        INTEGER NOT NULL,
     target_soc_pct REAL NOT NULL,
     target_by      TEXT NOT NULL,
+    PRIMARY KEY (asset_id, weekday)
+)
+"""
+
+_UPSERT_EV_WEEKLY_ROW = """
+INSERT INTO ev_weekly_plan (asset_id, weekday, enabled, target_soc_pct, target_by)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(asset_id, weekday) DO UPDATE SET
+    enabled        = excluded.enabled,
+    target_soc_pct = excluded.target_soc_pct,
+    target_by      = excluded.target_by
+"""
+
+_LOAD_ALL_EV_WEEKLY = "SELECT asset_id, weekday, enabled, target_soc_pct, target_by FROM ev_weekly_plan"
+
+_CREATE_EV_DAY_OVERRIDES_TABLE = """
+CREATE TABLE IF NOT EXISTS ev_day_overrides (
+    asset_id       TEXT NOT NULL,
+    date           TEXT NOT NULL,
+    skip           INTEGER NOT NULL DEFAULT 0,
+    target_soc_pct REAL,
+    target_by      TEXT,
+    PRIMARY KEY (asset_id, date)
+)
+"""
+
+_UPSERT_EV_DAY_OVERRIDE = """
+INSERT INTO ev_day_overrides (asset_id, date, skip, target_soc_pct, target_by)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(asset_id, date) DO UPDATE SET
+    skip           = excluded.skip,
+    target_soc_pct = excluded.target_soc_pct,
+    target_by      = excluded.target_by
+"""
+
+_DELETE_EV_DAY_OVERRIDE = "DELETE FROM ev_day_overrides WHERE asset_id = ? AND date = ?"
+
+_PURGE_EV_DAY_OVERRIDES = "DELETE FROM ev_day_overrides WHERE asset_id = ? AND date < ?"
+
+_LOAD_ALL_EV_DAY_OVERRIDES = "SELECT asset_id, date, skip, target_soc_pct, target_by FROM ev_day_overrides"
+
+_CREATE_EV_FORCE_CHARGE_TABLE = """
+CREATE TABLE IF NOT EXISTS ev_force_charge (
+    asset_id       TEXT PRIMARY KEY,
+    target_soc_pct REAL NOT NULL,
     created_at     TEXT NOT NULL
 )
 """
 
-_UPSERT_EV_TARGET = """
-INSERT INTO ev_targets (asset_id, target_soc_pct, target_by, created_at)
-VALUES (?, ?, ?, ?)
+_UPSERT_EV_FORCE_CHARGE = """
+INSERT INTO ev_force_charge (asset_id, target_soc_pct, created_at)
+VALUES (?, ?, ?)
 ON CONFLICT(asset_id) DO UPDATE SET
     target_soc_pct = excluded.target_soc_pct,
-    target_by      = excluded.target_by,
     created_at     = excluded.created_at
 """
 
-_DELETE_EV_TARGET = "DELETE FROM ev_targets WHERE asset_id = ?"
+_DELETE_EV_FORCE_CHARGE = "DELETE FROM ev_force_charge WHERE asset_id = ?"
 
-_LOAD_EV_TARGET = "SELECT target_soc_pct, target_by FROM ev_targets WHERE asset_id = ?"
-
-_LOAD_ALL_EV_TARGETS = "SELECT asset_id, target_soc_pct, target_by FROM ev_targets"
+_LOAD_ALL_EV_FORCE_CHARGE = "SELECT asset_id, target_soc_pct FROM ev_force_charge"
 
 _CREATE_EV_DISABLED_TABLE = """
 CREATE TABLE IF NOT EXISTS ev_disabled (
@@ -185,8 +230,12 @@ class SqliteStorageBackend:
         await self._db.execute(_CREATE_TABLE)
         await self._db.execute(_CREATE_LEDGER_TABLE)
         await self._db.execute(_CREATE_LEDGER_HISTORY_TABLE)
-        await self._db.execute(_CREATE_EV_TARGETS_TABLE)
+        await self._db.execute(_CREATE_EV_WEEKLY_PLAN_TABLE)
+        await self._db.execute(_CREATE_EV_DAY_OVERRIDES_TABLE)
+        await self._db.execute(_CREATE_EV_FORCE_CHARGE_TABLE)
         await self._db.execute(_CREATE_EV_DISABLED_TABLE)
+        # Superseded by ev_weekly_plan + ev_day_overrides
+        await self._db.execute("DROP TABLE IF EXISTS ev_targets")
         await self._db.execute(_CREATE_INDEX)
         await self._db.execute(_CREATE_LEDGER_HISTORY_INDEX)
         await self._db.commit()
@@ -317,29 +366,94 @@ class SqliteStorageBackend:
         return float(row[0]), float(row[1])
 
     # ------------------------------------------------------------------
-    # EV charging target overrides
+    # EV charge plans (weekly plan + dated overrides + force charge)
     # ------------------------------------------------------------------
 
-    async def set_ev_target(
+    async def set_ev_weekly_plan(
         self,
         asset_id: str,
-        target_soc_pct: float,
-        target_by: datetime,
+        entries: "list[EvWeeklyTarget]",
     ) -> None:
-        """Persist a UI charging-target override for *asset_id*."""
-        assert self._db is not None, "Call start() before set_ev_target()"
-        now = datetime.now(timezone.utc).isoformat()
+        """Replace the full weekly plan for *asset_id* (7 rows max)."""
+        assert self._db is not None, "Call start() before set_ev_weekly_plan()"
+        await self._db.execute("DELETE FROM ev_weekly_plan WHERE asset_id = ?", (asset_id,))
+        for e in entries:
+            await self._db.execute(
+                _UPSERT_EV_WEEKLY_ROW,
+                (asset_id, e.weekday, int(e.enabled), e.target_soc_pct, e.target_by),
+            )
+        await self._db.commit()
+
+    async def load_all_ev_weekly_plans(self) -> "dict[str, dict[int, EvWeeklyTarget]]":
+        assert self._db is not None, "Call start() before load_all_ev_weekly_plans()"
+        async with self._db.execute(_LOAD_ALL_EV_WEEKLY) as cursor:
+            rows = await cursor.fetchall()
+        result: dict[str, dict[int, EvWeeklyTarget]] = {}
+        for asset_id, weekday, enabled, soc, hhmm in rows:
+            result.setdefault(asset_id, {})[int(weekday)] = EvWeeklyTarget(
+                weekday=int(weekday),
+                enabled=bool(enabled),
+                target_soc_pct=float(soc),
+                target_by=str(hhmm),
+            )
+        return result
+
+    async def set_ev_day_override(self, asset_id: str, override: "EvDayOverride") -> None:
+        assert self._db is not None, "Call start() before set_ev_day_override()"
         await self._db.execute(
-            _UPSERT_EV_TARGET,
-            (asset_id, target_soc_pct, target_by.isoformat(), now),
+            _UPSERT_EV_DAY_OVERRIDE,
+            (
+                asset_id,
+                override.date.isoformat(),
+                int(override.skip),
+                override.target_soc_pct,
+                override.target_by,
+            ),
         )
         await self._db.commit()
 
-    async def clear_ev_target(self, asset_id: str) -> None:
-        """Remove any UI override for *asset_id*."""
-        assert self._db is not None, "Call start() before clear_ev_target()"
-        await self._db.execute(_DELETE_EV_TARGET, (asset_id,))
+    async def clear_ev_day_override(self, asset_id: str, day: date) -> None:
+        assert self._db is not None, "Call start() before clear_ev_day_override()"
+        await self._db.execute(_DELETE_EV_DAY_OVERRIDE, (asset_id, day.isoformat()))
         await self._db.commit()
+
+    async def purge_ev_day_overrides_before(self, asset_id: str, day: date) -> None:
+        """Delete expired overrides (dates strictly before *day*, asset-local today)."""
+        assert self._db is not None, "Call start() before purge_ev_day_overrides_before()"
+        await self._db.execute(_PURGE_EV_DAY_OVERRIDES, (asset_id, day.isoformat()))
+        await self._db.commit()
+
+    async def load_all_ev_day_overrides(self) -> "dict[str, dict[date, EvDayOverride]]":
+        assert self._db is not None, "Call start() before load_all_ev_day_overrides()"
+        async with self._db.execute(_LOAD_ALL_EV_DAY_OVERRIDES) as cursor:
+            rows = await cursor.fetchall()
+        result: dict[str, dict[date, EvDayOverride]] = {}
+        for asset_id, date_str, skip, soc, hhmm in rows:
+            d = date.fromisoformat(date_str)
+            result.setdefault(asset_id, {})[d] = EvDayOverride(
+                date=d,
+                skip=bool(skip),
+                target_soc_pct=float(soc) if soc is not None else None,
+                target_by=str(hhmm) if hhmm is not None else None,
+            )
+        return result
+
+    async def set_ev_force_charge(self, asset_id: str, target_soc_pct: float) -> None:
+        assert self._db is not None, "Call start() before set_ev_force_charge()"
+        now = datetime.now(timezone.utc).isoformat()
+        await self._db.execute(_UPSERT_EV_FORCE_CHARGE, (asset_id, target_soc_pct, now))
+        await self._db.commit()
+
+    async def clear_ev_force_charge(self, asset_id: str) -> None:
+        assert self._db is not None, "Call start() before clear_ev_force_charge()"
+        await self._db.execute(_DELETE_EV_FORCE_CHARGE, (asset_id,))
+        await self._db.commit()
+
+    async def load_all_ev_force_charge(self) -> dict[str, float]:
+        assert self._db is not None, "Call start() before load_all_ev_force_charge()"
+        async with self._db.execute(_LOAD_ALL_EV_FORCE_CHARGE) as cursor:
+            rows = await cursor.fetchall()
+        return {row[0]: float(row[1]) for row in rows}
 
     async def set_ev_disabled(self, asset_id: str) -> None:
         assert self._db is not None
@@ -357,14 +471,3 @@ class SqliteStorageBackend:
         async with self._db.execute(_LOAD_ALL_EV_DISABLED) as cursor:
             rows = await cursor.fetchall()
         return {row[0] for row in rows}
-
-    async def load_all_ev_targets(self) -> dict[str, tuple[float, datetime]]:
-        """Return all stored overrides as ``{asset_id: (target_soc_pct, target_by_utc)}``."""
-        assert self._db is not None, "Call start() before load_all_ev_targets()"
-        async with self._db.execute(_LOAD_ALL_EV_TARGETS) as cursor:
-            rows = await cursor.fetchall()
-        result: dict[str, tuple[float, datetime]] = {}
-        for row in rows:
-            asset_id, soc, ts_str = row
-            result[asset_id] = (float(soc), datetime.fromisoformat(ts_str))
-        return result

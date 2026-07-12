@@ -49,8 +49,22 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
-from ..assets.ev import EvChargerContributor, EvChargingAsset, EvChargingGoal
-from ..assets.loader import parse_ev_assets, parse_threshold_assets, resolve_active_goals
+from pydantic import BaseModel
+
+from ..assets.ev import (
+    EvChargerContributor,
+    EvChargingAsset,
+    EvChargingGoal,
+    EvDayOverride,
+    EvWeeklyTarget,
+)
+from ..assets.loader import (
+    asset_zoneinfo,
+    parse_ev_assets,
+    parse_threshold_assets,
+    resolve_active_goals,
+    upcoming_days,
+)
 from ..assets.threshold import ThresholdControlContributor
 from ..config.yaml import YamlConfigLoader
 from ..core.config import AppConfig
@@ -60,6 +74,7 @@ from ..core.forecast import ForecastProvider
 from ..core.ledger import BatteryCostLedger
 from ..core.models import (
     DeviceRole,
+    EnergyPlan,
     ForecastPoint,
     ForecastQuantity,
     Measurement,
@@ -398,6 +413,23 @@ async def _virtual_forecast_power_w(device_cfg: dict) -> float | None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+class WeeklyPlanRow(BaseModel):
+    weekday: int              # ISO 1=Mon … 7=Sun
+    enabled: bool
+    target_soc_pct: float
+    target_by: str            # "HH:MM" asset-local
+
+
+class WeeklyPlanBody(BaseModel):
+    weekly: list[WeeklyPlanRow]
+
+
+class DayOverrideBody(BaseModel):
+    skip: bool = False
+    target_soc_pct: float | None = None
+    target_by: str | None = None   # "HH:MM" asset-local
+
+
 class Application:
     """Main orchestrator — wires and runs all platform loops.
 
@@ -456,11 +488,20 @@ class Application:
         self._ev_contributors: list[EvChargerContributor] = []
         self._threshold_constraints: list[ThresholdConstraints] = []
         self._threshold_contributors: list[ThresholdControlContributor] = []
-        self._ev_overrides: dict[str, tuple[float, datetime]] = {}
+        self._ev_weekly_plans: dict[str, dict[int, EvWeeklyTarget]] = {}
+        self._ev_day_overrides: dict[str, dict[date, EvDayOverride]] = {}
+        self._ev_force_charge: dict[str, float] = {}
+        # Last seen plugged state per asset — detects the plugged→unplugged
+        # transition that cancels an active force charge.
+        self._ev_prev_plugged: dict[str, bool] = {}
+        # In-memory staging for the HA/MQTT date+time+soc picker entities.
         self._staged_overrides: dict[str, tuple[float, datetime]] = {}
         self._disabled_chargepoints: set[str] = set()
         self._last_ev_goals: list[EvChargingGoal] = []
         self._mqtt_publisher: EvMqttPublisher | None = None
+        # >0 while _run_plan() is executing — surfaced in the status payload
+        # so the UI can show "recalculating" after plan-affecting edits.
+        self._plan_active_count = 0
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -526,16 +567,20 @@ class Application:
         self._ev_contributors = [EvChargerContributor(a) for a in self._ev_assets]
         for contrib in self._ev_contributors:
             self._control_loop.register_contributor(contrib)
-        # Load persisted overrides and disabled state from SQLite
-        self._ev_overrides = await self._storage.load_all_ev_targets()
-        self._staged_overrides = dict(self._ev_overrides)  # staged starts from any persisted override
+        # Load persisted charge plans, overrides, force-charge and disabled state
+        self._ev_weekly_plans = await self._storage.load_all_ev_weekly_plans()
+        self._ev_day_overrides = await self._storage.load_all_ev_day_overrides()
+        self._ev_force_charge = await self._storage.load_all_ev_force_charge()
         self._disabled_chargepoints = await self._storage.load_all_ev_disabled()
         for contrib in self._ev_contributors:
             asset = next(a for a in self._ev_assets if a.device_id == contrib.device_id)
             contrib.set_disabled(asset.asset_id in self._disabled_chargepoints)
+            contrib.set_force_charge(self._ev_force_charge.get(asset.asset_id))
         _log.info(
-            "Loaded %d EV assets (%d overrides, %d disabled)",
-            len(self._ev_assets), len(self._ev_overrides), len(self._disabled_chargepoints),
+            "Loaded %d EV assets (%d weekly plans, %d day overrides, %d forced, %d disabled)",
+            len(self._ev_assets), len(self._ev_weekly_plans),
+            sum(len(v) for v in self._ev_day_overrides.values()),
+            len(self._ev_force_charge), len(self._disabled_chargepoints),
         )
 
         # 7c — Threshold assets + contributors
@@ -561,11 +606,18 @@ class Application:
 
         # 8 — Subscribe control loop to plan updates via event bus
         # _plan_seq lets the /api/stream SSE endpoint notify UI clients the
-        # moment a new plan is published.
+        # moment a new plan is published.  _display_plan is what the API
+        # serves — it may briefly be the coarse startup fast-pass plan, which
+        # is DISPLAY-ONLY and never reaches the control loop: a throwaway
+        # plan must not actuate hardware (a spurious 'run' slot switched the
+        # aquarium cooler on at startup, and the compressor min-runtime then
+        # held it on for 30 min against the refined plan).
         self._plan_seq = 0
+        self._display_plan: EnergyPlan | None = None
 
         async def _on_plan_updated(event: PlanUpdatedEvent) -> None:
             self._control_loop.update_plan(event.plan)
+            self._display_plan = event.plan
             self._plan_seq += 1
 
         self._bus.subscribe(PlanUpdatedEvent, _on_plan_updated)
@@ -630,34 +682,112 @@ class Application:
             await self.stop()
 
     # ------------------------------------------------------------------
-    # MQTT callbacks (called by EvMqttPublisher on incoming commands)
+    # EV charge-plan helpers
     # ------------------------------------------------------------------
 
+    def _ev_asset(self, asset_id: str) -> EvChargingAsset | None:
+        return next((a for a in self._ev_assets if a.asset_id == asset_id), None)
+
+    async def _set_ev_day_override(self, asset_id: str, override: EvDayOverride) -> None:
+        await self._storage.set_ev_day_override(asset_id, override)
+        self._ev_day_overrides.setdefault(asset_id, {})[override.date] = override
+
+    async def _clear_ev_day_override(self, asset_id: str, day: date) -> None:
+        await self._storage.clear_ev_day_override(asset_id, day)
+        self._ev_day_overrides.get(asset_id, {}).pop(day, None)
+
+    async def _purge_expired_ev_overrides(self) -> None:
+        """Drop overrides whose local calendar day has passed (asset timezone)."""
+        now = datetime.now(timezone.utc)
+        for asset in self._ev_assets:
+            today_local = now.astimezone(asset_zoneinfo(asset)).date()
+            overrides = self._ev_day_overrides.get(asset.asset_id)
+            if not overrides:
+                continue
+            expired = [d for d in overrides if d < today_local]
+            if expired:
+                await self._storage.purge_ev_day_overrides_before(asset.asset_id, today_local)
+                for d in expired:
+                    overrides.pop(d, None)
+                _log.info("EV overrides expired for %r: %s", asset.asset_id, expired)
+
+    async def _apply_force_charge(self, asset_id: str, target_soc_pct: float) -> None:
+        await self._storage.set_ev_force_charge(asset_id, target_soc_pct)
+        self._ev_force_charge[asset_id] = target_soc_pct
+        asset = self._ev_asset(asset_id)
+        for contrib in self._ev_contributors:
+            if asset is not None and contrib.device_id == asset.device_id:
+                contrib.set_force_charge(target_soc_pct)
+        # Write the chosen target as the instant-charging SoC limit so the
+        # wallbox itself stops at the target between our control ticks.
+        if asset is not None:
+            device = self._registry.get(asset.device_id)
+            if device is not None and hasattr(device, "update_target_soc"):
+                device.update_target_soc(target_soc_pct)
+        _log.info("EV force charge ON: %r → %.0f%%", asset_id, target_soc_pct)
+        asyncio.create_task(self._run_plan())
+
+    async def _clear_force_charge(self, asset_id: str, reason: str) -> None:
+        await self._storage.clear_ev_force_charge(asset_id)
+        self._ev_force_charge.pop(asset_id, None)
+        asset = self._ev_asset(asset_id)
+        for contrib in self._ev_contributors:
+            if asset is not None and contrib.device_id == asset.device_id:
+                contrib.set_force_charge(None)
+        _log.info("EV force charge OFF: %r (%s)", asset_id, reason)
+        asyncio.create_task(self._run_plan())
+
+    # ------------------------------------------------------------------
+    # MQTT callbacks (called by EvMqttPublisher on incoming commands)
+    # ------------------------------------------------------------------
+    # The HA entities stage a (soc, deadline) pair; the override switch maps
+    # it onto a dated override for the deadline's local calendar date.
+
+    def _staged_override_parts(self, asset_id: str) -> tuple[float, date, str] | None:
+        staged = self._staged_overrides.get(asset_id)
+        asset = self._ev_asset(asset_id)
+        if staged is None or asset is None:
+            return None
+        soc, deadline_utc = staged
+        local = deadline_utc.astimezone(asset_zoneinfo(asset))
+        return soc, local.date(), local.strftime("%H:%M")
+
+    def _mqtt_override_active(self, asset_id: str) -> bool:
+        parts = self._staged_override_parts(asset_id)
+        if parts is None:
+            return False
+        _soc, day, _hhmm = parts
+        ov = self._ev_day_overrides.get(asset_id, {}).get(day)
+        return ov is not None and not ov.skip
+
     async def _mqtt_stage_target(self, asset_id: str, soc: float, deadline: datetime) -> None:
+        was_active = self._mqtt_override_active(asset_id)
         self._staged_overrides[asset_id] = (soc, deadline)
         _log.info("MQTT staged: %r → %.0f%% by %s", asset_id, soc, deadline)
-        # If override is already active, apply the updated staged values immediately
-        if asset_id in self._ev_overrides:
-            await self._storage.set_ev_target(asset_id, soc, deadline)
-            self._ev_overrides[asset_id] = (soc, deadline)
-            asyncio.create_task(self._run_plan())
+        # If the override switch is ON, apply the updated staged values immediately
+        if was_active:
+            await self._mqtt_enable_override(asset_id)
 
     async def _mqtt_enable_override(self, asset_id: str) -> None:
-        staged = self._staged_overrides.get(asset_id)
-        if staged is None:
+        parts = self._staged_override_parts(asset_id)
+        if parts is None:
             _log.warning("MQTT enable_override: no staged values for %r", asset_id)
             return
-        soc, deadline = staged
-        await self._storage.set_ev_target(asset_id, soc, deadline)
-        self._ev_overrides[asset_id] = (soc, deadline)
-        _log.info("MQTT override enabled: %r → %.0f%% by %s", asset_id, soc, deadline)
+        soc, day, hhmm = parts
+        await self._set_ev_day_override(
+            asset_id, EvDayOverride(date=day, skip=False, target_soc_pct=soc, target_by=hhmm)
+        )
+        _log.info("MQTT override enabled: %r → %.0f%% on %s at %s", asset_id, soc, day, hhmm)
         asyncio.create_task(self._run_plan())
 
     async def _mqtt_disable_override(self, asset_id: str) -> None:
-        if asset_id in self._ev_overrides:
-            await self._storage.clear_ev_target(asset_id)
-            self._ev_overrides.pop(asset_id, None)
-            _log.info("MQTT override disabled: %r (staged values kept)", asset_id)
+        parts = self._staged_override_parts(asset_id)
+        if parts is None:
+            return
+        _soc, day, _hhmm = parts
+        if day in self._ev_day_overrides.get(asset_id, {}):
+            await self._clear_ev_day_override(asset_id, day)
+            _log.info("MQTT override disabled: %r for %s (staged values kept)", asset_id, day)
             asyncio.create_task(self._run_plan())
 
     # ------------------------------------------------------------------
@@ -723,6 +853,13 @@ class Application:
 
     async def _run_plan(self) -> None:
         """Assemble context, optimize, publish plan, refresh price cache."""
+        self._plan_active_count += 1
+        try:
+            await self._run_plan_inner()
+        finally:
+            self._plan_active_count -= 1
+
+    async def _run_plan_inner(self) -> None:
         # Refresh cached PV opportunity price
         self._pv_opportunity_price = await _current_export_price(self._tariffs)
 
@@ -822,20 +959,35 @@ class Application:
             forecasts, self._optimizer._step_min, self._horizon
         )
 
-        # Compute active EV goals from current SoC + schedule/overrides,
-        # excluding disabled chargepoints from both planning and control.
-        active_assets = [a for a in self._ev_assets if a.asset_id not in self._disabled_chargepoints]
-        ev_goals = resolve_active_goals(active_assets, device_states, self._ev_overrides)
+        # Compute active EV goals from current SoC + weekly plan/overrides.
+        # Disabled chargepoints are excluded from planning and control;
+        # force-charging ones are excluded from planning (control bypasses
+        # the plan while forced, and the next re-solve sees the raised SoC).
+        await self._purge_expired_ev_overrides()
+        active_assets = [
+            a for a in self._ev_assets
+            if a.asset_id not in self._disabled_chargepoints
+            and a.asset_id not in self._ev_force_charge
+        ]
+        ev_goals = resolve_active_goals(
+            active_assets, device_states, self._ev_weekly_plans, self._ev_day_overrides
+        )
         self._last_ev_goals = ev_goals
         # Push updated goals to contributors so the control loop uses them.
         # Also propagate the target SoC to devices that write it to hardware
-        # (e.g. openWB instant-charging SoC limit register).
+        # (e.g. openWB instant-charging SoC limit register).  While a force
+        # charge is active its target wins.
+        assets_by_device = {a.device_id: a for a in self._ev_assets}
         for contrib in self._ev_contributors:
             goal = next((g for g in ev_goals if g.device_id == contrib.device_id), None)
             contrib.update_goal(goal)
             device = self._registry.get(contrib.device_id)
             if device is not None and hasattr(device, "update_target_soc"):
-                device.update_target_soc(goal.target_soc_pct if goal else None)
+                asset = assets_by_device.get(contrib.device_id)
+                force = self._ev_force_charge.get(asset.asset_id) if asset else None
+                device.update_target_soc(
+                    force if force is not None else (goal.target_soc_pct if goal else None)
+                )
         if ev_goals:
             _log.info(
                 "EV goals: %s",
@@ -859,19 +1011,24 @@ class Application:
         )
 
         # Two-stage solve: when no plan is active yet (first run after
-        # startup), publish a coarse fast-pass plan immediately so the UI
+        # startup), compute a coarse fast-pass plan immediately so the UI
         # has data, then refine with the configured-precision solve below.
+        # The fast plan is DISPLAY-ONLY (never published to the control loop):
+        # its coarse decisions can contradict the refined plan seconds later,
+        # and actuating hardware on it caused e.g. a spurious cooler start
+        # that the compressor min-runtime then locked in for 30 minutes.
         active = self._control_loop._active_plan
         if active is None or not active.intents:
             try:
                 fast_plan = await self._fast_optimizer.optimize(context)
                 if fast_plan.intents:
                     _log.info(
-                        "Fast first-pass plan: %d intents — refining at full precision…",
+                        "Fast first-pass plan: %d intents (display-only) — "
+                        "refining at full precision…",
                         len(fast_plan.intents),
                     )
-                    await self._bus.publish(PlanUpdatedEvent(plan=fast_plan))
-                    await self._bus.flush()
+                    self._display_plan = fast_plan
+                    self._plan_seq += 1  # notify SSE clients
             except Exception as exc:  # noqa: BLE001
                 _log.warning("Fast first-pass optimizer failed: %s", exc)
 
@@ -886,8 +1043,16 @@ class Application:
         await self._bus.flush()
 
         if self._mqtt_publisher is not None:
+            # override_active per asset = the staged deadline's local date has
+            # a dated override (see _mqtt_enable_override).
+            mqtt_overrides = {
+                a.asset_id: staged
+                for a in self._ev_assets
+                if (staged := self._staged_overrides.get(a.asset_id)) is not None
+                and self._mqtt_override_active(a.asset_id)
+            }
             await self._mqtt_publisher.publish_states(
-                ev_goals, device_states, self._ev_overrides, self._staged_overrides
+                ev_goals, device_states, mqtt_overrides, self._staged_overrides
             )
 
     # ------------------------------------------------------------------
@@ -906,6 +1071,33 @@ class Application:
 
             await self._do_control_tick(dt_hours)
             await asyncio.sleep(self._control_interval_s)
+
+    async def _check_force_charge_reset(self, device_states: dict[str, Any]) -> None:
+        """Auto-clear force charges: on plugged→unplugged transition or when
+        the target SoC is reached.
+
+        Uses the plug state from ``extra["plugged"]`` — not ``available``,
+        which also drops on MQTT bridge loss; a broker hiccup or restart must
+        not cancel a force charge while the car is still at the wallbox.
+        """
+        for asset in self._ev_assets:
+            state = device_states.get(asset.device_id)
+            plugged = state.extra.get("plugged") if state is not None else None
+            if not isinstance(plugged, bool):
+                continue  # no plug info this tick — keep previous knowledge
+
+            prev = self._ev_prev_plugged.get(asset.asset_id)
+            self._ev_prev_plugged[asset.asset_id] = plugged
+
+            target = self._ev_force_charge.get(asset.asset_id)
+            if target is None:
+                continue
+            if prev is True and not plugged:
+                await self._clear_force_charge(asset.asset_id, "vehicle unplugged")
+            elif state is not None and state.soc_pct is not None and state.soc_pct >= target:
+                await self._clear_force_charge(
+                    asset.asset_id, f"target {target:.0f}% reached"
+                )
 
     async def _do_control_tick(self, dt_hours: float) -> None:
         """Build ``LiveSituation`` and call ``ControlLoop.tick()``."""
@@ -938,6 +1130,8 @@ class Application:
             for device in self._registry.all()
             if (state := self._registry.latest_state(device.device_id)) is not None
         }
+
+        await self._check_force_charge_reset(device_states)
 
         live = LiveSituation(
             timestamp=now,
@@ -1101,6 +1295,7 @@ class Application:
 
             return {
                 "timestamp": now.isoformat(),
+                "planning": self._plan_active_count > 0,
                 "grid_power_w": grid_power_w,
                 "current_price_eur_per_kwh": current_price,
                 "pv_opportunity_price_eur_per_kwh": self._pv_opportunity_price,
@@ -1179,7 +1374,7 @@ class Application:
         @api.get("/api/plan")
         async def get_plan() -> dict:
             """Active EnergyPlan: all intents with planned power and mode."""
-            plan = self._control_loop._active_plan
+            plan = self._display_plan or self._control_loop._active_plan
             if plan is None:
                 return {"created_at": None, "step_minutes": self._optimizer._step_min, "intents": []}
             return {
@@ -1216,7 +1411,7 @@ class Application:
         async def trigger_plan_refresh() -> dict:
             """Trigger an immediate plan recomputation outside the normal interval."""
             await self._run_plan()
-            plan = self._control_loop._active_plan
+            plan = self._display_plan or self._control_loop._active_plan
             return {"ok": True, "created_at": plan.created_at.isoformat() if plan else None}
 
         @api.get("/api/debug/plan_inputs")
@@ -1300,7 +1495,7 @@ class Application:
         @api.get("/api/forecast")
         async def get_forecast() -> dict:
             """Last forecast snapshot aligned to the active plan timesteps."""
-            plan = self._control_loop._active_plan
+            plan = self._display_plan or self._control_loop._active_plan
             if plan is None or not plan.intents:
                 return {"timestamps": [], "prices": [], "export_prices": [],
                         "pv_kw": [], "consumption_kw": [], "step_minutes": self._optimizer._step_min,
@@ -1491,15 +1686,19 @@ class Application:
                 if (state := self._registry.latest_state(device.device_id)) is not None
                 for did in (device.device_id,)
             }
-            # Compute fresh goals so target always reflects the current override/schedule,
+            # Compute fresh goals so target always reflects the current plan/overrides,
             # not the (potentially stale) last plan run.
-            fresh_goals = resolve_active_goals(self._ev_assets, device_states, self._ev_overrides)
+            fresh_goals = resolve_active_goals(
+                self._ev_assets, device_states,
+                self._ev_weekly_plans, self._ev_day_overrides,
+            )
             result = []
             for asset in self._ev_assets:
                 state = self._registry.latest_state(asset.device_id)
                 goal = next((g for g in fresh_goals if g.asset_id == asset.asset_id), None)
                 # phase1/phase2 kWh come from the last optimizer run (more accurate energy split)
                 planned = next((g for g in self._last_ev_goals if g.asset_id == asset.asset_id), None)
+                force = self._ev_force_charge.get(asset.asset_id)
                 result.append({
                     "asset_id":       asset.asset_id,
                     "device_id":      asset.device_id,
@@ -1515,11 +1714,12 @@ class Application:
                         "phase2_kwh":       round(planned.phase2_required_kwh, 2) if planned else 0.0,
                         "phase2_start":     planned.phase2_start_time.isoformat() if planned else goal.target_by.isoformat(),
                     } if goal else None,
-                    "staged": {
-                        "target_soc_pct": override[0],
-                        "target_by":      override[1].isoformat(),
-                    } if (override := self._staged_overrides.get(asset.asset_id)) else None,
-                    "override_active": asset.asset_id in self._ev_overrides,
+                    "force_charge": {"target_soc_pct": force} if force is not None else None,
+                    "next_days": upcoming_days(
+                        asset,
+                        self._ev_weekly_plans.get(asset.asset_id, {}),
+                        self._ev_day_overrides.get(asset.asset_id, {}),
+                    ),
                     "disabled": asset.asset_id in self._disabled_chargepoints,
                 })
             return result
@@ -1529,7 +1729,7 @@ class Application:
         @api.get("/api/controllable")
         async def get_controllable() -> dict:
             """Plan data for all controllable devices."""
-            plan = self._control_loop._active_plan
+            plan = self._display_plan or self._control_loop._active_plan
             now = datetime.now(timezone.utc)
             step_min: int = self._optimizer._step_min
 
@@ -1730,93 +1930,142 @@ class Application:
                 raise HTTPException(404, f"Unknown EV asset: {asset_id!r}")
             return asset
 
-        def _parse_target_dt(target_by: str) -> datetime:
+        def _validate_soc(soc: float) -> None:
+            if not (0 <= soc <= 100):
+                raise HTTPException(400, "target_soc_pct must be 0–100")
+
+        def _validate_hhmm(s: str) -> str:
+            parts = s.split(":")
             try:
-                dt = datetime.fromisoformat(target_by)
-                return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+                h, m = int(parts[0]), int(parts[1])
+                if len(parts) < 2 or not (0 <= h <= 23 and 0 <= m <= 59):
+                    raise ValueError
+            except (ValueError, IndexError):
+                raise HTTPException(400, f"Invalid target_by time: {s!r} (expected HH:MM)")
+            return f"{h:02d}:{m:02d}"
+
+        def _parse_date(s: str) -> date:
+            try:
+                return date.fromisoformat(s)
             except ValueError:
-                raise HTTPException(400, f"Invalid target_by datetime: {target_by!r}")
+                raise HTTPException(400, f"Invalid date: {s!r} (expected YYYY-MM-DD)")
 
-        @api.post("/api/ev/{asset_id}/stage")
-        async def stage_ev_target(
-            asset_id: str,
-            target_soc_pct: float,
-            target_by: str,
-        ) -> dict:
-            """Store staged override values without activating the override.
+        @api.get("/api/ev/{asset_id}/plan")
+        async def get_ev_plan(asset_id: str) -> dict:
+            """Weekly plan, active dated overrides, and the effective next 7 days."""
+            asset = _parse_ev_asset(asset_id)
+            weekly = self._ev_weekly_plans.get(asset_id, {})
+            overrides = self._ev_day_overrides.get(asset_id, {})
+            return {
+                "asset_id": asset_id,
+                "timezone": asset.timezone,
+                "weekly": [
+                    {
+                        "weekday": wd,
+                        "enabled": (wt := weekly.get(wd)) is not None and wt.enabled,
+                        "target_soc_pct": wt.target_soc_pct if wt else asset.charge_limit_soc_pct,
+                        "target_by": wt.target_by if wt else "06:00",
+                    }
+                    for wd in range(1, 8)
+                ],
+                "overrides": [
+                    {
+                        "date": d.isoformat(),
+                        "skip": ov.skip,
+                        "target_soc_pct": ov.target_soc_pct,
+                        "target_by": ov.target_by,
+                    }
+                    for d, ov in sorted(overrides.items())
+                ],
+                "days": upcoming_days(asset, weekly, overrides),
+            }
 
-            Values are held in memory and applied to the optimizer only when
-            ``POST /api/ev/{asset_id}/override`` is called.
+        @api.put("/api/ev/{asset_id}/plan")
+        async def put_ev_weekly_plan(asset_id: str, body: WeeklyPlanBody) -> dict:
+            """Replace the weekly plan (one row per ISO weekday)."""
+            _parse_ev_asset(asset_id)
+            entries: list[EvWeeklyTarget] = []
+            seen: set[int] = set()
+            for row in body.weekly:
+                if not (1 <= row.weekday <= 7) or row.weekday in seen:
+                    raise HTTPException(400, f"Invalid or duplicate weekday: {row.weekday}")
+                seen.add(row.weekday)
+                _validate_soc(row.target_soc_pct)
+                entries.append(EvWeeklyTarget(
+                    weekday=row.weekday,
+                    enabled=row.enabled,
+                    target_soc_pct=row.target_soc_pct,
+                    target_by=_validate_hhmm(row.target_by),
+                ))
+            await self._storage.set_ev_weekly_plan(asset_id, entries)
+            self._ev_weekly_plans[asset_id] = {e.weekday: e for e in entries}
+            _log.info("EV weekly plan saved: %r (%d enabled days)",
+                      asset_id, sum(e.enabled for e in entries))
+            asyncio.create_task(self._run_plan())
+            return {"status": "ok", "asset_id": asset_id}
+
+        @api.put("/api/ev/{asset_id}/plan/{day}")
+        async def put_ev_day_override(asset_id: str, day: str, body: DayOverrideBody) -> dict:
+            """Skip or re-target one concrete date. Expires after that local day."""
+            asset = _parse_ev_asset(asset_id)
+            d = _parse_date(day)
+            today_local = datetime.now(timezone.utc).astimezone(asset_zoneinfo(asset)).date()
+            if d < today_local:
+                raise HTTPException(400, f"Date {day} is in the past")
+            if body.skip:
+                override = EvDayOverride(date=d, skip=True)
+            else:
+                if body.target_soc_pct is None or body.target_by is None:
+                    raise HTTPException(400, "Provide skip=true or target_soc_pct + target_by")
+                _validate_soc(body.target_soc_pct)
+                override = EvDayOverride(
+                    date=d, skip=False,
+                    target_soc_pct=body.target_soc_pct,
+                    target_by=_validate_hhmm(body.target_by),
+                )
+            await self._set_ev_day_override(asset_id, override)
+            _log.info("EV day override: %r %s → %s", asset_id, day,
+                      "skip" if override.skip else f"{override.target_soc_pct:.0f}% by {override.target_by}")
+            asyncio.create_task(self._run_plan())
+            return {"status": "ok", "asset_id": asset_id, "date": day}
+
+        @api.delete("/api/ev/{asset_id}/plan/{day}")
+        async def delete_ev_day_override(asset_id: str, day: str) -> dict:
+            """Revert one date to the weekly plan."""
+            _parse_ev_asset(asset_id)
+            d = _parse_date(day)
+            if d not in self._ev_day_overrides.get(asset_id, {}):
+                raise HTTPException(404, f"No override for {asset_id!r} on {day}")
+            await self._clear_ev_day_override(asset_id, d)
+            _log.info("EV day override cleared: %r %s", asset_id, day)
+            asyncio.create_task(self._run_plan())
+            return {"status": "ok", "asset_id": asset_id, "date": day}
+
+        @api.post("/api/ev/{asset_id}/force_charge")
+        async def force_charge(asset_id: str, target_soc_pct: float) -> dict:
+            """Charge at full speed until *target_soc_pct*.
+
+            Resets automatically on vehicle unplug or when the target is
+            reached.  Only allowed while a vehicle is connected — otherwise
+            the flag could never clear.
             """
-            _parse_ev_asset(asset_id)
-            if not (0 <= target_soc_pct <= 100):
-                raise HTTPException(400, "target_soc_pct must be 0–100")
-            target_dt = _parse_target_dt(target_by)
-            self._staged_overrides[asset_id] = (target_soc_pct, target_dt)
-            # If override is already active, update it immediately too
-            if asset_id in self._ev_overrides:
-                await self._storage.set_ev_target(asset_id, target_soc_pct, target_dt)
-                self._ev_overrides[asset_id] = (target_soc_pct, target_dt)
-                asyncio.create_task(self._run_plan())
-            _log.info("EV staged: %r → %.0f%% by %s", asset_id, target_soc_pct, target_dt)
-            return {"status": "ok", "asset_id": asset_id,
-                    "target_soc_pct": target_soc_pct, "target_by": target_dt.isoformat()}
+            asset = _parse_ev_asset(asset_id)
+            _validate_soc(target_soc_pct)
+            if asset.asset_id in self._disabled_chargepoints:
+                raise HTTPException(409, f"Chargepoint {asset_id!r} is disabled")
+            state = self._registry.latest_state(asset.device_id)
+            if state is None or not state.available:
+                raise HTTPException(409, f"No vehicle connected at {asset_id!r}")
+            await self._apply_force_charge(asset_id, target_soc_pct)
+            return {"status": "ok", "asset_id": asset_id, "target_soc_pct": target_soc_pct}
 
-        @api.post("/api/ev/{asset_id}/override")
-        async def enable_ev_override(asset_id: str) -> dict:
-            """Apply the staged values as an active override (feeds the optimizer)."""
+        @api.delete("/api/ev/{asset_id}/force_charge")
+        async def cancel_force_charge(asset_id: str) -> dict:
+            """Cancel an active force charge (control returns to the plan)."""
             _parse_ev_asset(asset_id)
-            staged = self._staged_overrides.get(asset_id)
-            if staged is None:
-                raise HTTPException(400, f"No staged values for asset: {asset_id!r}")
-            soc, dt = staged
-            await self._storage.set_ev_target(asset_id, soc, dt)
-            self._ev_overrides[asset_id] = (soc, dt)
-            _log.info("EV override enabled: %r → %.0f%% by %s", asset_id, soc, dt)
-            asyncio.create_task(self._run_plan())
-            return {"status": "ok", "asset_id": asset_id, "override_active": True}
-
-        @api.delete("/api/ev/{asset_id}/override")
-        async def disable_ev_override(asset_id: str) -> dict:
-            """Deactivate the override (reverts to schedule). Staged values are kept."""
-            _parse_ev_asset(asset_id)
-            if asset_id not in self._ev_overrides:
-                raise HTTPException(404, f"No active override for asset: {asset_id!r}")
-            await self._storage.clear_ev_target(asset_id)
-            self._ev_overrides.pop(asset_id, None)
-            _log.info("EV override disabled: %r (staged kept)", asset_id)
-            asyncio.create_task(self._run_plan())
-            return {"status": "ok", "asset_id": asset_id, "override_active": False}
-
-        @api.post("/api/ev/{asset_id}/set_target")
-        async def set_ev_target(
-            asset_id: str,
-            target_soc_pct: float,
-            target_by: str,
-        ) -> dict:
-            """Stage and immediately activate an override (legacy endpoint)."""
-            _parse_ev_asset(asset_id)
-            if not (0 <= target_soc_pct <= 100):
-                raise HTTPException(400, "target_soc_pct must be 0–100")
-            target_dt = _parse_target_dt(target_by)
-            self._staged_overrides[asset_id] = (target_soc_pct, target_dt)
-            await self._storage.set_ev_target(asset_id, target_soc_pct, target_dt)
-            self._ev_overrides[asset_id] = (target_soc_pct, target_dt)
-            _log.info("EV override set: %r → %.0f%% by %s", asset_id, target_soc_pct, target_dt)
-            asyncio.create_task(self._run_plan())
-            return {"status": "ok", "asset_id": asset_id,
-                    "target_soc_pct": target_soc_pct, "target_by": target_dt.isoformat()}
-
-        @api.delete("/api/ev/{asset_id}/target")
-        async def clear_ev_target(asset_id: str) -> dict:
-            """Clear override and staged values (legacy endpoint)."""
-            if asset_id not in self._ev_overrides:
-                raise HTTPException(404, f"No override for asset: {asset_id!r}")
-            await self._storage.clear_ev_target(asset_id)
-            self._ev_overrides.pop(asset_id, None)
-            self._staged_overrides.pop(asset_id, None)
-            _log.info("EV override + staged cleared: %r", asset_id)
-            asyncio.create_task(self._run_plan())
+            if asset_id not in self._ev_force_charge:
+                raise HTTPException(404, f"No active force charge for {asset_id!r}")
+            await self._clear_force_charge(asset_id, "cancelled via API")
             return {"status": "ok", "asset_id": asset_id}
 
         @api.post("/api/ev/{asset_id}/disable")
