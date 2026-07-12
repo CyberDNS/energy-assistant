@@ -508,6 +508,17 @@ class ControlLoop:
         registry:
             Device registry used to look up and command devices.
         """
+        if self._active_plan is None:
+            # No plan has been computed yet (e.g. the first tick right after
+            # startup, before the optimizer's first solve lands). Without a
+            # plan every contributor resolves ``intent=None`` and would fall
+            # back to an arbitrary default (e.g. threshold devices default to
+            # standby) — sending a real, unplanned command. For threshold
+            # devices this is worse than a no-op: it also arms the
+            # compressor min-offtime lockout, forcing the device off for up
+            # to ``min_offtime_h`` even after the real plan says to run.
+            # Hold every device in its current state instead.
+            return
         setpoints = {
             device_id: (setpoint_w, intent)
             for device_id, setpoint_w, _mode, intent in self._compute_setpoints(live)
