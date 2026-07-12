@@ -456,7 +456,7 @@ class ControlLoop:
             if slots_logged.get(intent.device_id, 0) >= 2:
                 continue
             slots_logged[intent.device_id] = slots_logged.get(intent.device_id, 0) + 1
-            _log.info(
+            _log.debug(
                 "  plan  %s  %-14s  power=%+.0f W  grid=%s  export=%s",
                 intent.timestep.strftime("%H:%M"),
                 intent.device_id,
@@ -763,7 +763,7 @@ class ControlLoop:
                     # Cap: don't discharge more than remaining grid import
                     capped = max(raw_w, -remaining_import_w)
                     if capped != raw_w:
-                        _log.info(
+                        _log.debug(
                             "ControlLoop: discharge capped  %s  %.0f → %.0f W"
                             "  (grid_import=%.0f W)",
                             contributor.device_id, raw_w, capped, grid_ref_w,

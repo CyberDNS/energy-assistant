@@ -110,6 +110,7 @@ class AppConfig:
     optimizer: dict[str, Any] = field(default_factory=dict)
     controller: dict[str, Any] = field(default_factory=dict)
     server: dict[str, Any] = field(default_factory=dict)
+    logging: dict[str, Any] = field(default_factory=dict)
     default_tariff_id: str | None = None
     """Tariff used for devices/loads that have no explicit ``tariff:`` key.
 

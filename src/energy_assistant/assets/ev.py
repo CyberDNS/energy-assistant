@@ -44,7 +44,7 @@ control loop.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -71,12 +71,34 @@ class ChargeCurvePoint:
 
 
 @dataclass
-class EvScheduleEntry:
-    """One row of a vehicle's weekly charging schedule."""
+class EvWeeklyTarget:
+    """One weekday's default charging target — DB-backed, edited in the UI.
 
-    days: list[int]      # ISO weekday: 1=Mon … 7=Sun
+    Exactly one (optional) target per ISO weekday per asset.  A disabled
+    weekday means "no charging deadline that day" (the EV still absorbs PV
+    opportunistically).
+    """
+
+    weekday: int         # ISO weekday: 1=Mon … 7=Sun
+    enabled: bool
     target_soc_pct: float
     target_by: str       # "HH:MM" in the asset's local timezone
+
+
+@dataclass
+class EvDayOverride:
+    """Ephemeral per-date deviation from the weekly plan.
+
+    Keyed by the deadline's local calendar date.  Either a skip (no target
+    that day) or a replacement target.  Rows stay valid for their entire
+    calendar day — the UI keeps showing "skipped" after the deadline passed —
+    and are purged after local midnight.
+    """
+
+    date: date
+    skip: bool = False
+    target_soc_pct: float | None = None
+    target_by: str | None = None   # "HH:MM" local; None → keep weekly time
 
 
 @dataclass
@@ -91,7 +113,6 @@ class EvChargingAsset:
     min_charge_kw: float = 1.38   # 6 A × 230 V single-phase; override per charger
     charge_limit_soc_pct: float = 100.0
     charge_curve: list[ChargeCurvePoint] = field(default_factory=list)
-    schedule: list[EvScheduleEntry] = field(default_factory=list)
     timezone: str = "Europe/Berlin"
 
 
@@ -236,6 +257,7 @@ class EvChargerContributor:
         self._asset = asset
         self._active_goal: EvChargingGoal | None = None
         self._disabled: bool = False
+        self._force_target_soc: float | None = None
 
     @property
     def device_id(self) -> str:
@@ -248,6 +270,19 @@ class EvChargerContributor:
     def set_disabled(self, disabled: bool) -> None:
         """When disabled the contributor sends no commands and is excluded from planning."""
         self._disabled = disabled
+
+    def set_force_charge(self, target_soc_pct: float | None) -> None:
+        """Activate (or clear with ``None``) forced full-speed charging.
+
+        While active the contributor bypasses plan and goals entirely and
+        commands Instant Charging until the target SoC is reached.  The
+        Application clears the flag on vehicle unplug or target reached.
+        """
+        self._force_target_soc = target_soc_pct
+
+    @property
+    def force_charge_target_soc(self) -> float | None:
+        return self._force_target_soc
 
     def desired_setpoint_w(
         self,
@@ -266,6 +301,14 @@ class EvChargerContributor:
 
         goal = self._active_goal
         current_soc = state.soc_pct if state.soc_pct is not None else 0.0
+
+        # Force charge overrides everything: full speed until the chosen
+        # target.  Stop (not PV) once reached — the Application clears the
+        # flag shortly after, returning control to the normal plan.
+        if self._force_target_soc is not None:
+            if current_soc >= self._force_target_soc:
+                return _STOP_W
+            return self._asset.max_charge_kw * 1000.0
 
         # Target fully met → Stop
         if goal is not None and current_soc >= goal.target_soc_pct:

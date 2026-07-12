@@ -95,28 +95,72 @@ tbody tr:last-child td { border-bottom:none; }
 .ev-goal { font-size:.82rem; color:var(--muted); display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
 .ev-sep { border-top:1px solid var(--line); }
 
-/* ── EV override section ── */
-.ev-override {
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 10px 12px;
-  display: flex; flex-direction: column; gap: 8px;
-  transition: border-color .2s, background .2s;
-}
-.ev-override.is-active {
-  border-color: #a8d5e8;
-  background: #f0f8fc;
-}
-.ev-override-header {
-  display: flex; align-items: center; justify-content: space-between;
-}
-.ev-override-title {
-  font-size: .72rem; font-weight: 700; text-transform: uppercase;
-  letter-spacing: .07em; color: var(--muted);
-}
-.ev-override.is-active .ev-override-title { color: var(--accent); }
+/* ── EV action row ── */
+.ev-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.ev-actions .btn { padding: 5px 10px; font-size: .78rem; white-space: nowrap; }
+.ev-actions .btn-icon { font-size: .9rem; }
+.ev-actions-spacer { flex: 1; }
 
-.ev-inputs { display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; }
+/* ── EV force charge ── */
+.ev-force-dialog {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px;
+}
+.ev-force-dialog label { font-size: .82rem; color: var(--muted); }
+.ev-force-dialog input {
+  width: 64px; padding: 6px 8px; border: 1px solid var(--line);
+  border-radius: 6px; font-size: .85rem; background: var(--card);
+}
+
+/* ── EV next-7-days strip ── */
+.ev-days {
+  display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 3px;
+}
+.ev-day-chip {
+  position: relative; min-width: 0; overflow: hidden;
+  display: flex; flex-direction: column; align-items: center; gap: 1px;
+  padding: 5px 1px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--card); cursor: pointer; font: inherit; color: var(--ink);
+  transition: border-color .15s, background .15s;
+}
+.ev-day-chip:hover { border-color: var(--accent); }
+.ev-day-chip.is-editing { outline: 2px solid var(--accent); outline-offset: -1px; }
+.ev-day-name {
+  font-size: .62rem; font-weight: 700; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .02em;
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ev-day-soc  { font-size: .74rem; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ev-day-time { font-size: .66rem; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ev-day-none { color: var(--muted); font-weight: 400; }
+.ev-day-skip { color: var(--warn); text-decoration: line-through; }
+.ev-day-chip.is-today .ev-day-name { color: var(--accent); }
+/* Weekend days get their own background (override tint below wins) */
+.ev-day-chip.is-weekend { background: color-mix(in srgb, var(--muted) 14%, var(--card)); }
+/* Overridden / skipped days: accent border + corner dot — unmistakable */
+.ev-day-chip.src-override,
+.ev-day-chip.src-skip {
+  border-color: var(--accent); border-width: 2px; padding: 4px 0;
+  background: color-mix(in srgb, var(--accent) 10%, var(--card));
+}
+.ev-day-chip.src-override .ev-day-soc { color: var(--accent); }
+.ev-day-dot {
+  position: absolute; top: 3px; right: 3px;
+  width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
+}
+.ev-day-chip.is-passed { opacity: .55; }
+
+/* ── EV day editor ── */
+.ev-day-editor {
+  border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.ev-day-editor-title {
+  font-size: .78rem; font-weight: 700; display: flex; gap: 8px; align-items: center;
+}
+.ev-day-editor-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+
+.ev-inputs { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
 .ev-input-group label { display:block; font-size:.73rem; color:var(--muted); margin-bottom:3px; }
 .ev-input-group input {
   width:100%; padding:6px 8px; border:1px solid var(--line);
@@ -124,53 +168,49 @@ tbody tr:last-child td { border-bottom:none; }
 }
 .ev-input-group input:focus { outline:2px solid var(--accent); outline-offset:1px; border-color:transparent; }
 
-.ev-staged-summary {
-  font-size: .78rem; color: var(--muted);
-  min-height: 1.1em;
+/* ── EV weekly plan editor ── */
+.ev-weekly { display: flex; flex-direction: column; gap: 8px; }
+.ev-weekly-grid {
+  border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 6px;
 }
-.ev-staged-summary.has-value { color: var(--ink); }
+.ev-weekly-row {
+  display: grid; grid-template-columns: 70px 70px 16px 1fr; gap: 8px; align-items: center;
+}
+.ev-weekly-day { font-size: .82rem; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+.ev-weekly-row input[type="number"],
+.ev-weekly-row input[type="time"] {
+  padding: 5px 6px; border: 1px solid var(--line); border-radius: 6px;
+  font-size: .82rem; background: var(--card); width: 100%;
+}
+.ev-weekly-row input:disabled { opacity: .45; }
+.ev-weekly-pct { font-size: .78rem; color: var(--muted); }
+.ev-weekly-actions { display: flex; justify-content: flex-end; margin-top: 4px; }
 
-.ev-override-footer {
-  display: flex; align-items: center; justify-content: space-between; gap: 8px;
-}
-
-/* Save button — only shown when dirty */
-.btn-save {
-  padding: 5px 12px; border-radius: 6px; border: 1px solid var(--accent);
-  background: transparent; color: var(--accent); font-size: .78rem; font-weight: 600;
-  cursor: pointer; white-space: nowrap;
-}
-.btn-save:disabled { opacity: .35; cursor: not-allowed; }
-
-/* Toggle switch */
-.toggle-wrap {
-  display: inline-flex; align-items: center; gap: 8px;
-  cursor: pointer; user-select: none;
-}
-.toggle-wrap input { position: absolute; opacity: 0; width: 0; height: 0; }
-.toggle-track {
-  width: 38px; height: 22px; border-radius: 11px;
-  background: var(--line); position: relative; transition: background .2s; flex-shrink: 0;
-}
-.toggle-thumb {
-  position: absolute; top: 3px; left: 3px;
-  width: 16px; height: 16px; border-radius: 50%;
-  background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.25);
-  transition: left .2s;
-}
-.toggle-wrap.is-on .toggle-track { background: var(--accent); }
-.toggle-wrap.is-on .toggle-thumb { left: 19px; }
-.toggle-wrap.is-disabled { opacity: .4; cursor: not-allowed; pointer-events: none; }
-.toggle-label { font-size: .82rem; font-weight: 600; color: var(--muted); min-width: 78px; }
-.toggle-wrap.is-on .toggle-label { color: var(--accent); }
-
-.ev-chargepoint-actions { display:flex; gap:6px; justify-content: flex-end; }
 .ev-error { font-size:.78rem; color:var(--bad); }
 
 /* ── live view: freshness ── */
 .live-fresh { display:flex; align-items:center; justify-content:flex-end; gap:6px; color:var(--muted); font-size:.75rem; margin-bottom:6px; }
 .pulse-dot { width:8px; height:8px; border-radius:50%; background:var(--ok); animation:pulse 2.5s ease-in-out infinite; }
 @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.35; } }
+
+/* ── plan recalculation indicator ── */
+.plan-busy {
+  display:inline-flex; align-items:center; gap:7px;
+  font-size:.78rem; font-weight:600; color:var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--card));
+  border:1px solid color-mix(in srgb, var(--accent) 35%, var(--card));
+  border-radius:999px; padding:3px 12px;
+}
+.spinner {
+  width:12px; height:12px; border-radius:50%; flex-shrink:0;
+  border:2px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-top-color:var(--accent);
+  animation:spin .8s linear infinite;
+}
+@keyframes spin { to { transform:rotate(360deg); } }
+.fade-enter-active, .fade-leave-active { transition:opacity .25s; }
+.fade-enter-from, .fade-leave-to { opacity:0; }
 
 /* ── live view: power-flow strip ── */
 .flow-strip { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:8px; margin-bottom:10px; }

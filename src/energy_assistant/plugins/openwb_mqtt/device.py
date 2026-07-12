@@ -418,7 +418,7 @@ class OpenWBMqttDevice:
         """
         raw = self._bridge.value(self._cp_id, "charge_template")
         if raw is None:
-            _log.warning(
+            _log.debug(
                 "OpenWBMqttDevice %r: no charge template received yet — "
                 "cannot set charging current / SoC limit this tick",
                 self._device_id,

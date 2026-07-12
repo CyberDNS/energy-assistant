@@ -1,14 +1,14 @@
 """Parse the ``assets:`` config section and compute active ``EvChargingGoal`` objects.
 
 Called by the planning loop on every optimization cycle so that the goals
-always reflect the current SoC, the current day's schedule entry, and any
-live UI overrides.
+always reflect the current SoC, the DB-backed weekly plan, and any dated
+overrides/skips set in the UI.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -17,7 +17,8 @@ from .ev import (
     ChargeCurvePoint,
     EvChargingAsset,
     EvChargingGoal,
-    EvScheduleEntry,
+    EvDayOverride,
+    EvWeeklyTarget,
     build_goal_from_parts,
 )
 
@@ -128,14 +129,6 @@ def _parse_one(asset_id: str, cfg: dict[str, Any]) -> EvChargingAsset:
         # Default: full rate to 80%, 55% above 80%
         curve = [ChargeCurvePoint(80.0, 1.0), ChargeCurvePoint(100.0, 0.55)]
 
-    schedule: list[EvScheduleEntry] = []
-    for entry in cfg.get("schedule", []):
-        schedule.append(EvScheduleEntry(
-            days=[int(d) for d in entry["days"]],
-            target_soc_pct=float(entry["target_soc_pct"]),
-            target_by=str(entry["target_by"]),
-        ))
-
     return EvChargingAsset(
         asset_id=asset_id,
         device_id=device_id,
@@ -145,7 +138,6 @@ def _parse_one(asset_id: str, cfg: dict[str, Any]) -> EvChargingAsset:
         min_charge_kw=min_charge,
         charge_limit_soc_pct=charge_limit,
         charge_curve=curve,
-        schedule=schedule,
         timezone=tz,
     )
 
@@ -153,7 +145,8 @@ def _parse_one(asset_id: str, cfg: dict[str, Any]) -> EvChargingAsset:
 def resolve_active_goals(
     assets: list[EvChargingAsset],
     device_states: dict[str, DeviceState],
-    overrides: dict[str, tuple[float, datetime]],
+    weekly_plans: dict[str, dict[int, EvWeeklyTarget]],
+    day_overrides: dict[str, dict[date, EvDayOverride]],
     now: datetime | None = None,
 ) -> list[EvChargingGoal]:
     """Compute an ``EvChargingGoal`` for every asset that has an active target.
@@ -164,9 +157,10 @@ def resolve_active_goals(
         Parsed asset configs.
     device_states:
         Latest state per device (from the registry).
-    overrides:
-        UI overrides keyed by asset_id → (target_soc_pct, target_by UTC).
-        If an override is present it takes precedence over the schedule.
+    weekly_plans:
+        DB-backed weekly plan per asset: asset_id → {iso_weekday → target}.
+    day_overrides:
+        Dated overrides/skips per asset: asset_id → {local_date → override}.
     now:
         Override "now" for testing.  Defaults to ``datetime.now(UTC)``.
     """
@@ -179,8 +173,12 @@ def resolve_active_goals(
         connected = state is not None and state.available
         current_soc = (state.soc_pct or 0.0) if state is not None else 0.0
 
-        # Determine target from override or schedule
-        target_info = _resolve_target(asset, overrides, now)
+        target_info = _resolve_target(
+            asset,
+            weekly_plans.get(asset.asset_id, {}),
+            day_overrides.get(asset.asset_id, {}),
+            now,
+        )
         if target_info is None:
             # No schedule: include connected EV as PV-only absorber so the plan
             # shows estimated surplus charging with real kW values.
@@ -226,45 +224,129 @@ def resolve_active_goals(
     return goals
 
 
-def _resolve_target(
-    asset: EvChargingAsset,
-    overrides: dict[str, tuple[float, datetime]],
-    now: datetime,
-) -> tuple[float, datetime] | None:
-    """Return (target_soc_pct, target_by UTC) from override or schedule, or None."""
-    if asset.asset_id in overrides:
-        return overrides[asset.asset_id]
-
+def asset_zoneinfo(asset: EvChargingAsset) -> ZoneInfo:
+    """The asset's local timezone (falls back to UTC on bad config)."""
     try:
-        tz = ZoneInfo(asset.timezone)
+        return ZoneInfo(asset.timezone)
     except ZoneInfoNotFoundError:
         _log.warning("Asset %r: unknown timezone %r — using UTC", asset.asset_id, asset.timezone)
-        tz = ZoneInfo("UTC")
+        return ZoneInfo("UTC")
 
+
+def effective_day_target(
+    weekly: dict[int, EvWeeklyTarget],
+    overrides: dict[date, EvDayOverride],
+    day: date,
+) -> tuple[float, str, str] | None:
+    """Effective target for one local calendar date.
+
+    Returns ``(target_soc_pct, target_by "HH:MM", source)`` where source is
+    ``"override"`` or ``"weekly"``, or ``None`` when the day has no target
+    (skipped, weekday disabled, or nothing planned).
+    """
+    ov = overrides.get(day)
+    if ov is not None and ov.skip:
+        return None
+
+    wt = weekly.get(day.isoweekday())
+    if ov is not None:
+        soc = ov.target_soc_pct
+        hhmm = ov.target_by
+        # Fall back to the weekly row for whichever half is unset
+        if soc is None and wt is not None and wt.enabled:
+            soc = wt.target_soc_pct
+        if hhmm is None and wt is not None and wt.enabled:
+            hhmm = wt.target_by
+        if soc is not None and hhmm is not None:
+            return soc, hhmm, "override"
+        return None
+
+    if wt is not None and wt.enabled:
+        return wt.target_soc_pct, wt.target_by, "weekly"
+    return None
+
+
+def _resolve_target(
+    asset: EvChargingAsset,
+    weekly: dict[int, EvWeeklyTarget],
+    overrides: dict[date, EvDayOverride],
+    now: datetime,
+) -> tuple[float, datetime] | None:
+    """Return the next (target_soc_pct, target_by UTC) deadline, or None.
+
+    Walks forward from today (asset-local): the first day whose effective
+    target has a deadline still in the future wins.  Skipped days and
+    already-passed deadlines are stepped over.
+    """
+    tz = asset_zoneinfo(asset)
     now_local = now.astimezone(tz)
 
-    # Search up to 7 days ahead for the next applicable schedule entry
     for days_ahead in range(8):
-        candidate_date = now_local + timedelta(days=days_ahead)
-        iso_weekday = candidate_date.isoweekday()  # 1=Mon…7=Sun
+        day = (now_local + timedelta(days=days_ahead)).date()
+        target = effective_day_target(weekly, overrides, day)
+        if target is None:
+            continue
 
-        for entry in asset.schedule:
-            if iso_weekday not in entry.days:
-                continue
+        soc, hhmm, _source = target
+        h, m = _parse_hhmm(hhmm)
+        deadline_local = datetime(day.year, day.month, day.day, h, m, tzinfo=tz)
+        if deadline_local <= now_local:
+            continue
 
-            h, m = _parse_hhmm(entry.target_by)
-            deadline_local = candidate_date.replace(
-                hour=h, minute=m, second=0, microsecond=0
-            )
-
-            # Skip deadlines that have already passed
-            if deadline_local <= now_local:
-                continue
-
-            deadline_utc = deadline_local.astimezone(timezone.utc)
-            return entry.target_soc_pct, deadline_utc
+        return soc, deadline_local.astimezone(timezone.utc)
 
     return None
+
+
+def upcoming_days(
+    asset: EvChargingAsset,
+    weekly: dict[int, EvWeeklyTarget],
+    overrides: dict[date, EvDayOverride],
+    now: datetime | None = None,
+    days: int = 7,
+) -> list[dict[str, Any]]:
+    """Effective plan for the next *days* local calendar days (UI strip).
+
+    Each entry: ``{date, weekday, source, target_soc_pct, target_by,
+    deadline_utc, passed}`` — source is "weekly" | "override" | "skip" |
+    "none"; passed marks deadlines already behind us (today, after the
+    deadline).
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    tz = asset_zoneinfo(asset)
+    now_local = now.astimezone(tz)
+
+    result: list[dict[str, Any]] = []
+    for days_ahead in range(days):
+        day = (now_local + timedelta(days=days_ahead)).date()
+        ov = overrides.get(day)
+        target = effective_day_target(weekly, overrides, day)
+
+        entry: dict[str, Any] = {
+            "date": day.isoformat(),
+            "weekday": day.isoweekday(),
+            "source": "none",
+            "target_soc_pct": None,
+            "target_by": None,
+            "deadline_utc": None,
+            "passed": False,
+        }
+        if ov is not None and ov.skip:
+            entry["source"] = "skip"
+        elif target is not None:
+            soc, hhmm, source = target
+            h, m = _parse_hhmm(hhmm)
+            deadline_local = datetime(day.year, day.month, day.day, h, m, tzinfo=tz)
+            entry.update({
+                "source": source,
+                "target_soc_pct": soc,
+                "target_by": hhmm,
+                "deadline_utc": deadline_local.astimezone(timezone.utc).isoformat(),
+                "passed": deadline_local <= now_local,
+            })
+        result.append(entry)
+    return result
 
 
 def _parse_hhmm(s: str) -> tuple[int, int]:

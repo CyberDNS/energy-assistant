@@ -6,6 +6,13 @@ import { fetchStatus, streamUrl } from '../api.js'
 // refetch plan data the moment the optimizer finishes.
 export const planVersion = ref(0)
 
+// True while the server is (re)solving the plan.  Fed by the status
+// payload's `planning` flag; markPlanning() sets it optimistically right
+// after a plan-affecting edit so the indicator appears instantly instead
+// of waiting for the next SSE status push (~3 s).
+export const planning = ref(false)
+export function markPlanning() { planning.value = true }
+
 // Polling fallback interval — only active while the SSE stream is down
 // (the EventSource reconnects automatically).
 const FALLBACK_POLL_MS = 30_000
@@ -21,6 +28,7 @@ export function useStatus() {
   async function refresh() {
     try {
       status.value  = await fetchStatus()
+      planning.value = !!status.value.planning
       error.value   = null
     } catch (e) {
       error.value = e.message
@@ -40,6 +48,7 @@ export function useStatus() {
       es.addEventListener('status', (e) => {
         streamAlive   = true
         status.value  = JSON.parse(e.data)
+        planning.value = !!status.value.planning
         error.value   = null
         loading.value = false
       })

@@ -1,6 +1,6 @@
 import { defineComponent, ref, watch, onMounted, onUnmounted } from 'vue'
 import { fetchPlan, fetchForecast, fetchEv, fetchControllable, triggerPlanRefresh } from '../api.js'
-import { planVersion } from '../composables/useStatus.js'
+import { planVersion, planning } from '../composables/useStatus.js'
 import PlotlyChart from '../components/PlotlyChart.js'
 import EvCard from '../components/EvCard.js'
 import ControllableDeviceCard from '../components/ControllableDeviceCard.js'
@@ -180,16 +180,21 @@ export default defineComponent({
     // event) — e.g. after '↺ Refresh plan' finishes or a scheduled re-solve.
     watch(planVersion, () => refresh())
 
-    return { evList, controllable, planMeta, flowTraces, fcastTraces, priceTraces, socTraces, refresh, triggerRefresh, refreshing, XAXIS }
+    return { evList, controllable, planMeta, flowTraces, fcastTraces, priceTraces, socTraces, refresh, triggerRefresh, refreshing, planning, XAXIS }
   },
 
   template: `
     <div>
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">
         <p class="footnote" style="margin:0">{{ planMeta }}</p>
-        <button class="btn btn-neutral" style="padding:4px 10px;font-size:.78rem" :disabled="refreshing" @click="triggerRefresh">
+        <button class="btn btn-neutral" style="padding:4px 10px;font-size:.78rem" :disabled="refreshing || planning" @click="triggerRefresh">
           {{ refreshing ? '…' : '↺ Refresh plan' }}
         </button>
+        <transition name="fade">
+          <span v-if="planning" class="plan-busy">
+            <span class="spinner"></span> Recalculating plan…
+          </span>
+        </transition>
       </div>
 
       <div v-if="evList.length" class="full panel" style="margin-bottom:10px">
