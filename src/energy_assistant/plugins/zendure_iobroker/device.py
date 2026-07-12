@@ -48,6 +48,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
+from ...core.change_gate import ChangeGate
 from ...core.models import DeviceCommand, DeviceRole, DeviceState, StorageConstraints
 from .._iobroker.client import IoBrokerClientProtocol
 
@@ -107,6 +108,7 @@ class ZendureIoBrokerDevice:
         self._maintenance_charge_w = maintenance_charge_w
         self._purchase_price_eur = purchase_price_eur
         self._cycle_life = cycle_life
+        self._log_gate = ChangeGate()
 
     @property
     def device_id(self) -> str:
@@ -237,25 +239,28 @@ class ZendureIoBrokerDevice:
                 await self._client.set_value(f"{p}.control.acMode", 1)
                 await self._client.set_value(f"{p}.control.setInputLimit", int(power_w))
                 await self._client.set_value(f"{p}.control.setOutputLimit", 0)
-                _log.debug(
-                    "ZendureIoBrokerDevice %r: charge %.0f W (acMode=1, setInputLimit=%d)",
-                    self._device_id, power_w, int(power_w),
-                )
+                if self._log_gate.changed("power_w", int(power_w)):
+                    _log.info(
+                        "ZendureIoBrokerDevice %r: charge %.0f W (acMode=1, setInputLimit=%d)",
+                        self._device_id, power_w, int(power_w),
+                    )
             elif power_w < 0:
                 # Discharging: AC output mode, set output limit, clear input limit.
                 discharge_w = int(-power_w)
                 await self._client.set_value(f"{p}.control.acMode", 2)
                 await self._client.set_value(f"{p}.control.setOutputLimit", discharge_w)
                 await self._client.set_value(f"{p}.control.setInputLimit", 0)
-                _log.debug(
-                    "ZendureIoBrokerDevice %r: discharge %.0f W (acMode=2, setOutputLimit=%d)",
-                    self._device_id, -power_w, discharge_w,
-                )
+                if self._log_gate.changed("power_w", int(power_w)):
+                    _log.info(
+                        "ZendureIoBrokerDevice %r: discharge %.0f W (acMode=2, setOutputLimit=%d)",
+                        self._device_id, -power_w, discharge_w,
+                    )
             else:
                 # Idle: clear both limits.
                 await self._client.set_value(f"{p}.control.setInputLimit", 0)
                 await self._client.set_value(f"{p}.control.setOutputLimit", 0)
-                _log.debug("ZendureIoBrokerDevice %r: idle (both limits cleared)", self._device_id)
+                if self._log_gate.changed("power_w", 0):
+                    _log.info("ZendureIoBrokerDevice %r: idle (both limits cleared)", self._device_id)
 
         elif command.command == "set_charge_limit":
             await self._client.set_value(f"{p}.control.chargeLimit", int(command.value))

@@ -149,6 +149,15 @@ optimizer:
   feed_in_eur_per_kwh: 0.082      # must match export_tariff above
 
 # ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+logging:
+  # Root log level. One of DEBUG, INFO, WARNING, ERROR, CRITICAL.
+  # Can be overridden per-run via the LOG_LEVEL environment variable.
+  level: INFO
+
+# ---------------------------------------------------------------------------
 # secrets.yaml keys required by this config:
 #
 #   tibber_home_id:  <your Tibber Home ID from tibberlink.0.Homes.*>
