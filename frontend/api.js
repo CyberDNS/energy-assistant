@@ -20,15 +20,24 @@ export const fetchEv           = ()           => call('/api/ev')
 export const fetchControllable = ()           => call('/api/controllable')
 export const fetchConfig   = ()           => call('/api/config')
 
-export function stageEvTarget(assetId, socPct, targetBy) {
-  const by = targetBy instanceof Date ? targetBy.toISOString() : targetBy
-  const url = `/api/ev/${encodeURIComponent(assetId)}/stage`
-    + `?target_soc_pct=${socPct}&target_by=${encodeURIComponent(by)}`
-  return call(url, { method: 'POST' })
-}
+const _json = (method, body) => ({
+  method,
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(body),
+})
 
-export const enableEvOverride    = (id) => call(`/api/ev/${encodeURIComponent(id)}/override`, { method: 'POST' })
-export const disableEvOverride   = (id) => call(`/api/ev/${encodeURIComponent(id)}/override`, { method: 'DELETE' })
+export const fetchEvPlan = (id) => call(`/api/ev/${encodeURIComponent(id)}/plan`)
+export const saveEvWeeklyPlan = (id, weekly) =>
+  call(`/api/ev/${encodeURIComponent(id)}/plan`, _json('PUT', { weekly }))
+export const setEvDayOverride = (id, date, override) =>
+  call(`/api/ev/${encodeURIComponent(id)}/plan/${date}`, _json('PUT', override))
+export const clearEvDayOverride = (id, date) =>
+  call(`/api/ev/${encodeURIComponent(id)}/plan/${date}`, { method: 'DELETE' })
+export const startForceCharge = (id, socPct) =>
+  call(`/api/ev/${encodeURIComponent(id)}/force_charge?target_soc_pct=${socPct}`, { method: 'POST' })
+export const stopForceCharge = (id) =>
+  call(`/api/ev/${encodeURIComponent(id)}/force_charge`, { method: 'DELETE' })
+
 export const disableChargepoint  = (id) => call(`/api/ev/${encodeURIComponent(id)}/disable`, { method: 'POST' })
 export const enableChargepoint   = (id) => call(`/api/ev/${encodeURIComponent(id)}/disable`, { method: 'DELETE' })
 export const setLedgerBasis      = (deviceId, basis) =>
