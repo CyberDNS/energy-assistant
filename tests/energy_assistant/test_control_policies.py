@@ -4,9 +4,18 @@ from datetime import datetime, timezone
 
 import pytest
 
+from energy_assistant.assets.threshold import ThresholdControlContributor
 from energy_assistant.core.control import ControlLoop, LiveSituation, StorageControlContributor
 from energy_assistant.core.ledger import BatteryCostLedger
-from energy_assistant.core.models import ControlIntent, DeviceCommand, DeviceRole, DeviceState, EnergyPlan, StorageConstraints
+from energy_assistant.core.models import (
+    ControlIntent,
+    DeviceCommand,
+    DeviceRole,
+    DeviceState,
+    EnergyPlan,
+    StorageConstraints,
+    ThresholdConstraints,
+)
 from energy_assistant.core.registry import DeviceRegistry
 
 
@@ -517,3 +526,78 @@ async def test_grid_feed_in_allows_export() -> None:
 
     assert dev.commands
     assert dev.commands[-1].value < 0.0   # discharging — pushing energy to grid
+
+
+class _FakeThresholdDevice:
+    def __init__(self, device_id: str, power_w: float) -> None:
+        self._device_id = device_id
+        self._power_w = power_w
+        self.commands: list[DeviceCommand] = []
+
+    @property
+    def device_id(self) -> str:
+        return self._device_id
+
+    @property
+    def role(self) -> DeviceRole:
+        return DeviceRole.THRESHOLD_CONTROLLED
+
+    async def get_state(self) -> DeviceState:
+        return DeviceState(device_id=self._device_id, power_w=self._power_w)
+
+    async def send_command(self, command: DeviceCommand) -> None:
+        self.commands.append(command)
+
+
+@pytest.mark.asyncio
+async def test_tick_before_first_plan_sends_no_commands() -> None:
+    """A tick that arrives before the optimizer's first plan must be a no-op.
+
+    Regression test: on startup the control loop can tick before the first
+    plan is solved. With no active plan, every contributor resolves
+    ``intent=None`` — a threshold device would fall back to its "standby"
+    default and send a real turn_off, which also arms the compressor
+    min-offtime lockout and keeps the device off for up to ``min_offtime_h``
+    even after the real plan (saying "run") lands moments later.
+    """
+    now = datetime.now(timezone.utc)
+    ledger = BatteryCostLedger()
+    loop = ControlLoop(ledger=ledger)
+    tc = ThresholdConstraints(
+        device_id="cooler",
+        bottom_threshold=18.0,
+        top_threshold=20.5,
+        unit="°C",
+        direction="reduces",
+        rated_power_kw=0.15,
+        active_rate_per_h=0.417,
+        drift_rate_per_h=0.185,
+        min_runtime_h=0.5,
+        min_offtime_h=0.5,
+    )
+    loop.register_contributor(ThresholdControlContributor(tc))
+
+    registry = DeviceRegistry()
+    # Device is currently running (e.g. left on from before a restart).
+    dev = _FakeThresholdDevice("cooler", power_w=150.0)
+    registry.register(dev)
+
+    live = LiveSituation(
+        timestamp=now,
+        grid_power_w=0.0,
+        dt_hours=5.0 / 3600.0,
+        device_states={
+            "cooler": DeviceState(
+                device_id="cooler",
+                power_w=150.0,
+                extra={"measured_value": 19.7},  # comfortably within bounds
+            )
+        },
+        current_price_eur_per_kwh=0.25,
+        pv_opportunity_price_eur_per_kwh=0.08,
+    )
+
+    # No update_plan() call — this is the pre-first-plan startup window.
+    await loop.tick(live, registry)
+
+    assert dev.commands == []
