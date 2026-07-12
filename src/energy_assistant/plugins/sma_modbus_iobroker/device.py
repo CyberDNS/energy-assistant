@@ -47,6 +47,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
+from ...core.change_gate import ChangeGate
 from ...core.models import DeviceCommand, DeviceRole, DeviceState, StorageConstraints
 from .._iobroker.client import IoBrokerClientProtocol
 
@@ -112,6 +113,7 @@ class SmaSunnyBoyStorageDevice:
         self._no_grid_charge = no_grid_charge
         # Pre-computed voltage correction factor (253/230 ≈ 1.1)
         self._v_factor = voltage_max_v / voltage_nominal_v
+        self._log_gate = ChangeGate()
 
     # --- OID helpers ---------------------------------------------------------
 
@@ -132,6 +134,11 @@ class SmaSunnyBoyStorageDevice:
     @property
     def role(self) -> DeviceRole:
         return DeviceRole.STORAGE
+
+    # No register on this hardware controls charge power — only discharge is
+    # ever actively commanded. Used by callers (e.g. dry-run logging) that
+    # want to describe what will *actually* reach the device.
+    controls_charge = False
 
     @property
     def storage_constraints(self) -> StorageConstraints:
@@ -227,9 +234,16 @@ class SmaSunnyBoyStorageDevice:
             ))
 
         await self._client.set_value(self._hr("40016_WirkleistungBeg"), pct)
-        _log.debug(
-            "SmaSunnyBoyStorageDevice %r: WirkleistungBeg = %d %% (requested %.0f W)",
-            self._device_id,
-            pct,
-            power_w,
-        )
+        if self._log_gate.changed("pct", pct):
+            # pct > 0 is a genuine discharge command. pct == 0 covers both
+            # "charge" and "idle" — they're indistinguishable on this
+            # hardware (no register controls charge power; the inverter
+            # charges automatically), so it isn't INFO-worthy control output.
+            level = logging.INFO if pct > 0 else logging.DEBUG
+            _log.log(
+                level,
+                "SmaSunnyBoyStorageDevice %r: WirkleistungBeg = %d %% (requested %.0f W)",
+                self._device_id,
+                pct,
+                power_w,
+            )
