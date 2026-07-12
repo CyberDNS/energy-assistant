@@ -67,6 +67,7 @@ from ..assets.loader import (
 )
 from ..assets.threshold import ThresholdControlContributor
 from ..config.yaml import YamlConfigLoader
+from ..core.change_gate import ChangeGate
 from ..core.config import AppConfig
 from ..core.control import ControlLoop, LiveSituation, StorageControlContributor
 from ..core.event import DeviceStateEvent, EventBus, PlanUpdatedEvent
@@ -482,6 +483,7 @@ class Application:
         self._poll_interval_s: float
         self._control_interval_s: float
         self._dry_run: bool
+        self._dry_run_log_gate = ChangeGate()
         self._first_poll_done: asyncio.Event
         self._api: FastAPI
         self._ev_assets: list[EvChargingAsset] = []
@@ -514,6 +516,13 @@ class Application:
 
         # 1 — Config
         self._cfg = YamlConfigLoader(self._config_path).load()
+        log_level = str(os.environ.get("LOG_LEVEL") or self._cfg.logging.get("level", "INFO")).upper()
+        logging.getLogger().setLevel(log_level)
+        # httpx logs one INFO line per HTTP request (every device poll) —
+        # that's query-noise, not app-level info, so only surface it once
+        # the app itself is turned down to DEBUG.
+        if log_level != "DEBUG":
+            logging.getLogger("httpx").setLevel(logging.WARNING)
         opt = self._cfg.optimizer
         ctl = self._cfg.controller
         self._plan_interval_s = float(ctl.get("plan_interval_s", 3600))
@@ -884,7 +893,7 @@ class Application:
                         if fresh.soc_pct is not None:
                             device_states[sc.device_id] = fresh
                             self._registry.update_state(fresh)
-                            _log.info(
+                            _log.debug(
                                 "_run_plan: fresh SoC poll for %r → %.1f%%",
                                 sc.device_id, fresh.soc_pct,
                             )
@@ -899,7 +908,7 @@ class Application:
                     if stored_kwh is not None:
                         derived_soc = min(100.0, max(0.0, stored_kwh / sc.capacity_kwh * 100.0))
                         device_states[sc.device_id] = state.model_copy(update={"soc_pct": derived_soc})
-                        _log.info(
+                        _log.debug(
                             "_run_plan: soc_pct missing for %r — using ledger %.2f kWh → %.1f%%",
                             sc.device_id, stored_kwh, derived_soc,
                         )
@@ -1148,31 +1157,48 @@ class Application:
         self._sync_ledger_stored_energy_from_soc()
 
         if self._dry_run:
-            _log.info(
-                "DRY RUN tick  grid=%.0f W  price=%.4f €/kWh  dt=%.4f h",
-                grid_power_w, current_price, dt_hours,
-            )
+            # Only log rows whose (mode, setpoint) actually changed since the
+            # last tick — otherwise this fires every control_interval_s even
+            # when nothing changed.
+            changed_rows: list[tuple[str, int]] = []
             for device_id, setpoint_w, mode in self._control_loop.describe_setpoints(live):
+                # Some hardware (e.g. the SMA SBS) has no register to command
+                # charge power — only discharge is ever actively written, and
+                # charge/idle both collapse to the same "clear discharge
+                # limit" no-op. Reflect that instead of implying a specific
+                # charge wattage actually reaches the device.
+                device = self._registry.get(device_id)
+                controls_charge = getattr(device, "controls_charge", True)
+
                 if setpoint_w is None:
-                    _log.info(
-                        "DRY RUN  %s  mode=%-10s  → skip (no setpoint)",
-                        device_id, mode,
-                    )
+                    key: tuple[str, int | None] = (mode, None)
+                    row = f"DRY RUN  {device_id}  mode={mode:<10}  → skip (no setpoint)"
+                    level = logging.INFO
+                elif setpoint_w > 0 and not controls_charge:
+                    key = (mode, 0)
+                    row = f"DRY RUN  {device_id}  mode={mode:<10}  → no active command (charges automatically)"
+                    level = logging.DEBUG
                 elif setpoint_w > 0:
-                    _log.info(
-                        "DRY RUN  %s  mode=%-10s  → charge   %+.0f W",
-                        device_id, mode, setpoint_w,
-                    )
+                    key = (mode, int(round(setpoint_w)))
+                    row = f"DRY RUN  {device_id}  mode={mode:<10}  → charge   {setpoint_w:+.0f} W"
+                    level = logging.INFO
                 elif setpoint_w < 0:
-                    _log.info(
-                        "DRY RUN  %s  mode=%-10s  → discharge %+.0f W",
-                        device_id, mode, setpoint_w,
-                    )
+                    key = (mode, int(round(setpoint_w)))
+                    row = f"DRY RUN  {device_id}  mode={mode:<10}  → discharge {setpoint_w:+.0f} W"
+                    level = logging.INFO
                 else:
-                    _log.info(
-                        "DRY RUN  %s  mode=%-10s  → hold (0 W)",
-                        device_id, mode,
-                    )
+                    key = (mode, 0)
+                    row = f"DRY RUN  {device_id}  mode={mode:<10}  → hold (0 W)"
+                    level = logging.INFO if controls_charge else logging.DEBUG
+                if self._dry_run_log_gate.changed(device_id, key):
+                    changed_rows.append((row, level))
+            if changed_rows:
+                _log.debug(
+                    "DRY RUN tick  grid=%.0f W  price=%.4f €/kWh  dt=%.4f h",
+                    grid_power_w, current_price, dt_hours,
+                )
+                for row, level in changed_rows:
+                    _log.log(level, row)
             # Persist the current ledger state even in dry_run so the
             # spot-price basis survives the next restart.
             for _sc in self._storage_constraints:
