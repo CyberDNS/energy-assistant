@@ -10,8 +10,8 @@ Pre-built multi-arch images are published to GHCR:
 
 ```
 ghcr.io/cyberdns/energy-assistant:dev      # latest main branch (dev channel)
-ghcr.io/cyberdns/energy-assistant:edge     # latest prerelease tag (edge channel)
-ghcr.io/cyberdns/energy-assistant:latest   # latest stable tag (prod channel)
+ghcr.io/cyberdns/energy-assistant:edge     # latest tagged version (edge channel)
+ghcr.io/cyberdns/energy-assistant:latest   # last version promoted to prod
 ghcr.io/cyberdns/energy-assistant:<tag>    # pinned to a specific release tag
 ```
 
