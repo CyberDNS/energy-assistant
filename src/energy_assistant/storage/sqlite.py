@@ -28,7 +28,7 @@ from pathlib import Path
 import aiosqlite
 
 from ..assets.ev import EvDayOverride, EvWeeklyTarget
-from ..core.models import Measurement
+from ..core.models import Measurement, SignalPoint
 
 _log = logging.getLogger(__name__)
 
@@ -83,6 +83,32 @@ ORDER BY timestamp
 _CREATE_INDEX = """
 CREATE INDEX IF NOT EXISTS idx_device_timestamp
     ON measurements (device_id, timestamp)
+"""
+
+_CREATE_SIGNALS_TABLE = """
+CREATE TABLE IF NOT EXISTS signals (
+    signal_id TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    value     REAL,
+    PRIMARY KEY (signal_id, timestamp)
+)
+"""
+
+_CREATE_SIGNALS_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_signal_timestamp
+    ON signals (signal_id, timestamp)
+"""
+
+_INSERT_SIGNAL = """
+INSERT OR REPLACE INTO signals (signal_id, timestamp, value)
+VALUES (?, ?, ?)
+"""
+
+_QUERY_SIGNAL = """
+SELECT timestamp, value
+FROM signals
+WHERE signal_id = ? AND timestamp BETWEEN ? AND ?
+ORDER BY timestamp
 """
 
 _CREATE_EV_WEEKLY_PLAN_TABLE = """
@@ -236,8 +262,10 @@ class SqliteStorageBackend:
         await self._db.execute(_CREATE_EV_DISABLED_TABLE)
         # Superseded by ev_weekly_plan + ev_day_overrides
         await self._db.execute("DROP TABLE IF EXISTS ev_targets")
+        await self._db.execute(_CREATE_SIGNALS_TABLE)
         await self._db.execute(_CREATE_INDEX)
         await self._db.execute(_CREATE_LEDGER_HISTORY_INDEX)
+        await self._db.execute(_CREATE_SIGNALS_INDEX)
         await self._db.commit()
 
     async def stop(self) -> None:
@@ -292,6 +320,37 @@ class SqliteStorageBackend:
                 )
             )
         return result
+
+    async def write_signal(
+        self,
+        signal_id: str,
+        timestamp: datetime,
+        value: float | None,
+    ) -> None:
+        """Persist a single environmental signal sample.  Overwrites any
+        existing entry for the same ``(signal_id, timestamp)`` pair."""
+        assert self._db is not None, "Call start() before write_signal()"
+        await self._db.execute(_INSERT_SIGNAL, (signal_id, timestamp.isoformat(), value))
+        await self._db.commit()
+
+    async def query_signals(
+        self,
+        signal_id: str,
+        start: datetime,
+        end: datetime,
+    ) -> list[SignalPoint]:
+        """Return all samples for *signal_id* in ``[start, end]``."""
+        assert self._db is not None, "Call start() before query_signals()"
+        async with self._db.execute(
+            _QUERY_SIGNAL,
+            (signal_id, start.isoformat(), end.isoformat()),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [
+            SignalPoint(timestamp=datetime.fromisoformat(row[0]), value=row[1])
+            for row in rows
+            if row[1] is not None
+        ]
 
     async def save_ledger_state(
         self,

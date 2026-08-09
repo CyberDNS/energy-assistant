@@ -9,11 +9,14 @@ Build context
 Every factory receives a ``BuildContext`` with all infrastructure objects
 needed to construct a device or tariff:
 
-    ctx.backends        — parsed BackendsConfig (host, port, tokens)
-    ctx.iobroker_pool   — shared IoBrokerConnectionPool (or None)
-    ctx.ha_client       — HAClient (or None)
-    ctx.device_registry — populated DeviceRegistry (set in second pass,
-                          available only for deferred factory types)
+    ctx.backends            — parsed BackendsConfig (host, port, tokens)
+    ctx.iobroker_pool       — shared IoBrokerConnectionPool (or None)
+    ctx.ha_client           — HAClient (or None)
+    ctx.device_registry     — populated DeviceRegistry (set in second pass,
+                              available only for deferred factory types)
+    ctx.learned_model_store — shared LearnedModelStore (or None)
+    ctx.environment         — raw ``environment:`` config dict (weather/
+                              temperature/presence entity ids)
 
 Deferred factories
 ------------------
@@ -25,7 +28,7 @@ in a second pass after the registry has been fully populated.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .config import BackendsConfig
@@ -43,9 +46,11 @@ class BuildContext:
     """Carries all infrastructure objects into plugin factory functions."""
 
     backends: BackendsConfig
-    iobroker_pool: Any = None    # IoBrokerConnectionPool | None
-    ha_client: Any = None        # HAClient | None
-    device_registry: Any = None  # DeviceRegistry | None  (deferred pass only)
+    iobroker_pool: Any = None         # IoBrokerConnectionPool | None
+    ha_client: Any = None             # HAClient | None
+    device_registry: Any = None       # DeviceRegistry | None  (deferred pass only)
+    learned_model_store: Any = None   # LearnedModelStore | None
+    environment: dict[str, Any] = field(default_factory=dict)  # raw environment: config
 
 
 class PluginRegistry:

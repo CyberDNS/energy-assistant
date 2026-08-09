@@ -174,6 +174,14 @@ class Measurement(BaseModel):
     extra: dict[str, Any] = Field(default_factory=dict)
 
 
+class SignalPoint(BaseModel):
+    """A single time-series sample of an environmental signal (e.g. outdoor
+    temperature, presence) used to train learned consumption models."""
+
+    timestamp: datetime
+    value: float
+
+
 class TariffPoint(BaseModel):
     """A single price point in a tariff schedule."""
 

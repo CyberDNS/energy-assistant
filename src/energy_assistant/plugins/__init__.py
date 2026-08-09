@@ -28,6 +28,7 @@ from . import (  # noqa: E402
     generic_consumer,
     generic_homeassistant,
     generic_iobroker,
+    learned_consumption,
     openwb_homeassistant,
     openwb_mqtt,
     pvforecast_iobroker,
@@ -43,6 +44,7 @@ flat_rate.register(registry)
 generic_consumer.register(registry)
 generic_homeassistant.register(registry)
 generic_iobroker.register(registry)
+learned_consumption.register(registry)
 openwb_homeassistant.register(registry)
 openwb_mqtt.register(registry)
 pvforecast_iobroker.register(registry)

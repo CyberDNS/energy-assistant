@@ -72,7 +72,10 @@ from ..core.config import AppConfig
 from ..core.control import ControlLoop, LiveSituation, StorageControlContributor
 from ..core.event import DeviceStateEvent, EventBus, PlanUpdatedEvent
 from ..core.forecast import ForecastProvider
+from ..core.history_backfill import run_history_backfill
 from ..core.ledger import BatteryCostLedger
+from ..core.learned_model import LearnedConsumptionModel, join_samples
+from ..core.learned_model_store import LearnedModelStore
 from ..core.models import (
     DeviceRole,
     EnergyPlan,
@@ -464,6 +467,10 @@ class Application:
         self._tariffs: dict[str, TariffModel]
         self._topology: TopologyNode | None
         self._storage: SqliteStorageBackend
+        self._learned_model_store = LearnedModelStore()
+        self._environment_cfg: dict[str, Any]
+        self._environment_poll_interval_s: float
+        self._learned_model_recompute_interval_s: float
         self._bus: EventBus
         self._ledger: BatteryCostLedger
         self._control_loop: ControlLoop
@@ -531,9 +538,14 @@ class Application:
         self._dry_run = bool(ctl.get("dry_run", False)) or os.environ.get("ENERGY_ASSISTANT_DRY_RUN", "") == "1"
         horizon_h = int(opt.get("horizon_hours", 24))
         self._horizon = timedelta(hours=horizon_h)
+        self._environment_cfg = self._cfg.environment
+        self._environment_poll_interval_s = float(self._environment_cfg.get("poll_interval_s", 60))
+        self._learned_model_recompute_interval_s = float(
+            ctl.get("learned_model_recompute_interval_s", 21600)
+        )
 
         # 2 — Build devices / tariffs / topology (shared connection pool)
-        ctx = make_build_context(self._cfg)
+        ctx = make_build_context(self._cfg, learned_model_store=self._learned_model_store)
         self._build_ctx = ctx
         self._registry, self._tariffs, self._topology = build(self._cfg, ctx=ctx)
         _log.info("Loaded %d devices, %d tariffs", len(self._registry), len(self._tariffs))
@@ -546,6 +558,21 @@ class Application:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._storage = SqliteStorageBackend(self._db_path)
         await self._storage.start()
+
+        # 4b — One-time history backfill (HA-backed signals/devices only —
+        # see core/history_backfill.py). Idempotent: no-ops once local
+        # history exists, so this is cheap on every subsequent restart.
+        # Best-effort: individual failures are already handled inside
+        # run_history_backfill, but this is optional startup enrichment —
+        # it must never prevent the server itself from starting.
+        backfill_days = int(self._environment_cfg.get("backfill_days", 10))
+        try:
+            await run_history_backfill(
+                self._cfg, ctx.ha_client, self._storage, self._learned_model_store,
+                backfill_days=backfill_days,
+            )
+        except Exception:  # noqa: BLE001
+            _log.warning("history backfill failed unexpectedly — continuing without it", exc_info=True)
 
         # 5 — Event bus
         self._bus = EventBus()
@@ -665,6 +692,14 @@ class Application:
             asyncio.create_task(self._control_task(), name="control"),
             asyncio.create_task(self._api_task(port), name="api"),
         ]
+        if self._environment_cfg:
+            self.tasks.append(
+                asyncio.create_task(self._environment_poll_loop(), name="environment_poll")
+            )
+        if self._learned_model_store.configured_device_ids():
+            self.tasks.append(
+                asyncio.create_task(self._learned_model_recompute_loop(), name="learned_model_recompute")
+            )
         _log.info("All loops started")
 
     async def stop(self) -> None:
@@ -848,6 +883,85 @@ class Application:
                 self._first_poll_done.set()  # unblock planning and control loops
 
             await asyncio.sleep(self._poll_interval_s)
+
+    # ------------------------------------------------------------------
+    # Environment signals (outdoor temperature + presence) for learned models
+    # ------------------------------------------------------------------
+
+    async def _environment_poll_loop(self) -> None:
+        """Poll outdoor temperature + presence entities, persist as signals."""
+        ha_client = self._build_ctx.ha_client
+        temp_entity = self._environment_cfg.get("outdoor_temperature")
+        person_entities = self._environment_cfg.get("presence") or []
+        if ha_client is None or not temp_entity:
+            _log.warning(
+                "environment: config present but no HA client / "
+                "outdoor_temperature entity configured — skipping signal polling"
+            )
+            return
+
+        while True:
+            now = datetime.now(timezone.utc)
+            try:
+                temp_state = await ha_client.get_entity_state(temp_entity)
+                if temp_state is not None:
+                    await self._storage.write_signal("outdoor_temperature", now, float(temp_state))
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("environment: could not read outdoor temperature %r: %s", temp_entity, exc)
+
+            if person_entities:
+                anyone_home = False
+                for entity_id in person_entities:
+                    try:
+                        state = await ha_client.get_entity_state(entity_id)
+                        if state == "home":
+                            anyone_home = True
+                    except Exception as exc:  # noqa: BLE001
+                        _log.warning("environment: could not read presence %r: %s", entity_id, exc)
+                await self._storage.write_signal("anyone_home", now, 1.0 if anyone_home else 0.0)
+
+            await asyncio.sleep(self._environment_poll_interval_s)
+
+    # ------------------------------------------------------------------
+    # Learned consumption model recompute loop
+    # ------------------------------------------------------------------
+
+    async def _learned_model_recompute_loop(self) -> None:
+        """Periodically refit every configured learned_consumption model from history."""
+        await self._first_poll_done.wait()
+        while True:
+            await self._recompute_learned_models()
+            await asyncio.sleep(self._learned_model_recompute_interval_s)
+
+    async def _recompute_learned_models(self) -> None:
+        now = datetime.now(timezone.utc)
+        for device_id in self._learned_model_store.configured_device_ids():
+            config = self._learned_model_store.get_config(device_id)
+            if config is None:
+                continue
+            start = now - timedelta(days=config.history_days)
+            try:
+                measurements = await self._storage.query(device_id, start, now)
+                temp_signal = await self._storage.query_signals("outdoor_temperature", start, now)
+                presence_signal = await self._storage.query_signals("anyone_home", start, now)
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("learned_model: could not load history for %r: %s", device_id, exc)
+                continue
+
+            power_samples = [(m.timestamp, m.power_w) for m in measurements if m.power_w is not None]
+            joined = join_samples(
+                power_samples,
+                [(s.timestamp, s.value) for s in temp_signal],
+                [(s.timestamp, s.value) for s in presence_signal],
+            )
+            if not joined:
+                _log.info("learned_model: no joined samples yet for %r — skipping fit", device_id)
+                continue
+
+            model = LearnedConsumptionModel(min_samples_per_bucket=config.min_samples_per_bucket)
+            model.fit(joined)
+            self._learned_model_store.set(device_id, model)
+            _log.info("learned_model: refit %r with %d samples", device_id, len(joined))
 
     # ------------------------------------------------------------------
     # Planning loop
@@ -2658,7 +2772,7 @@ class Application:
             try:
                 provider = plugin_registry.build_forecast(
                     f"{device_id}_weighted_price_forecast",
-                    fc_cfg,
+                    {**fc_cfg, "_device_id": device_id},
                     self._build_ctx,
                 )
                 if provider is None or provider.quantity != ForecastQuantity.CONSUMPTION:

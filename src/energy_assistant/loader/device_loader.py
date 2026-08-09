@@ -33,11 +33,21 @@ from ..plugins._iobroker.pool import IoBrokerConnectionPool
 _log = logging.getLogger(__name__)
 
 
-def make_build_context(app_config: AppConfig) -> BuildContext:
+def make_build_context(
+    app_config: AppConfig,
+    learned_model_store: Any = None,
+) -> BuildContext:
     """Create a ``BuildContext`` with live backend connections from *app_config*.
 
     Call this once and share the resulting context across all build functions
     so that all plugins reuse the same backend client instances.
+
+    Parameters
+    ----------
+    learned_model_store:
+        Shared ``LearnedModelStore`` (or ``None``) — passed through so the
+        ``learned_consumption`` forecast plugin can register itself and the
+        server's recompute loop can later populate fitted models.
     """
     iobroker_pool: IoBrokerConnectionPool | None = None
     ha_client: HAClient | None = None
@@ -57,6 +67,8 @@ def make_build_context(app_config: AppConfig) -> BuildContext:
         backends=app_config.backends,
         iobroker_pool=iobroker_pool,
         ha_client=ha_client,
+        learned_model_store=learned_model_store,
+        environment=app_config.environment,
     )
 
 
@@ -151,7 +163,15 @@ def build_device_forecasts(
             continue
         forecast_id = f"{device_id}_forecast"
         try:
-            provider = plugin_registry.build_forecast(forecast_id, forecast_cfg, ctx)
+            # _device_id is a reserved cfg key some plugins (learned_consumption)
+            # read to know which device they belong to — forecast_id's naming
+            # convention isn't guaranteed uniform across every caller (see
+            # server._build_tariff_weighted_price_forecast, which uses a
+            # different suffix), so plugins that need device_id should read
+            # this key rather than parse forecast_id.
+            provider = plugin_registry.build_forecast(
+                forecast_id, {**forecast_cfg, "_device_id": device_id}, ctx
+            )
             if provider is not None:
                 providers.append(provider)
         except Exception as exc:  # noqa: BLE001
