@@ -3,9 +3,13 @@
 # Trigger behaviour:
 #   pull_request             → build only (all platforms), no push — used to
 #                              catch Dockerfile/dependency issues before merge
-#   push to main             → build + publish :dev + :sha-<short-sha>
-#   prerelease tag (v*-*)    → build + publish :edge + :<full-tag>
-#   stable tag (vX.Y.Z)      → build + publish :latest + :<full-tag>
+#   push to main    → build + publish :dev + :sha-<short-sha>
+#   tag push (v*)   → build + publish :edge + :<tag>
+#
+# :latest is intentionally NOT set here — it only moves when a version is
+# promoted to prod (see hassio-addons-repository's "Promote to prod"
+# workflow), which copies the already-built image by digest rather than
+# rebuilding it.
 #
 # Images are published to:
 #   ghcr.io/cyberdns/energy-assistant
@@ -69,12 +73,9 @@ jobs:
             # push to main → :dev + short SHA
             type=raw,value=dev,enable=${{ github.ref == 'refs/heads/main' }}
             type=sha,prefix=sha-,format=short,enable=${{ github.ref == 'refs/heads/main' }}
-            # prerelease tag (v*-*) → :edge + :<tag>
-            type=raw,value=edge,enable=${{ startsWith(github.ref, 'refs/tags/v') && contains(github.ref, '-') }}
-            type=ref,event=tag,enable=${{ startsWith(github.ref, 'refs/tags/v') && contains(github.ref, '-') }}
-            # stable tag (vX.Y.Z) → :latest + :<tag>
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-') }}
-            type=ref,event=tag,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-') }}
+            # tag push (v*) → :edge + :<tag>
+            type=raw,value=edge,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=ref,event=tag
           labels: |
             org.opencontainers.image.title=Energy Assistant
             org.opencontainers.image.description=Open-source, vendor-neutral energy management platform
@@ -157,10 +158,8 @@ jobs:
           tags: |
             type=raw,value=dev,enable=${{ github.ref == 'refs/heads/main' }}
             type=sha,prefix=sha-,format=short,enable=${{ github.ref == 'refs/heads/main' }}
-            type=raw,value=edge,enable=${{ startsWith(github.ref, 'refs/tags/v') && contains(github.ref, '-') }}
-            type=ref,event=tag,enable=${{ startsWith(github.ref, 'refs/tags/v') && contains(github.ref, '-') }}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-') }}
-            type=ref,event=tag,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-') }}
+            type=raw,value=edge,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=ref,event=tag
           labels: |
             org.opencontainers.image.title=Energy Assistant
             org.opencontainers.image.description=Open-source, vendor-neutral energy management platform
