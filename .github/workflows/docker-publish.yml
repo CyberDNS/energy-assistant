@@ -75,7 +75,7 @@ jobs:
             type=sha,prefix=sha-,format=short,enable=${{ github.ref == 'refs/heads/main' }}
             # tag push (v*) → :edge + :<tag>
             type=raw,value=edge,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            type=ref,event=tag
+            type=semver,pattern={{version}}
           labels: |
             org.opencontainers.image.title=Energy Assistant
             org.opencontainers.image.description=Open-source, vendor-neutral energy management platform
@@ -159,7 +159,7 @@ jobs:
             type=raw,value=dev,enable=${{ github.ref == 'refs/heads/main' }}
             type=sha,prefix=sha-,format=short,enable=${{ github.ref == 'refs/heads/main' }}
             type=raw,value=edge,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            type=ref,event=tag
+            type=semver,pattern={{version}}
           labels: |
             org.opencontainers.image.title=Energy Assistant
             org.opencontainers.image.description=Open-source, vendor-neutral energy management platform
