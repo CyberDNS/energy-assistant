@@ -496,6 +496,10 @@ class Application:
         # Last seen plugged state per asset — detects the plugged→unplugged
         # transition that cancels an active force charge.
         self._ev_prev_plugged: dict[str, bool] = {}
+        # Last seen `available` state per EV device — detects a car
+        # connecting so we can replan immediately instead of waiting up to
+        # plan_interval_s for the next scheduled cycle.
+        self._ev_prev_connected: dict[str, bool] = {}
         # In-memory staging for the HA/MQTT date+time+soc picker entities.
         self._staged_overrides: dict[str, tuple[float, datetime]] = {}
         self._disabled_chargepoints: set[str] = set()
@@ -525,7 +529,7 @@ class Application:
             logging.getLogger("httpx").setLevel(logging.WARNING)
         opt = self._cfg.optimizer
         ctl = self._cfg.controller
-        self._plan_interval_s = float(ctl.get("plan_interval_s", 3600))
+        self._plan_interval_s = float(ctl.get("plan_interval_s", 900))
         self._control_interval_s = float(ctl.get("control_interval_s", 30))
         self._poll_interval_s = float(ctl.get("poll_interval_s", self._control_interval_s))
         self._dry_run = bool(ctl.get("dry_run", False)) or os.environ.get("ENERGY_ASSISTANT_DRY_RUN", "") == "1"
@@ -846,8 +850,26 @@ class Application:
                 await self._init_ledger(states)
                 first_tick = False
                 self._first_poll_done.set()  # unblock planning and control loops
+            else:
+                self._check_ev_connected(states)
 
             await asyncio.sleep(self._poll_interval_s)
+
+    def _check_ev_connected(self, device_states: dict[str, Any]) -> None:
+        """Replan immediately when an EV transitions to connected.
+
+        Otherwise a car plugged in shortly after a planning cycle would sit
+        without a goal for up to ``plan_interval_s`` — losing time it may
+        not get back before its deadline.
+        """
+        for asset in self._ev_assets:
+            state = device_states.get(asset.device_id)
+            connected = state is not None and state.available
+            prev = self._ev_prev_connected.get(asset.asset_id)
+            self._ev_prev_connected[asset.asset_id] = connected
+            if connected and prev is False:
+                _log.info("EV %r connected — replanning immediately", asset.asset_id)
+                asyncio.create_task(self._run_plan())
 
     # ------------------------------------------------------------------
     # Planning loop
@@ -973,15 +995,35 @@ class Application:
         # force-charging ones are excluded from planning (control bypasses
         # the plan while forced, and the next re-solve sees the raised SoC).
         await self._purge_expired_ev_overrides()
+        excluded_disabled = [a for a in self._ev_assets if a.asset_id in self._disabled_chargepoints]
+        excluded_force = [a for a in self._ev_assets if a.asset_id in self._ev_force_charge]
         active_assets = [
             a for a in self._ev_assets
             if a.asset_id not in self._disabled_chargepoints
             and a.asset_id not in self._ev_force_charge
         ]
+        if excluded_disabled or excluded_force:
+            _log.debug(
+                "EV planning exclusions: disabled=%s force_charge=%s",
+                [a.asset_id for a in excluded_disabled],
+                [a.asset_id for a in excluded_force],
+            )
         ev_goals = resolve_active_goals(
             active_assets, device_states, self._ev_weekly_plans, self._ev_day_overrides
         )
         self._last_ev_goals = ev_goals
+        # Assets with a chargepoint that isn't currently reporting `connected`
+        # get no goal at all this cycle — worth surfacing since it means the
+        # car won't be charged even if a schedule exists for it.
+        goal_device_ids = {g.device_id for g in ev_goals}
+        for asset in active_assets:
+            state = device_states.get(asset.device_id)
+            connected = state is not None and state.available
+            if not connected and asset.device_id not in goal_device_ids:
+                _log.debug(
+                    "EV %r: chargepoint %r not connected/available — no goal this cycle",
+                    asset.asset_id, asset.device_id,
+                )
         # Push updated goals to contributors so the control loop uses them.
         # Also propagate the target SoC to devices that write it to hardware
         # (e.g. openWB instant-charging SoC limit register).  While a force
@@ -1000,8 +1042,19 @@ class Application:
         if ev_goals:
             _log.info(
                 "EV goals: %s",
-                [(g.asset_id, f"{g.current_soc_pct:.0f}%→{g.target_soc_pct:.0f}%",
-                  g.target_by.strftime("%Y-%m-%dT%H:%M")) for g in ev_goals],
+                [
+                    {
+                        "asset": g.asset_id,
+                        "soc": f"{g.current_soc_pct:.0f}%→{g.target_soc_pct:.0f}%",
+                        "target_by": g.target_by.strftime("%Y-%m-%dT%H:%M"),
+                        "phase1_kwh": round(g.phase1_required_kwh, 1),
+                        "phase2_kwh": round(g.phase2_required_kwh, 1),
+                        "pv_only": g.pv_only,
+                        "infeasible": g.infeasible,
+                        "overdue": g.overdue,
+                    }
+                    for g in ev_goals
+                ],
             )
 
         context = OptimizationContext(

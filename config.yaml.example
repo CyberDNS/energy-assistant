@@ -91,8 +91,8 @@ controller:
   poll_interval_s: 5
   # How often the control setpoint is sent to devices (seconds).
   control_interval_s: 15
-  # How often the MILP plan is re-solved (seconds). 3600 = once per hour.
-  plan_interval_s: 3600
+  # How often the MILP plan is re-solved (seconds). 900 = every 15 minutes.
+  plan_interval_s: 900
   # Set to true to compute setpoints without sending commands (safe for testing).
   dry_run: false
 
