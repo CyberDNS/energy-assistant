@@ -49,6 +49,16 @@ def _weekly_all_days(soc: float = 80.0, hhmm: str = "06:00") -> dict[int, EvWeek
     }
 
 
+def _weekly_today_already_met(soc: float = 80.0, hhmm: str = "06:00") -> dict[int, EvWeeklyTarget]:
+    """Weekly plan where *today's* (Wed, weekday 3) target is already below
+    the default 40% test SoC, so it doesn't go overdue — used by tests that
+    exercise the forward-walk to a later day, independent of the overdue
+    catch-up behavior (covered separately, see test_missed_deadline_*)."""
+    weekly = _weekly_all_days(soc=soc, hhmm=hhmm)
+    weekly[3] = EvWeeklyTarget(weekday=3, enabled=True, target_soc_pct=30.0, target_by=hhmm)
+    return weekly
+
+
 def _state(soc: float = 40.0, available: bool = True) -> DeviceState:
     return DeviceState(device_id="wallbox", power_w=0.0, soc_pct=soc, available=available)
 
@@ -72,22 +82,46 @@ def _resolve(weekly, overrides, *, soc: float = 40.0, now: datetime = NOW):
 
 
 def test_weekly_plan_targets_next_morning() -> None:
-    goals = _resolve(_weekly_all_days(), {})
+    # Today's 30% target is already met by the 40% test SoC, so it isn't
+    # overdue and the walk moves on to tomorrow's 80% @ 06:00 Berlin.
+    goals = _resolve(_weekly_today_already_met(), {})
     assert len(goals) == 1
     g = goals[0]
     assert g.target_soc_pct == 80.0
-    # Today's 06:00 is already past (now = 12:00 local) → tomorrow 06:00 Berlin
     expected = datetime(2026, 7, 16, 6, 0, tzinfo=TZ).astimezone(timezone.utc)
     assert g.target_by == expected
+    assert not g.overdue
 
 
 def test_disabled_weekday_is_stepped_over() -> None:
-    weekly = _weekly_all_days()
+    weekly = _weekly_today_already_met()
     weekly[4] = EvWeeklyTarget(weekday=4, enabled=False, target_soc_pct=80.0, target_by="06:00")
     goals = _resolve(weekly, {})
     # Thursday (weekday 4) disabled → Friday 06:00
     expected = datetime(2026, 7, 17, 6, 0, tzinfo=TZ).astimezone(timezone.utc)
     assert goals[0].target_by == expected
+
+
+def test_missed_deadline_keeps_forcing_todays_target() -> None:
+    """When today's deadline has passed and SoC hasn't caught up, the goal
+    should stick to *today's* target (overdue=True) instead of silently
+    rolling over to tomorrow — this is what drives the full-power catch-up
+    charge (see EvChargerContributor / build_goal_from_parts)."""
+    goals = _resolve(_weekly_all_days(), {}, soc=40.0)
+    assert len(goals) == 1
+    g = goals[0]
+    assert g.overdue
+    assert g.target_soc_pct == 80.0
+    expected_today = datetime(2026, 7, 15, 6, 0, tzinfo=TZ).astimezone(timezone.utc)
+    assert g.target_by == expected_today
+    # phase1/phase2 merged into one immediate full-power block
+    assert g.phase1_required_kwh == 0.0
+    assert g.phase2_start_time <= NOW
+
+
+def test_missed_deadline_stops_once_target_reached() -> None:
+    goals = _resolve(_weekly_all_days(), {}, soc=80.0)
+    assert goals == []
 
 
 def test_empty_plan_yields_pv_only_goal_when_connected() -> None:
@@ -117,7 +151,7 @@ def test_skip_override_moves_to_next_day() -> None:
 
 
 def test_override_replaces_soc_and_time() -> None:
-    weekly = _weekly_all_days(hhmm="06:00")
+    weekly = _weekly_today_already_met(hhmm="06:00")
     overrides = {
         TOMORROW: EvDayOverride(
             date=TOMORROW, skip=False, target_soc_pct=100.0, target_by="09:30"
@@ -130,7 +164,7 @@ def test_override_replaces_soc_and_time() -> None:
 
 
 def test_override_partial_falls_back_to_weekly_time() -> None:
-    weekly = _weekly_all_days(soc=80.0, hhmm="06:00")
+    weekly = _weekly_today_already_met(soc=80.0, hhmm="06:00")
     overrides = {
         TOMORROW: EvDayOverride(date=TOMORROW, skip=False, target_soc_pct=55.0)
     }
@@ -157,6 +191,76 @@ def test_override_on_disabled_weekday_creates_target() -> None:
 def test_soc_already_at_target_yields_no_goal() -> None:
     goals = _resolve(_weekly_all_days(soc=80.0), {}, soc=85.0)
     assert goals == []
+
+
+# ---------------------------------------------------------------------------
+# Feasibility (build_goal_from_parts)
+# ---------------------------------------------------------------------------
+
+
+def test_feasible_goal_keeps_two_phase_split() -> None:
+    # Plenty of time: 10 % → 90 % at 11 kW easily fits in 12 hours.
+    goal = build_goal_from_parts(
+        asset_id="ev1", device_id="wallbox", capacity_kwh=60.0,
+        max_charge_kw=11.0, min_charge_kw=4.14, charge_limit_soc_pct=90.0,
+        target_soc_pct=90.0, target_by=NOW + timedelta(hours=12),
+        charge_curve=[], current_soc_pct=10.0, connected=True,
+        now=NOW,
+    )
+    assert not goal.infeasible
+    assert goal.phase1_required_kwh > 0.0
+    assert goal.phase2_start_time > NOW
+
+
+def test_infeasible_goal_forces_immediate_full_power() -> None:
+    # 10 % → 90 % needs ~44 kWh at 11 kW (~4 h), but only 1 h is left.
+    goal = build_goal_from_parts(
+        asset_id="ev1", device_id="wallbox", capacity_kwh=60.0,
+        max_charge_kw=11.0, min_charge_kw=4.14, charge_limit_soc_pct=90.0,
+        target_soc_pct=90.0, target_by=NOW + timedelta(hours=1),
+        charge_curve=[], current_soc_pct=10.0, connected=True,
+        now=NOW,
+    )
+    assert goal.infeasible
+    assert goal.phase1_required_kwh == 0.0
+    assert goal.phase2_required_kwh > 0.0
+    assert goal.phase2_start_time == NOW
+
+
+def test_overdue_goal_forces_immediate_full_power_regardless_of_time_left() -> None:
+    # target_by already passed; overdue=True should merge phases even
+    # though feasibility wasn't (and can't sensibly be) checked.
+    goal = build_goal_from_parts(
+        asset_id="ev1", device_id="wallbox", capacity_kwh=60.0,
+        max_charge_kw=11.0, min_charge_kw=4.14, charge_limit_soc_pct=90.0,
+        target_soc_pct=90.0, target_by=NOW - timedelta(hours=2),
+        charge_curve=[], current_soc_pct=10.0, connected=True,
+        now=NOW, overdue=True,
+    )
+    assert goal.overdue
+    assert goal.phase1_required_kwh == 0.0
+    assert goal.phase2_start_time == NOW
+
+
+def test_infeasible_goal_still_stops_control_at_target() -> None:
+    """The contributor's existing 'target met → Stop' check must still win
+    once the forced full-power catch-up reaches the target."""
+    contrib = EvChargerContributor(_asset())
+    goal = build_goal_from_parts(
+        asset_id="ev1", device_id="wallbox", capacity_kwh=60.0,
+        max_charge_kw=11.0, min_charge_kw=4.14, charge_limit_soc_pct=90.0,
+        target_soc_pct=90.0, target_by=NOW + timedelta(minutes=30),
+        charge_curve=[], current_soc_pct=10.0, connected=True,
+        now=NOW,
+    )
+    assert goal.infeasible
+    contrib.update_goal(goal)
+
+    live_mid = _live({"wallbox": _state(soc=50.0)})
+    assert contrib.desired_setpoint_w(None, live_mid) == 11_000.0
+
+    live_done = _live({"wallbox": _state(soc=90.0)})
+    assert contrib.desired_setpoint_w(None, live_done) == 0.0
 
 
 # ---------------------------------------------------------------------------

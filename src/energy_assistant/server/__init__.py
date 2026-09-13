@@ -496,6 +496,10 @@ class Application:
         # Last seen plugged state per asset — detects the plugged→unplugged
         # transition that cancels an active force charge.
         self._ev_prev_plugged: dict[str, bool] = {}
+        # Last seen `available` state per EV device — detects a car
+        # connecting so we can replan immediately instead of waiting up to
+        # plan_interval_s for the next scheduled cycle.
+        self._ev_prev_connected: dict[str, bool] = {}
         # In-memory staging for the HA/MQTT date+time+soc picker entities.
         self._staged_overrides: dict[str, tuple[float, datetime]] = {}
         self._disabled_chargepoints: set[str] = set()
@@ -525,7 +529,7 @@ class Application:
             logging.getLogger("httpx").setLevel(logging.WARNING)
         opt = self._cfg.optimizer
         ctl = self._cfg.controller
-        self._plan_interval_s = float(ctl.get("plan_interval_s", 3600))
+        self._plan_interval_s = float(ctl.get("plan_interval_s", 900))
         self._control_interval_s = float(ctl.get("control_interval_s", 30))
         self._poll_interval_s = float(ctl.get("poll_interval_s", self._control_interval_s))
         self._dry_run = bool(ctl.get("dry_run", False)) or os.environ.get("ENERGY_ASSISTANT_DRY_RUN", "") == "1"
@@ -846,8 +850,26 @@ class Application:
                 await self._init_ledger(states)
                 first_tick = False
                 self._first_poll_done.set()  # unblock planning and control loops
+            else:
+                self._check_ev_connected(states)
 
             await asyncio.sleep(self._poll_interval_s)
+
+    def _check_ev_connected(self, device_states: dict[str, Any]) -> None:
+        """Replan immediately when an EV transitions to connected.
+
+        Otherwise a car plugged in shortly after a planning cycle would sit
+        without a goal for up to ``plan_interval_s`` — losing time it may
+        not get back before its deadline.
+        """
+        for asset in self._ev_assets:
+            state = device_states.get(asset.device_id)
+            connected = state is not None and state.available
+            prev = self._ev_prev_connected.get(asset.asset_id)
+            self._ev_prev_connected[asset.asset_id] = connected
+            if connected and prev is False:
+                _log.info("EV %r connected — replanning immediately", asset.asset_id)
+                asyncio.create_task(self._run_plan())
 
     # ------------------------------------------------------------------
     # Planning loop

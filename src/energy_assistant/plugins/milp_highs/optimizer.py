@@ -311,11 +311,18 @@ class MilpHigsOptimizer:
         )
 
         if pulp.LpStatus[status] not in ("Optimal", "Feasible"):
-            _log.warning(
-                "MilpHigsOptimizer: solver returned %r — emitting empty plan",
-                pulp.LpStatus[status],
+            # Do NOT emit an empty plan here: the caller (server._run_plan_inner)
+            # publishes whatever this returns, and an empty plan would wipe
+            # every device's intents — including any EV mandatory top-off
+            # block — for the rest of this cycle. Raising instead makes the
+            # caller keep the previous (still valid) plan in place while this
+            # is investigated; the next planning cycle tries again.
+            raise RuntimeError(
+                f"MilpHigsOptimizer: solver returned {pulp.LpStatus[status]!r} — "
+                f"keeping previous plan (n_steps={n_steps}, "
+                f"batteries={len(batteries)}, "
+                f"evs={len([g for g in (ev_goals or []) if g.connected])})"
             )
-            return EnergyPlan(horizon_hours=horizon_h, step_minutes=self._step_min)
 
         # ── Extract schedule → EnergyPlan ─────────────────────────────
         intents = _extract_intents(batteries, variables, timestamps, step_h)

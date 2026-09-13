@@ -773,3 +773,41 @@ class TestLivePvBlend:
         assert all(1.0 - 1e-6 <= v <= 4.0 + 1e-6 for v in vals)
         assert all(a <= b + 1e-6 for a, b in zip(vals, vals[1:]))
         assert all(abs(f.pv_kw - 4.0) < 1e-6 for f in after[:8])
+
+
+class TestInfeasibleSolveRaises:
+    """A non-optimal/feasible solver status must raise, not emit an empty plan.
+
+    Regression: emitting EnergyPlan() on infeasibility wiped every device's
+    intents for that cycle (batteries, EVs, thresholds alike) with only a
+    warning log. Raising lets the caller (server._run_plan_inner) keep the
+    previous plan in place instead of silently stopping all charging.
+    """
+
+    async def test_unreachable_ev_deadline_raises(self) -> None:
+        from energy_assistant.assets.ev import EvChargingGoal
+
+        now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        # Needs 50 kWh but only 1 kW is available for the 2 phase1 hours
+        # before the deadline (max 2 kWh deliverable) — genuinely infeasible.
+        goal = EvChargingGoal(
+            asset_id="ev1", device_id="cp", capacity_kwh=60.0,
+            max_charge_kw=1.0, min_charge_kw=1.0, charge_limit_soc_pct=100.0,
+            target_soc_pct=100.0, target_by=now + timedelta(hours=2),
+            charge_curve=[], current_soc_pct=0.0, connected=True,
+            phase1_required_kwh=50.0, phase2_required_kwh=0.0,
+            phase2_duration_h=0.0, phase2_start_time=now + timedelta(hours=2),
+        )
+        ctx = OptimizationContext(
+            device_states={
+                "cp": DeviceState(device_id="cp", soc_pct=0.0, available=True),
+                "bat": _state("bat", soc_pct=50.0),
+            },
+            storage_constraints=[_battery("bat")],
+            forecasts={ForecastQuantity.PRICE: _hourly_prices(now, [0.25] * 24)},
+            horizon=timedelta(hours=24),
+            ev_charging_goals=[goal],
+        )
+        optimizer = MilpHigsOptimizer(step_minutes=60)
+        with pytest.raises(RuntimeError, match="solver returned"):
+            await optimizer.optimize(ctx)

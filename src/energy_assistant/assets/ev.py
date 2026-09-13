@@ -142,6 +142,14 @@ class EvChargingGoal:
     phase2_start_time: datetime  # = target_by − phase2_duration_h, UTC
     # True when no schedule is active: MILP plans PV-only absorption; execution uses PV sentinel
     pv_only: bool = False
+    # True when the remaining energy can no longer be delivered by target_by
+    # even at max_charge_kw — phase1/phase2 are merged into one mandatory
+    # full-power block starting now (see build_goal_from_parts).
+    infeasible: bool = False
+    # True when target_by is already in the past and the target still isn't
+    # met — the deadline was missed and we keep forcing full power to catch
+    # up rather than silently rolling over to the next scheduled day.
+    overdue: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -200,8 +208,20 @@ def build_goal_from_parts(
     current_soc_pct: float,
     connected: bool,
     pv_only: bool = False,
+    now: datetime | None = None,
+    overdue: bool = False,
 ) -> EvChargingGoal:
-    """Construct an ``EvChargingGoal`` with pre-computed phase fields."""
+    """Construct an ``EvChargingGoal`` with pre-computed phase fields.
+
+    When *now* is given, the goal is checked for feasibility: if the
+    remaining energy (phase1 + phase2) can no longer be delivered by
+    ``target_by`` even at ``max_charge_kw``, phase1 and phase2 are merged
+    into a single mandatory full-power block starting *now* instead of the
+    economically-optimized phase1 the MILP would otherwise plan — there is
+    no time budget left to be clever about it.  *overdue* forces the same
+    merge unconditionally (used when ``target_by`` itself is already in the
+    past and the target still hasn't been reached).
+    """
     effective_limit = min(charge_limit_soc_pct, target_soc_pct)
 
     phase1_kwh = compute_wall_kwh(
@@ -212,6 +232,20 @@ def build_goal_from_parts(
     )
     phase2_h = phase2_kwh / max_charge_kw if max_charge_kw > 0 else 0.0
     phase2_start = target_by - timedelta(hours=phase2_h)
+
+    infeasible = False
+    if now is not None and not overdue and (phase1_kwh + phase2_kwh) > 0.01:
+        available_h = (target_by - now).total_seconds() / 3600.0
+        deliverable_kwh = max_charge_kw * max(0.0, available_h)
+        if available_h <= 0 or (phase1_kwh + phase2_kwh) > deliverable_kwh + 0.01:
+            infeasible = True
+
+    if (infeasible or overdue) and (phase1_kwh + phase2_kwh) > 0.01:
+        # No time left to distinguish phase1/phase2 — force full power for
+        # everything still needed, starting immediately.
+        phase1_kwh, phase2_kwh = 0.0, phase1_kwh + phase2_kwh
+        phase2_h = phase2_kwh / max_charge_kw if max_charge_kw > 0 else 0.0
+        phase2_start = now if now is not None else phase2_start
 
     return EvChargingGoal(
         asset_id=asset_id,
@@ -230,6 +264,8 @@ def build_goal_from_parts(
         phase2_duration_h=phase2_h,
         phase2_start_time=phase2_start,
         pv_only=pv_only,
+        infeasible=infeasible,
+        overdue=overdue,
     )
 
 
