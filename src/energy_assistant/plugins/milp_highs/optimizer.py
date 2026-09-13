@@ -215,9 +215,26 @@ class MilpHigsOptimizer:
         for goal in ev_goals:
             if not goal.connected or goal.phase2_required_kwh <= 0.01:
                 continue
+            mandatory_slots = 0
             for t, ts in enumerate(timestamps):
                 if goal.phase2_start_time <= ts < goal.target_by:
                     net_load[t] += goal.max_charge_kw * step_h
+                    mandatory_slots += 1
+            # overdue goals have phase2_start_time == now, target_by in the
+            # past — there's no sensible future window to inject, and the
+            # contributor forces full power regardless (see EvChargerContributor).
+            # A window narrower than one step can also legitimately land
+            # between two grid points and register 0 slots even though it's
+            # neither overdue nor infeasible — the continuous control loop
+            # still executes it correctly, only this coarse-grid MILP view
+            # can't represent it, so that case stays informational too.
+            _log.info(
+                "MilpHigsOptimizer: EV %r mandatory block %.1f kWh over %d slot(s) "
+                "from %s to %s (infeasible=%s overdue=%s)",
+                goal.asset_id, goal.phase2_required_kwh, mandatory_slots,
+                goal.phase2_start_time.isoformat(), goal.target_by.isoformat(),
+                goal.infeasible, goal.overdue,
+            )
 
         # ── Storage devices ────────────────────────────────────────────
         batteries = context.storage_constraints
@@ -342,6 +359,31 @@ class MilpHigsOptimizer:
                         grid_allowed=True,
                         reserved_kwh=round(goal.max_charge_kw * step_h, 4),
                     ))
+        for goal in ev_goals:
+            if not goal.connected:
+                continue
+            scheduled_kwh = sum(
+                i.power_kw * step_h for i in ev_intents if i.device_id == goal.device_id
+            )
+            required_kwh = goal.phase1_required_kwh + goal.phase2_required_kwh
+            # Overdue goals are handled entirely outside the MILP (the
+            # contributor forces full power directly, see EvChargerContributor)
+            # since target_by is already in the past — nothing to schedule here.
+            # Tolerance: the mandatory phase-2 block and the phase-1 deadline
+            # constraint both snap to the step grid, so up to ~1 step's worth
+            # of energy near a window boundary can legitimately be "missing"
+            # here while still being delivered in real time by the
+            # continuous, non-stepped control loop — that's not a bug.
+            tolerance_kwh = max(0.1, goal.max_charge_kw * step_h * 1.5)
+            under_scheduled = not goal.overdue and scheduled_kwh < required_kwh - tolerance_kwh
+            _log.info(
+                "MilpHigsOptimizer: EV %r scheduled %.1f/%.1f kWh (phase1=%.1f phase2=%.1f) "
+                "by %s%s",
+                goal.asset_id, scheduled_kwh, required_kwh,
+                goal.phase1_required_kwh, goal.phase2_required_kwh,
+                goal.target_by.isoformat(),
+                " — UNDER-SCHEDULED, target will likely be missed" if under_scheduled else "",
+            )
         threshold_intents = _extract_threshold_intents(threshold_devices, variables, timestamps)
 
         # Solved site-level flows per step — includes internal adjustments

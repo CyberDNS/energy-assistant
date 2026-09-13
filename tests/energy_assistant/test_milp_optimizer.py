@@ -811,3 +811,66 @@ class TestInfeasibleSolveRaises:
         optimizer = MilpHigsOptimizer(step_minutes=60)
         with pytest.raises(RuntimeError, match="solver returned"):
             await optimizer.optimize(ctx)
+
+
+class TestEvSchedulingLogs:
+    """The mandatory-block and scheduled-vs-required logs are the primary
+    debugging aid for 'car not charged by morning' investigations — make
+    sure they actually fire with the right severity."""
+
+    async def test_phase2_mandatory_block_is_logged(self, caplog: pytest.LogCaptureFixture) -> None:
+        now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        from energy_assistant.assets.ev import build_goal_from_parts
+        # charge_limit well below current_soc so phase1 is 0 and phase2 spans
+        # a wide enough SoC range (50% -> 90%) that its ~2 h duration at
+        # 7.4 kW comfortably covers at least one hourly test step — a
+        # narrower phase2 window can fall entirely between two hourly grid
+        # points and register 0 slots, which isn't what this test targets.
+        goal = build_goal_from_parts(
+            asset_id="ev1", device_id="cp", capacity_kwh=40.0,
+            max_charge_kw=7.4, min_charge_kw=4.14, charge_limit_soc_pct=50.0,
+            target_soc_pct=90.0, target_by=now + timedelta(hours=10),
+            charge_curve=[], current_soc_pct=60.0, connected=True,
+            now=now,
+        )
+        assert not goal.infeasible
+        assert goal.phase1_required_kwh == 0.0
+        assert goal.phase2_required_kwh > 0.0
+        ctx = OptimizationContext(
+            device_states={"cp": DeviceState(device_id="cp", soc_pct=60.0, available=True),
+                           "bat": _state("bat", soc_pct=50.0)},
+            storage_constraints=[_battery("bat")],
+            forecasts={ForecastQuantity.PRICE: _hourly_prices(now, [0.25] * 24)},
+            horizon=timedelta(hours=24),
+            ev_charging_goals=[goal],
+        )
+        with caplog.at_level("INFO", logger="energy_assistant.plugins.milp_highs.optimizer"):
+            await MilpHigsOptimizer(step_minutes=60).optimize(ctx)
+        assert any("mandatory block" in r.message for r in caplog.records)
+        assert any("scheduled" in r.message and "UNDER-SCHEDULED" not in r.message
+                   for r in caplog.records)
+
+    async def test_overdue_goal_does_not_log_false_under_scheduled(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        from energy_assistant.assets.ev import build_goal_from_parts
+        goal = build_goal_from_parts(
+            asset_id="ev1", device_id="cp", capacity_kwh=40.0,
+            max_charge_kw=7.4, min_charge_kw=4.14, charge_limit_soc_pct=80.0,
+            target_soc_pct=90.0, target_by=now - timedelta(hours=2),
+            charge_curve=[], current_soc_pct=60.0, connected=True,
+            now=now, overdue=True,
+        )
+        assert goal.overdue
+        ctx = OptimizationContext(
+            device_states={"cp": DeviceState(device_id="cp", soc_pct=60.0, available=True),
+                           "bat": _state("bat", soc_pct=50.0)},
+            storage_constraints=[_battery("bat")],
+            forecasts={ForecastQuantity.PRICE: _hourly_prices(now, [0.25] * 24)},
+            horizon=timedelta(hours=24),
+            ev_charging_goals=[goal],
+        )
+        with caplog.at_level("INFO", logger="energy_assistant.plugins.milp_highs.optimizer"):
+            await MilpHigsOptimizer(step_minutes=60).optimize(ctx)
+        assert not any("UNDER-SCHEDULED" in r.message for r in caplog.records)
