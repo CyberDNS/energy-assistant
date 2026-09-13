@@ -995,15 +995,35 @@ class Application:
         # force-charging ones are excluded from planning (control bypasses
         # the plan while forced, and the next re-solve sees the raised SoC).
         await self._purge_expired_ev_overrides()
+        excluded_disabled = [a for a in self._ev_assets if a.asset_id in self._disabled_chargepoints]
+        excluded_force = [a for a in self._ev_assets if a.asset_id in self._ev_force_charge]
         active_assets = [
             a for a in self._ev_assets
             if a.asset_id not in self._disabled_chargepoints
             and a.asset_id not in self._ev_force_charge
         ]
+        if excluded_disabled or excluded_force:
+            _log.debug(
+                "EV planning exclusions: disabled=%s force_charge=%s",
+                [a.asset_id for a in excluded_disabled],
+                [a.asset_id for a in excluded_force],
+            )
         ev_goals = resolve_active_goals(
             active_assets, device_states, self._ev_weekly_plans, self._ev_day_overrides
         )
         self._last_ev_goals = ev_goals
+        # Assets with a chargepoint that isn't currently reporting `connected`
+        # get no goal at all this cycle — worth surfacing since it means the
+        # car won't be charged even if a schedule exists for it.
+        goal_device_ids = {g.device_id for g in ev_goals}
+        for asset in active_assets:
+            state = device_states.get(asset.device_id)
+            connected = state is not None and state.available
+            if not connected and asset.device_id not in goal_device_ids:
+                _log.debug(
+                    "EV %r: chargepoint %r not connected/available — no goal this cycle",
+                    asset.asset_id, asset.device_id,
+                )
         # Push updated goals to contributors so the control loop uses them.
         # Also propagate the target SoC to devices that write it to hardware
         # (e.g. openWB instant-charging SoC limit register).  While a force
@@ -1022,8 +1042,19 @@ class Application:
         if ev_goals:
             _log.info(
                 "EV goals: %s",
-                [(g.asset_id, f"{g.current_soc_pct:.0f}%→{g.target_soc_pct:.0f}%",
-                  g.target_by.strftime("%Y-%m-%dT%H:%M")) for g in ev_goals],
+                [
+                    {
+                        "asset": g.asset_id,
+                        "soc": f"{g.current_soc_pct:.0f}%→{g.target_soc_pct:.0f}%",
+                        "target_by": g.target_by.strftime("%Y-%m-%dT%H:%M"),
+                        "phase1_kwh": round(g.phase1_required_kwh, 1),
+                        "phase2_kwh": round(g.phase2_required_kwh, 1),
+                        "pv_only": g.pv_only,
+                        "infeasible": g.infeasible,
+                        "overdue": g.overdue,
+                    }
+                    for g in ev_goals
+                ],
             )
 
         context = OptimizationContext(

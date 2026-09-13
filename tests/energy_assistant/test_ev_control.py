@@ -126,6 +126,58 @@ def test_grid_allowed_intent_maps_to_instant() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Decision logging (debugging aid for missed-target investigations)
+# ---------------------------------------------------------------------------
+
+
+def test_mode_change_is_logged(caplog: pytest.LogCaptureFixture) -> None:
+    now = datetime.now(timezone.utc)
+    contrib = EvChargerContributor(_asset())
+    contrib.update_goal(_scheduled_goal(now))
+    state = DeviceState(device_id="wallbox", power_w=0.0, soc_pct=40.0, available=True)
+    live = _live(now, device_states={"wallbox": state})
+
+    with caplog.at_level("INFO", logger="energy_assistant.assets.ev"):
+        contrib.desired_setpoint_w(_ev_intent(now, 4.8, grid_allowed=True), live)
+    assert any("grid-sourced" in r.message for r in caplog.records)
+
+
+def test_unchanged_mode_is_not_logged_again(caplog: pytest.LogCaptureFixture) -> None:
+    now = datetime.now(timezone.utc)
+    contrib = EvChargerContributor(_asset())
+    contrib.update_goal(_scheduled_goal(now))
+    state = DeviceState(device_id="wallbox", power_w=0.0, soc_pct=40.0, available=True)
+    live = _live(now, device_states={"wallbox": state})
+
+    with caplog.at_level("INFO", logger="energy_assistant.assets.ev"):
+        contrib.desired_setpoint_w(_ev_intent(now, 4.8, grid_allowed=True), live)
+        caplog.clear()
+        # Same intent, same SoC, same reason — no new log line expected.
+        contrib.desired_setpoint_w(_ev_intent(now, 4.8, grid_allowed=True), live)
+    assert caplog.records == []
+
+
+def test_infeasible_forced_charge_is_logged_with_reason(caplog: pytest.LogCaptureFixture) -> None:
+    now = datetime.now(timezone.utc)
+    contrib = EvChargerContributor(_asset())
+    goal = build_goal_from_parts(
+        asset_id="ev1", device_id="wallbox", capacity_kwh=60.0,
+        max_charge_kw=11.0, min_charge_kw=4.14, charge_limit_soc_pct=90.0,
+        target_soc_pct=90.0, target_by=now + timedelta(minutes=30),
+        charge_curve=[], current_soc_pct=10.0, connected=True,
+        now=now,
+    )
+    assert goal.infeasible
+    contrib.update_goal(goal)
+    state = DeviceState(device_id="wallbox", power_w=0.0, soc_pct=10.0, available=True)
+    live = _live(now, device_states={"wallbox": state})
+
+    with caplog.at_level("INFO", logger="energy_assistant.assets.ev"):
+        contrib.desired_setpoint_w(None, live)
+    assert any("target unreachable at max power" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
 # PV priority between multiple EVs
 # ---------------------------------------------------------------------------
 
