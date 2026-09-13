@@ -43,12 +43,15 @@ control loop.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..core.control import ControlIntent, LiveSituation
+
+_log = logging.getLogger(__name__)
 
 # Sentinel values sent by desired_setpoint_w and interpreted by OpenWBDevice.
 _INSTANT_SENTINEL_W = 11_000.0   # > 500 W → Instant Charging
@@ -142,6 +145,14 @@ class EvChargingGoal:
     phase2_start_time: datetime  # = target_by − phase2_duration_h, UTC
     # True when no schedule is active: MILP plans PV-only absorption; execution uses PV sentinel
     pv_only: bool = False
+    # True when the remaining energy can no longer be delivered by target_by
+    # even at max_charge_kw — phase1/phase2 are merged into one mandatory
+    # full-power block starting now (see build_goal_from_parts).
+    infeasible: bool = False
+    # True when target_by is already in the past and the target still isn't
+    # met — the deadline was missed and we keep forcing full power to catch
+    # up rather than silently rolling over to the next scheduled day.
+    overdue: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -200,8 +211,20 @@ def build_goal_from_parts(
     current_soc_pct: float,
     connected: bool,
     pv_only: bool = False,
+    now: datetime | None = None,
+    overdue: bool = False,
 ) -> EvChargingGoal:
-    """Construct an ``EvChargingGoal`` with pre-computed phase fields."""
+    """Construct an ``EvChargingGoal`` with pre-computed phase fields.
+
+    When *now* is given, the goal is checked for feasibility: if the
+    remaining energy (phase1 + phase2) can no longer be delivered by
+    ``target_by`` even at ``max_charge_kw``, phase1 and phase2 are merged
+    into a single mandatory full-power block starting *now* instead of the
+    economically-optimized phase1 the MILP would otherwise plan — there is
+    no time budget left to be clever about it.  *overdue* forces the same
+    merge unconditionally (used when ``target_by`` itself is already in the
+    past and the target still hasn't been reached).
+    """
     effective_limit = min(charge_limit_soc_pct, target_soc_pct)
 
     phase1_kwh = compute_wall_kwh(
@@ -212,6 +235,20 @@ def build_goal_from_parts(
     )
     phase2_h = phase2_kwh / max_charge_kw if max_charge_kw > 0 else 0.0
     phase2_start = target_by - timedelta(hours=phase2_h)
+
+    infeasible = False
+    if now is not None and not overdue and (phase1_kwh + phase2_kwh) > 0.01:
+        available_h = (target_by - now).total_seconds() / 3600.0
+        deliverable_kwh = max_charge_kw * max(0.0, available_h)
+        if available_h <= 0 or (phase1_kwh + phase2_kwh) > deliverable_kwh + 0.01:
+            infeasible = True
+
+    if (infeasible or overdue) and (phase1_kwh + phase2_kwh) > 0.01:
+        # No time left to distinguish phase1/phase2 — force full power for
+        # everything still needed, starting immediately.
+        phase1_kwh, phase2_kwh = 0.0, phase1_kwh + phase2_kwh
+        phase2_h = phase2_kwh / max_charge_kw if max_charge_kw > 0 else 0.0
+        phase2_start = now if now is not None else phase2_start
 
     return EvChargingGoal(
         asset_id=asset_id,
@@ -230,6 +267,8 @@ def build_goal_from_parts(
         phase2_duration_h=phase2_h,
         phase2_start_time=phase2_start,
         pv_only=pv_only,
+        infeasible=infeasible,
+        overdue=overdue,
     )
 
 
@@ -258,6 +297,9 @@ class EvChargerContributor:
         self._active_goal: EvChargingGoal | None = None
         self._disabled: bool = False
         self._force_target_soc: float | None = None
+        # (setpoint, reason) last logged — only log on change so the normal
+        # 30 s control tick doesn't spam the log while nothing changed.
+        self._last_logged: tuple[float | None, str] | None = None
 
     @property
     def device_id(self) -> str:
@@ -284,6 +326,39 @@ class EvChargerContributor:
     def force_charge_target_soc(self) -> float | None:
         return self._force_target_soc
 
+    def _decide(
+        self,
+        value: float | None,
+        reason: str,
+        *,
+        current_soc: float | None = None,
+        goal: "EvChargingGoal | None" = None,
+    ) -> float | None:
+        """Return *value*, logging a line whenever (value, reason) changes.
+
+        Every decision path in ``desired_setpoint_w`` routes through here so
+        the log carries a full audit trail of mode changes — which branch
+        fired, and why — without spamming on every 30 s control tick while
+        nothing actually changed.
+        """
+        key = (value, reason)
+        if key != self._last_logged:
+            self._last_logged = key
+            detail = ""
+            if goal is not None:
+                detail = (
+                    f" [target={goal.target_soc_pct:.0f}% by {goal.target_by.isoformat()}"
+                    f" phase1={goal.phase1_required_kwh:.1f}kWh"
+                    f" phase2={goal.phase2_required_kwh:.1f}kWh"
+                    f" infeasible={goal.infeasible} overdue={goal.overdue}]"
+                )
+            soc_str = f"{current_soc:.0f}%" if current_soc is not None else "?"
+            _log.info(
+                "EV %r (%s): soc=%s → setpoint=%s — %s%s",
+                self._asset.asset_id, self.device_id, soc_str, value, reason, detail,
+            )
+        return value
+
     def desired_setpoint_w(
         self,
         intent: "ControlIntent | None",
@@ -294,10 +369,11 @@ class EvChargerContributor:
             # Chargepoint disabled — hands off entirely, not even Stop.
             # The user hands control to the wallbox itself (manual mode
             # selection in openWB); the assistant must not intervene.
-            return None
+            return self._decide(None, "chargepoint disabled — hands off")
         state = live.device_states.get(self.device_id)
         if state is None or not state.available:
-            return None  # car not connected — don't send any command
+            # car not connected — don't send any command
+            return self._decide(None, "not connected")
 
         goal = self._active_goal
         current_soc = state.soc_pct if state.soc_pct is not None else 0.0
@@ -307,21 +383,45 @@ class EvChargerContributor:
         # flag shortly after, returning control to the normal plan.
         if self._force_target_soc is not None:
             if current_soc >= self._force_target_soc:
-                return _STOP_W
-            return self._asset.max_charge_kw * 1000.0
+                return self._decide(
+                    _STOP_W, f"force-charge target {self._force_target_soc:.0f}% reached",
+                    current_soc=current_soc,
+                )
+            return self._decide(
+                self._asset.max_charge_kw * 1000.0,
+                f"force-charge instant → {self._force_target_soc:.0f}%",
+                current_soc=current_soc,
+            )
 
         # Target fully met → Stop
         if goal is not None and current_soc >= goal.target_soc_pct:
-            return _STOP_W
+            return self._decide(
+                _STOP_W, f"target {goal.target_soc_pct:.0f}% reached",
+                current_soc=current_soc, goal=goal,
+            )
 
         # In forced top-off window (phase2) → Instant Charging, always
         if goal is not None and goal.phase2_required_kwh > 0.01:
             if live.timestamp >= goal.phase2_start_time:
-                return self._asset.max_charge_kw * 1000.0
+                if goal.overdue:
+                    reason = "forced full power — deadline already missed, catching up"
+                elif goal.infeasible:
+                    reason = "forced full power — target unreachable at max power, starting now"
+                else:
+                    reason = "phase2 top-off window — forced instant charging"
+                return self._decide(
+                    self._asset.max_charge_kw * 1000.0, reason,
+                    current_soc=current_soc, goal=goal,
+                )
 
         # At charge limit but phase2 window not yet open → hold (Stop)
         if goal is not None and current_soc >= goal.charge_limit_soc_pct:
-            return _STOP_W
+            return self._decide(
+                _STOP_W,
+                f"at charge_limit {goal.charge_limit_soc_pct:.0f}% — holding until "
+                f"phase2 opens at {goal.phase2_start_time.isoformat()}",
+                current_soc=current_soc, goal=goal,
+            )
 
         # When another EV holds the PV allocation for this slot, yield:
         # command Stop instead of opportunistic PV so openWB gives the whole
@@ -330,7 +430,13 @@ class EvChargerContributor:
 
         # No active goal → opportunistic PV charging (unless yielding)
         if goal is None:
-            return _STOP_W if others_hold_pv else _PV_SENTINEL_W
+            if others_hold_pv:
+                return self._decide(
+                    _STOP_W, "no goal — yielding PV to another EV", current_soc=current_soc,
+                )
+            return self._decide(
+                _PV_SENTINEL_W, "no goal — opportunistic PV", current_soc=current_soc,
+            )
 
         # Optimizer planned a charging step
         if intent is not None and intent.power_kw > 0:
@@ -339,12 +445,27 @@ class EvChargerContributor:
                 # estimated kW, but execution must not draw from the grid —
                 # PV mode lets openWB track the real live surplus.  Instant
                 # charging would pull the shortfall from the grid.
-                return _PV_SENTINEL_W
+                return self._decide(
+                    _PV_SENTINEL_W, "plan: PV-sourced slot",
+                    current_soc=current_soc, goal=goal,
+                )
             planned = intent.power_kw
-            return max(self._asset.min_charge_kw, min(self._asset.max_charge_kw, planned)) * 1000.0
+            setpoint = max(self._asset.min_charge_kw, min(self._asset.max_charge_kw, planned)) * 1000.0
+            return self._decide(
+                setpoint, f"plan: grid-sourced {planned:.1f} kW",
+                current_soc=current_soc, goal=goal,
+            )
 
         # Idle or no intent → opportunistic PV charging (unless yielding)
-        return _STOP_W if others_hold_pv else _PV_SENTINEL_W
+        if others_hold_pv:
+            return self._decide(
+                _STOP_W, "idle — yielding PV to another EV",
+                current_soc=current_soc, goal=goal,
+            )
+        return self._decide(
+            _PV_SENTINEL_W, "idle — opportunistic PV",
+            current_soc=current_soc, goal=goal,
+        )
 
     def charge_price_eur_per_kwh(
         self,
