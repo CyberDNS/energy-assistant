@@ -178,6 +178,7 @@ def resolve_active_goals(
             weekly_plans.get(asset.asset_id, {}),
             day_overrides.get(asset.asset_id, {}),
             now,
+            current_soc,
         )
         if target_info is None:
             # No schedule: include connected EV as PV-only absorber so the plan
@@ -199,7 +200,7 @@ def resolve_active_goals(
                 ))
             continue
 
-        target_soc, target_by = target_info
+        target_soc, target_by, overdue = target_info
 
         # Skip if already at target
         if current_soc >= target_soc:
@@ -207,7 +208,7 @@ def resolve_active_goals(
                        asset.asset_id, current_soc, target_soc)
             continue
 
-        goals.append(build_goal_from_parts(
+        goal = build_goal_from_parts(
             asset_id=asset.asset_id,
             device_id=asset.device_id,
             capacity_kwh=asset.capacity_kwh,
@@ -219,7 +220,22 @@ def resolve_active_goals(
             charge_curve=asset.charge_curve,
             current_soc_pct=current_soc,
             connected=connected,
-        ))
+            now=now,
+            overdue=overdue,
+        )
+        if goal.overdue:
+            _log.warning(
+                "Asset %r: missed target_by %s (still %.0f%% of %.0f%%) — "
+                "forcing full power until reached or unplugged",
+                asset.asset_id, target_by.isoformat(), current_soc, target_soc,
+            )
+        elif goal.infeasible:
+            _log.warning(
+                "Asset %r: target of %.0f%% by %s is no longer reachable at "
+                "max power from %.0f%% — forcing full power now",
+                asset.asset_id, target_soc, target_by.isoformat(), current_soc,
+            )
+        goals.append(goal)
 
     return goals
 
@@ -271,12 +287,18 @@ def _resolve_target(
     weekly: dict[int, EvWeeklyTarget],
     overrides: dict[date, EvDayOverride],
     now: datetime,
-) -> tuple[float, datetime] | None:
-    """Return the next (target_soc_pct, target_by UTC) deadline, or None.
+    current_soc: float,
+) -> tuple[float, datetime, bool] | None:
+    """Return the next (target_soc_pct, target_by UTC, overdue) deadline, or None.
 
     Walks forward from today (asset-local): the first day whose effective
     target has a deadline still in the future wins.  Skipped days and
-    already-passed deadlines are stepped over.
+    already-passed deadlines are stepped over — except *today's* deadline:
+    if it has already passed but ``current_soc`` hasn't reached the target
+    yet, it is returned anyway (``overdue=True``) so the caller keeps
+    forcing the car toward today's target instead of silently rolling over
+    to the next scheduled day.  This naturally stops at local midnight, once
+    "today" advances past the missed deadline's date.
     """
     tz = asset_zoneinfo(asset)
     now_local = now.astimezone(tz)
@@ -291,9 +313,11 @@ def _resolve_target(
         h, m = _parse_hhmm(hhmm)
         deadline_local = datetime(day.year, day.month, day.day, h, m, tzinfo=tz)
         if deadline_local <= now_local:
+            if days_ahead == 0 and current_soc < soc:
+                return soc, deadline_local.astimezone(timezone.utc), True
             continue
 
-        return soc, deadline_local.astimezone(timezone.utc)
+        return soc, deadline_local.astimezone(timezone.utc), False
 
     return None
 
