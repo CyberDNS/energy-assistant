@@ -63,7 +63,7 @@ def _state(soc: float = 40.0, available: bool = True) -> DeviceState:
     return DeviceState(device_id="wallbox", power_w=0.0, soc_pct=soc, available=available)
 
 
-def _resolve(weekly, overrides, *, soc: float = 40.0, now: datetime = NOW):
+def _resolve(weekly, overrides, *, soc: float = 40.0, now: datetime = NOW, overdue_dismissed=None):
     asset = _asset()
     goals = resolve_active_goals(
         [asset],
@@ -71,6 +71,7 @@ def _resolve(weekly, overrides, *, soc: float = 40.0, now: datetime = NOW):
         {"ev1": weekly},
         {"ev1": overrides},
         now=now,
+        overdue_dismissed=overdue_dismissed,
     )
     # Filter out the pv_only no-plan fallback goal
     return [g for g in goals if not g.pv_only]
@@ -122,6 +123,29 @@ def test_missed_deadline_keeps_forcing_todays_target() -> None:
 def test_missed_deadline_stops_once_target_reached() -> None:
     goals = _resolve(_weekly_all_days(), {}, soc=80.0)
     assert goals == []
+
+
+def test_missed_deadline_dismissed_by_unplug_moves_to_next_day() -> None:
+    """Once the car was unplugged while overdue (Application records this in
+    ``overdue_dismissed`` — see _check_force_charge_reset), a replug on the
+    same date must not resume chasing today's missed target."""
+    goals = _resolve(
+        _weekly_all_days(), {}, soc=40.0, overdue_dismissed={"ev1": TODAY},
+    )
+    assert len(goals) == 1
+    g = goals[0]
+    assert not g.overdue
+    expected_tomorrow = datetime(2026, 7, 16, 6, 0, tzinfo=TZ).astimezone(timezone.utc)
+    assert g.target_by == expected_tomorrow
+
+
+def test_dismissal_for_a_different_date_has_no_effect() -> None:
+    goals = _resolve(
+        _weekly_all_days(), {}, soc=40.0, overdue_dismissed={"ev1": TOMORROW},
+    )
+    assert len(goals) == 1
+    assert goals[0].overdue
+    assert goals[0].target_by == datetime(2026, 7, 15, 6, 0, tzinfo=TZ).astimezone(timezone.utc)
 
 
 def test_empty_plan_yields_pv_only_goal_when_connected() -> None:
