@@ -148,6 +148,7 @@ def resolve_active_goals(
     weekly_plans: dict[str, dict[int, EvWeeklyTarget]],
     day_overrides: dict[str, dict[date, EvDayOverride]],
     now: datetime | None = None,
+    overdue_dismissed: dict[str, date] | None = None,
 ) -> list[EvChargingGoal]:
     """Compute an ``EvChargingGoal`` for every asset that has an active target.
 
@@ -163,9 +164,16 @@ def resolve_active_goals(
         Dated overrides/skips per asset: asset_id → {local_date → override}.
     now:
         Override "now" for testing.  Defaults to ``datetime.now(UTC)``.
+    overdue_dismissed:
+        asset_id → local date whose missed deadline should no longer be
+        chased (set when the car was unplugged while overdue for that
+        date — see ``Application._check_force_charge_reset``).  A later
+        replug on the same date then follows the next scheduled target
+        instead of resuming the forced full-power catch-up.
     """
     if now is None:
         now = datetime.now(timezone.utc)
+    overdue_dismissed = overdue_dismissed or {}
 
     goals: list[EvChargingGoal] = []
     for asset in assets:
@@ -179,6 +187,7 @@ def resolve_active_goals(
             day_overrides.get(asset.asset_id, {}),
             now,
             current_soc,
+            overdue_dismissed.get(asset.asset_id),
         )
         if target_info is None:
             # No schedule: include connected EV as PV-only absorber so the plan
@@ -288,6 +297,7 @@ def _resolve_target(
     overrides: dict[date, EvDayOverride],
     now: datetime,
     current_soc: float,
+    dismissed_day: date | None = None,
 ) -> tuple[float, datetime, bool] | None:
     """Return the next (target_soc_pct, target_by UTC, overdue) deadline, or None.
 
@@ -298,7 +308,12 @@ def _resolve_target(
     yet, it is returned anyway (``overdue=True``) so the caller keeps
     forcing the car toward today's target instead of silently rolling over
     to the next scheduled day.  This naturally stops at local midnight, once
-    "today" advances past the missed deadline's date.
+    "today" advances past the missed deadline's date — or sooner, if
+    *dismissed_day* (set when the car was unplugged while overdue for that
+    date) matches: the catch-up is then skipped and the walk moves on to the
+    next scheduled day, so a replug follows the new plan rather than
+    resuming the forced full-power chase of the deadline that was missed
+    while the car was away.
     """
     tz = asset_zoneinfo(asset)
     now_local = now.astimezone(tz)
@@ -313,7 +328,7 @@ def _resolve_target(
         h, m = _parse_hhmm(hhmm)
         deadline_local = datetime(day.year, day.month, day.day, h, m, tzinfo=tz)
         if deadline_local <= now_local:
-            if days_ahead == 0 and current_soc < soc:
+            if days_ahead == 0 and current_soc < soc and day != dismissed_day:
                 return soc, deadline_local.astimezone(timezone.utc), True
             continue
 
