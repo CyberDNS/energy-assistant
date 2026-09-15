@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ..core.models import DeviceState, ThresholdConstraints
 from .ev import (
+    _FEASIBILITY_MARGIN,
     ChargeCurvePoint,
     EvChargingAsset,
     EvChargingGoal,
@@ -149,6 +150,7 @@ def resolve_active_goals(
     day_overrides: dict[str, dict[date, EvDayOverride]],
     now: datetime | None = None,
     overdue_dismissed: dict[str, date] | None = None,
+    feasibility_margin: float = _FEASIBILITY_MARGIN,
 ) -> list[EvChargingGoal]:
     """Compute an ``EvChargingGoal`` for every asset that has an active target.
 
@@ -170,6 +172,9 @@ def resolve_active_goals(
         date — see ``Application._check_force_charge_reset``).  A later
         replug on the same date then follows the next scheduled target
         instead of resuming the forced full-power catch-up.
+    feasibility_margin:
+        Safety buffer passed to ``build_goal_from_parts`` — see there.
+        Overridable via ``controller.ev_feasibility_margin`` in config.yaml.
     """
     if now is None:
         now = datetime.now(timezone.utc)
@@ -231,6 +236,7 @@ def resolve_active_goals(
             connected=connected,
             now=now,
             overdue=overdue,
+            feasibility_margin=feasibility_margin,
         )
         if goal.overdue:
             _log.warning(
