@@ -251,6 +251,55 @@ def test_infeasible_goal_forces_immediate_full_power() -> None:
     assert goal.phase2_start_time == NOW
 
 
+def test_feasibility_margin_triggers_before_the_bare_minimum_is_exhausted() -> None:
+    """Regression: a real deadline was missed by minutes because the MILP
+    economically deferred charging right up to the exact mathematical last
+    moment, leaving zero room for charger ramp-up/mode-switch delay or the
+    next replanning cycle to react. 10 kWh needs 50 min at 12 kW — 55 min
+    remains, so the bare-minimum check alone would call this feasible, but
+    the _FEASIBILITY_MARGIN buffer must flag it early instead."""
+    goal = build_goal_from_parts(
+        asset_id="ev1", device_id="wallbox", capacity_kwh=50.0,
+        max_charge_kw=12.0, min_charge_kw=4.14, charge_limit_soc_pct=100.0,
+        target_soc_pct=20.0, target_by=NOW + timedelta(minutes=55),
+        charge_curve=[], current_soc_pct=0.0, connected=True,
+        now=NOW,
+    )
+    # Merged into phase2 by the infeasible branch — 10 kWh matches the
+    # bare-minimum math above (50 min needed at 12 kW).
+    assert goal.phase2_required_kwh == 10.0
+    assert goal.infeasible
+    assert goal.phase2_start_time == NOW
+
+
+def test_feasibility_margin_is_configurable() -> None:
+    """resolve_active_goals must honour a caller-supplied feasibility_margin
+    end to end (server/__init__.py wires controller.ev_feasibility_margin
+    through to here), not just the ev.py default.
+
+    0% -> 20% on a 60 kWh battery at 11 kW needs 12 kWh / 65.45 min bare
+    minimum. Deadline is 72 min out: feasible at the bare minimum (margin
+    1.0) but infeasible once the default 20% buffer (margin 1.2, needing
+    14.4 kWh) is applied.
+    """
+    asset = _asset()
+    # NOW is 12:00 Europe/Berlin (see module docstring) -> +72 min = 13:12.
+    weekly = _weekly_all_days(soc=20.0, hhmm="13:12")
+
+    default_goals = resolve_active_goals(
+        [asset], {"wallbox": _state(soc=0.0)}, {"ev1": weekly}, {}, now=NOW,
+    )
+    assert len(default_goals) == 1
+    assert default_goals[0].infeasible
+
+    lenient_goals = resolve_active_goals(
+        [asset], {"wallbox": _state(soc=0.0)}, {"ev1": weekly}, {},
+        now=NOW, feasibility_margin=1.0,
+    )
+    assert len(lenient_goals) == 1
+    assert not lenient_goals[0].infeasible
+
+
 def test_overdue_goal_forces_immediate_full_power_regardless_of_time_left() -> None:
     # target_by already passed; overdue=True should merge phases even
     # though feasibility wasn't (and can't sensibly be) checked.

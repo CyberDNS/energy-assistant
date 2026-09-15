@@ -52,6 +52,7 @@ import uvicorn
 from pydantic import BaseModel
 
 from ..assets.ev import (
+    _FEASIBILITY_MARGIN,
     EvChargerContributor,
     EvChargingAsset,
     EvChargingGoal,
@@ -559,6 +560,10 @@ class Application:
         self._control_interval_s = float(ctl.get("control_interval_s", 30))
         self._poll_interval_s = float(ctl.get("poll_interval_s", self._control_interval_s))
         self._dry_run = bool(ctl.get("dry_run", False)) or os.environ.get("ENERGY_ASSISTANT_DRY_RUN", "") == "1"
+        # Safety buffer for the EV missed-deadline feasibility check — see
+        # build_goal_from_parts. 1.2 = require 20% more time than the bare
+        # minimum before declaring a deadline still reachable.
+        self._ev_feasibility_margin = float(ctl.get("ev_feasibility_margin", _FEASIBILITY_MARGIN))
         horizon_h = int(opt.get("horizon_hours", 24))
         self._horizon = timedelta(hours=horizon_h)
 
@@ -1047,6 +1052,7 @@ class Application:
         ev_goals = resolve_active_goals(
             active_assets, device_states, self._ev_weekly_plans, self._ev_day_overrides,
             overdue_dismissed=self._ev_overdue_dismissed,
+            feasibility_margin=self._ev_feasibility_margin,
         )
         self._last_ev_goals = ev_goals
         # Assets with a chargepoint that isn't currently reporting `connected`
@@ -1827,6 +1833,7 @@ class Application:
                 self._ev_assets, device_states,
                 self._ev_weekly_plans, self._ev_day_overrides,
                 overdue_dismissed=self._ev_overdue_dismissed,
+                feasibility_margin=self._ev_feasibility_margin,
             )
             result = []
             for asset in self._ev_assets:
