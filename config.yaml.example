@@ -95,6 +95,14 @@ controller:
   plan_interval_s: 900
   # Set to true to compute setpoints without sending commands (safe for testing).
   dry_run: false
+  # Safety buffer for EV missed-deadline detection: a deadline is only
+  # considered reachable if it fits within max_charge_kw × this factor of
+  # the remaining time (not the bare mathematical minimum). Without slack,
+  # the optimizer can economically defer charging right up to the exact
+  # last possible moment, leaving no room for charger ramp-up delay, SoC
+  # reporting lag, or the next replanning cycle to react. 1.2 = require 20%
+  # more time than the bare minimum before declaring a deadline reachable.
+  ev_feasibility_margin: 1.2
 
 server:
   # Port for the built-in web UI and REST API.
