@@ -59,6 +59,18 @@ _PV_SENTINEL_W = 1.0             # 0 < x ≤ 500 W → PV Charging
 _STOP_W = 0.0                    # == 0 → Stop
 _MODE_THRESHOLD_W = 500.0        # boundary between PV and Instant
 
+# Default safety buffer applied to the feasibility check in
+# build_goal_from_parts: require 20% more time than the bare mathematical
+# minimum before declaring a deadline reachable. Without this, the MILP can
+# economically defer charging right up to the exact last possible moment
+# (e.g. waiting for the cheapest overnight price slot) — a plan that is
+# feasible on paper but leaves zero room for the charger's mode-switch/
+# ramp-up delay, SoC reporting lag, or simply catching the shortfall on the
+# next 15-minute replanning cycle instead of instantly. That razor-thin
+# margin is exactly what let a real deadline slip by a few minutes in
+# practice. Overridable via controller.ev_feasibility_margin in config.yaml.
+_FEASIBILITY_MARGIN = 1.2
+
 
 # ---------------------------------------------------------------------------
 # Data models
@@ -213,14 +225,17 @@ def build_goal_from_parts(
     pv_only: bool = False,
     now: datetime | None = None,
     overdue: bool = False,
+    feasibility_margin: float = _FEASIBILITY_MARGIN,
 ) -> EvChargingGoal:
     """Construct an ``EvChargingGoal`` with pre-computed phase fields.
 
     When *now* is given, the goal is checked for feasibility: if the
     remaining energy (phase1 + phase2) can no longer be delivered by
-    ``target_by`` even at ``max_charge_kw``, phase1 and phase2 are merged
-    into a single mandatory full-power block starting *now* instead of the
-    economically-optimized phase1 the MILP would otherwise plan — there is
+    ``target_by`` even at ``max_charge_kw`` — with a *feasibility_margin*
+    safety buffer (default ``_FEASIBILITY_MARGIN``), not the bare
+    mathematical minimum — phase1 and phase2 are merged into a single
+    mandatory full-power block starting *now* instead of the
+    economically-optimized phase1 the MILP would otherwise plan: there is
     no time budget left to be clever about it.  *overdue* forces the same
     merge unconditionally (used when ``target_by`` itself is already in the
     past and the target still hasn't been reached).
@@ -240,7 +255,8 @@ def build_goal_from_parts(
     if now is not None and not overdue and (phase1_kwh + phase2_kwh) > 0.01:
         available_h = (target_by - now).total_seconds() / 3600.0
         deliverable_kwh = max_charge_kw * max(0.0, available_h)
-        if available_h <= 0 or (phase1_kwh + phase2_kwh) > deliverable_kwh + 0.01:
+        required_with_margin = (phase1_kwh + phase2_kwh) * feasibility_margin
+        if available_h <= 0 or required_with_margin > deliverable_kwh + 0.01:
             infeasible = True
 
     if (infeasible or overdue) and (phase1_kwh + phase2_kwh) > 0.01:
