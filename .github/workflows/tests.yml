@@ -37,7 +37,12 @@ jobs:
         run: pip install --no-cache-dir uv
 
       - name: Install project with dev dependencies
-        run: uv pip install --system -e ".[dev]"
+        # Uses the committed uv.lock for a reproducible install — a plain
+        # `uv pip install -e ".[dev]"` re-resolves unpinned deps on every
+        # run, so a new upstream major release (e.g. pulp 4.0, which broke
+        # LpVariable's lowBound/upBound kwargs) can silently break CI even
+        # though nothing in this repo changed.
+        run: uv sync --extra dev
 
       - name: Run tests
-        run: pytest
+        run: uv run pytest
