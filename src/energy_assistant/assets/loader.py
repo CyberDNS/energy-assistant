@@ -178,13 +178,39 @@ def resolve_active_goals(
     """
     if now is None:
         now = datetime.now(timezone.utc)
-    overdue_dismissed = overdue_dismissed or {}
+    # NOTE: `or {}` would silently swap out an empty-but-real dict for a new
+    # throwaway one, breaking the in-place mutation below (dismissing
+    # today's target) exactly when it matters most — a fresh dict early on.
+    if overdue_dismissed is None:
+        overdue_dismissed = {}
 
     goals: list[EvChargingGoal] = []
     for asset in assets:
         state = device_states.get(asset.device_id)
         connected = state is not None and state.available
         current_soc = (state.soc_pct or 0.0) if state is not None else 0.0
+
+        # If today's own target is already met, dismiss today for the
+        # overdue catch-up right now — regardless of whether the deadline
+        # has passed yet, and regardless of what _resolve_target ends up
+        # returning (once satisfied, it may already have rolled over to a
+        # later day's target, which must not be dismissed instead). This
+        # matters because a car can meet its target early (e.g. finishes
+        # charging before the deadline), then get driven — dropping SoC
+        # back below that same target — without ever going "overdue" in
+        # the first place, so the unplug-triggered dismissal in
+        # Application._check_force_charge_reset never has an overdue goal
+        # to act on. Without this, coming home later the same day resumes
+        # a forced full-power charge toward a deadline that was already met.
+        tz = asset_zoneinfo(asset)
+        today_local = now.astimezone(tz).date()
+        today_target = effective_day_target(
+            weekly_plans.get(asset.asset_id, {}), day_overrides.get(asset.asset_id, {}), today_local,
+        )
+        if today_target is not None:
+            today_soc, _today_hhmm, _today_source = today_target
+            if current_soc >= today_soc:
+                overdue_dismissed[asset.asset_id] = today_local
 
         target_info = _resolve_target(
             asset,

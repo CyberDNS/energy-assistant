@@ -34,3 +34,4 @@ config.yaml.bak
 # Energy Assistant — runtime data (SQLite databases, generated at runtime)
 data/
 *.db
+logs/

@@ -245,8 +245,17 @@ def build_goal_from_parts(
     phase1_kwh = compute_wall_kwh(
         current_soc_pct, effective_limit, capacity_kwh, charge_curve
     )
+    # Once current_soc has progressed past effective_limit (the car is
+    # already inside its own phase2 top-off window), phase2 must be costed
+    # from current_soc onward, not from the fixed effective_limit — otherwise
+    # the "remaining energy" stays pinned at the full effective_limit→target
+    # span forever, never shrinking as the car actually charges. That stale,
+    # inflated figure kept re-triggering the infeasible/forced-full-power
+    # path long after the real remaining need had dropped enough to no
+    # longer need it, causing the car to blast at max power well past the
+    # point where a slower/economic pace would still have made the deadline.
     phase2_kwh = compute_wall_kwh(
-        effective_limit, target_soc_pct, capacity_kwh, charge_curve
+        max(effective_limit, current_soc_pct), target_soc_pct, capacity_kwh, charge_curve
     )
     phase2_h = phase2_kwh / max_charge_kw if max_charge_kw > 0 else 0.0
     phase2_start = target_by - timedelta(hours=phase2_h)
