@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from energy_assistant.assets.ev import (
+    ChargeCurvePoint,
     EvChargerContributor,
     EvChargingAsset,
     EvDayOverride,
@@ -123,6 +124,30 @@ def test_missed_deadline_keeps_forcing_todays_target() -> None:
 def test_missed_deadline_stops_once_target_reached() -> None:
     goals = _resolve(_weekly_all_days(), {}, soc=80.0)
     assert goals == []
+
+
+def test_target_met_dismisses_today_even_without_explicit_unplug() -> None:
+    """Regression: a car that reaches today's target and is then driven
+    (dropping SoC back below that same target) must not be treated as
+    overdue later the same day. The car never went overdue while sitting at
+    or above target, so the unplug-triggered dismissal in
+    Application._check_force_charge_reset never has an overdue goal to act
+    on — resolve_active_goals must dismiss today proactively, the moment the
+    target is met, not only in reaction to an unplug."""
+    weekly = _weekly_all_days(soc=80.0, hhmm="06:00")
+    dismissed: dict = {}
+
+    # Already met today's target (soc >= 80 at NOW, well past 06:00).
+    goals_met = _resolve(weekly, {}, soc=80.0, now=NOW, overdue_dismissed=dismissed)
+    assert goals_met == []
+    assert dismissed.get("ev1") == TODAY
+
+    # Later the same day, SoC has dropped (car was driven) — must NOT be overdue.
+    later = NOW + timedelta(hours=2)
+    goals_after_driving = _resolve(weekly, {}, soc=40.0, now=later, overdue_dismissed=dismissed)
+    assert len(goals_after_driving) == 1
+    assert not goals_after_driving[0].overdue
+    assert goals_after_driving[0].target_by == datetime(2026, 7, 16, 6, 0, tzinfo=TZ).astimezone(timezone.utc)
 
 
 def test_missed_deadline_dismissed_by_unplug_moves_to_next_day() -> None:
@@ -249,6 +274,49 @@ def test_infeasible_goal_forces_immediate_full_power() -> None:
     assert goal.phase1_required_kwh == 0.0
     assert goal.phase2_required_kwh > 0.0
     assert goal.phase2_start_time == NOW
+
+
+def test_phase2_kwh_shrinks_as_soc_advances_past_charge_limit() -> None:
+    """Regression: once current_soc has progressed past effective_limit (the
+    car is already inside its own phase2 top-off window), phase2_required_kwh
+    must be costed from current_soc onward, not pinned at the full
+    effective_limit->target span forever. The stale, inflated figure kept
+    re-triggering the infeasible/forced-full-power path long after the real
+    remaining need had dropped — the car kept blasting at max power well
+    past the point a slower pace would still have made the deadline,
+    finishing ~45 minutes early instead of coasting to the actual deadline.
+    """
+    curve = [ChargeCurvePoint(90.0, 0.90), ChargeCurvePoint(100.0, 0.55)]
+    # At 70% (below effective_limit=90): phase2 covers the full 90->100 span.
+    goal_at_70 = build_goal_from_parts(
+        asset_id="ev1", device_id="wallbox", capacity_kwh=77.0,
+        max_charge_kw=11.0, min_charge_kw=4.14, charge_limit_soc_pct=90.0,
+        target_soc_pct=100.0, target_by=NOW + timedelta(hours=10),
+        charge_curve=curve, current_soc_pct=70.0, connected=True,
+    )
+    assert goal_at_70.phase2_required_kwh == pytest.approx(14.0, abs=0.05)
+
+    # At 95% (already inside the 90-100 taper zone): only 5 points remain,
+    # not the full 10-point span — phase2_required_kwh must shrink to match.
+    goal_at_95 = build_goal_from_parts(
+        asset_id="ev1", device_id="wallbox", capacity_kwh=77.0,
+        max_charge_kw=11.0, min_charge_kw=4.14, charge_limit_soc_pct=90.0,
+        target_soc_pct=100.0, target_by=NOW + timedelta(hours=10),
+        charge_curve=curve, current_soc_pct=95.0, connected=True,
+    )
+    assert goal_at_95.phase2_required_kwh == pytest.approx(7.0, abs=0.05)
+    assert goal_at_95.phase2_required_kwh < goal_at_70.phase2_required_kwh
+
+    # With now= given, this smaller requirement must also correctly resolve
+    # as feasible near the deadline instead of staying artificially infeasible.
+    goal_at_95_near_deadline = build_goal_from_parts(
+        asset_id="ev1", device_id="wallbox", capacity_kwh=77.0,
+        max_charge_kw=11.0, min_charge_kw=4.14, charge_limit_soc_pct=90.0,
+        target_soc_pct=100.0, target_by=NOW + timedelta(minutes=66),
+        charge_curve=curve, current_soc_pct=95.0, connected=True,
+        now=NOW,
+    )
+    assert not goal_at_95_near_deadline.infeasible
 
 
 def test_feasibility_margin_triggers_before_the_bare_minimum_is_exhausted() -> None:
