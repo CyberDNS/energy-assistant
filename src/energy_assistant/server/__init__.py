@@ -1177,16 +1177,22 @@ class Application:
             await self._do_control_tick(dt_hours)
             await asyncio.sleep(self._control_interval_s)
 
-    async def _check_force_charge_reset(self, device_states: dict[str, Any]) -> None:
+    async def _check_force_charge_reset(
+        self, device_states: dict[str, Any], now: datetime | None = None,
+    ) -> None:
         """Auto-clear force charges: on plugged→unplugged transition or when
-        the target SoC is reached.  Also dismisses a missed-deadline catch-up
-        on unplug (see below).
+        the target SoC is reached.  Also dismisses today's missed-deadline
+        catch-up on unplug (see below).
 
         Uses the plug state from ``extra["plugged"]`` — not ``available``,
         which also drops on MQTT bridge loss; a broker hiccup or restart must
         not cancel a force charge (or a missed-deadline catch-up) while the
         car is still at the wallbox.
+
+        *now* is an override for testing; defaults to ``datetime.now(UTC)``.
         """
+        if now is None:
+            now = datetime.now(timezone.utc)
         for asset in self._ev_assets:
             state = device_states.get(asset.device_id)
             plugged = state.extra.get("plugged") if state is not None else None
@@ -1197,21 +1203,25 @@ class Application:
             self._ev_prev_plugged[asset.asset_id] = plugged
 
             if prev is True and not plugged:
-                # Unplugged: forget any missed-deadline catch-up so a later
-                # replug follows the next scheduled target instead of
-                # resuming the forced full-power chase of a deadline that
-                # already passed while the car was away.
-                goal = next(
-                    (g for g in self._last_ev_goals if g.device_id == asset.device_id), None
+                # Unplugged: dismiss today's target unconditionally, not only
+                # when the goal happens to already be overdue at this exact
+                # instant. Regression: a car unplugged while merely
+                # `infeasible` (deadline still ahead but unreachable at max
+                # power) — or with no goal at all, e.g. already at target —
+                # would sail past its deadline while away with nothing
+                # watching, then resume forcing full power the moment it
+                # reconnected, because dismissal was never recorded. Dismissal
+                # only ever suppresses the *overdue* catch-up for a deadline
+                # that has already passed by the time it's checked — it has
+                # no effect if the deadline is still ahead on replug, so this
+                # is safe to do every time regardless of the goal's state.
+                dismissed_day = now.astimezone(asset_zoneinfo(asset)).date()
+                self._ev_overdue_dismissed[asset.asset_id] = dismissed_day
+                _log.info(
+                    "EV %r unplugged — dismissing any missed target for %s, "
+                    "will follow the next scheduled plan on replug",
+                    asset.asset_id, dismissed_day.isoformat(),
                 )
-                if goal is not None and goal.overdue:
-                    dismissed_day = goal.target_by.astimezone(asset_zoneinfo(asset)).date()
-                    self._ev_overdue_dismissed[asset.asset_id] = dismissed_day
-                    _log.info(
-                        "EV %r unplugged while overdue for %s — dismissing missed "
-                        "target, will follow the next scheduled plan on replug",
-                        asset.asset_id, dismissed_day.isoformat(),
-                    )
 
             target = self._ev_force_charge.get(asset.asset_id)
             if target is None:

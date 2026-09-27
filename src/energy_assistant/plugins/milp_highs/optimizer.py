@@ -143,10 +143,18 @@ class MilpHigsOptimizer:
         if n_steps == 0:
             return EnergyPlan(horizon_hours=horizon_h, step_minutes=self._step_min)
 
-        _now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        real_now = datetime.now(timezone.utc)
+        _now = real_now.replace(second=0, microsecond=0)
         # Floor to the step boundary so timestamps align with price/PV forecasts
         now = _now - timedelta(minutes=_now.minute % self._step_min)
         timestamps = [now + step_td * t for t in range(n_steps)]
+        # Slot 0 started up to a step ago — only the part still ahead of us is
+        # plannable. Every energy bound and energy→power conversion uses
+        # these per-slot durations, so the first slot neither over-promises
+        # capacity nor under-states the live setpoint.
+        first_slot_h = max(1 / 60, (now + step_td - real_now).total_seconds() / 3600.0)
+        dur_h = [min(step_h, first_slot_h)] + [step_h] * (n_steps - 1)
+        slot_starts = [max(timestamps[0], real_now)] + timestamps[1:]
 
         # ── Prices ────────────────────────────────────────────────────
         prices = await self._resolve_prices(context, timestamps)
@@ -203,7 +211,7 @@ class MilpHigsOptimizer:
                     blended.append(live_pv_kw * (1.0 - frac) + fc_end * frac)
             pv_kw = blended
 
-        net_load = [(c - p) * step_h for c, p in zip(consumption_kw, pv_kw)]
+        net_load = [(c - p) * d for c, p, d in zip(consumption_kw, pv_kw, dur_h)]
         # Keep a copy of the baseline net_load for EV mode classification later.
         baseline_net_load = list(net_load)
 
@@ -216,9 +224,10 @@ class MilpHigsOptimizer:
             if not goal.connected or goal.phase2_required_kwh <= 0.01:
                 continue
             mandatory_slots = 0
-            for t, ts in enumerate(timestamps):
-                if goal.phase2_start_time <= ts < goal.target_by:
-                    net_load[t] += goal.max_charge_kw * step_h
+            for t in range(n_steps):
+                overlap_h = _mandatory_overlap_h(goal, slot_starts[t], dur_h[t])
+                if overlap_h > 0:
+                    net_load[t] += goal.max_charge_kw * overlap_h
                     mandatory_slots += 1
             # overdue goals have phase2_start_time == now, target_by in the
             # past — there's no sensible future window to inject, and the
@@ -312,6 +321,7 @@ class MilpHigsOptimizer:
             threshold_devices=threshold_devices,
             initial_threshold_values=initial_threshold_values,
             initial_threshold_running=initial_threshold_running,
+            dur_h=dur_h, slot_starts=slot_starts,
         )
         t0 = time.monotonic()
         # Solve in a worker thread: prob.solve() blocks for up to the full
@@ -319,12 +329,13 @@ class MilpHigsOptimizer:
         # API endpoint (and the control loop) for the duration.
         status = await asyncio.to_thread(prob.solve, self._get_solver())
         _log.info(
-            "MilpHigsOptimizer: solved in %.2fs — %d steps, %d batteries, %d EVs, status=%s",
+            "MilpHigsOptimizer: solved in %.2fs — %d steps, %d batteries, %d EVs, status=%s%s",
             time.monotonic() - t0,
             n_steps,
             len(batteries),
             len([g for g in (ev_goals or []) if g.connected]),
             pulp.LpStatus[status],
+            _solve_quality(prob),
         )
 
         if pulp.LpStatus[status] not in ("Optimal", "Feasible"):
@@ -342,47 +353,73 @@ class MilpHigsOptimizer:
             )
 
         # ── Extract schedule → EnergyPlan ─────────────────────────────
-        intents = _extract_intents(batteries, variables, timestamps, step_h)
+        intents = _extract_intents(batteries, variables, timestamps, dur_h)
         ev_intents = _extract_ev_intents(
-            ev_goals, variables, timestamps, step_h
+            ev_goals, variables, timestamps, dur_h
         )
-        # Phase-2 intents (mandatory top-off slots, handled outside the MILP)
+        # Phase-2 intents (mandatory top-off slots, handled outside the MILP).
+        # A slot counts if it *overlaps* the forced window, not only if it
+        # starts inside it — otherwise the slot "now" falls in is dropped
+        # whenever forcing begins mid-slot, and the plan shows charging
+        # starting at the next slot while the control loop is already
+        # charging. Power is the charger's actual draw; reserved_kwh is only
+        # the overlapping part of the slot.
         for goal in ev_goals:
             if not goal.connected or goal.phase2_required_kwh <= 0.01:
                 continue
             for t, ts in enumerate(timestamps):
-                if goal.phase2_start_time <= ts < goal.target_by:
-                    ev_intents.append(ControlIntent(
-                        device_id=goal.device_id,
-                        timestep=ts,
-                        power_kw=round(goal.max_charge_kw, 4),
-                        grid_allowed=True,
-                        reserved_kwh=round(goal.max_charge_kw * step_h, 4),
-                    ))
+                overlap_h = _mandatory_overlap_h(goal, slot_starts[t], dur_h[t])
+                if overlap_h <= 0:
+                    continue
+                mandatory_kwh = goal.max_charge_kw * overlap_h
+                existing = next(
+                    (i for i in ev_intents
+                     if i.device_id == goal.device_id and i.timestep == ts),
+                    None,
+                )
+                if existing is not None:
+                    # Phase-1 energy was also planned in this boundary slot:
+                    # merge into a single intent so the control loop sees one.
+                    ev_intents.remove(existing)
+                    mandatory_kwh += existing.reserved_kwh
+                ev_intents.append(ControlIntent(
+                    device_id=goal.device_id,
+                    timestep=ts,
+                    power_kw=round(goal.max_charge_kw, 4),
+                    grid_allowed=True,
+                    reserved_kwh=round(mandatory_kwh, 4),
+                ))
         for goal in ev_goals:
             if not goal.connected:
                 continue
             scheduled_kwh = sum(
-                i.power_kw * step_h for i in ev_intents if i.device_id == goal.device_id
+                i.reserved_kwh for i in ev_intents if i.device_id == goal.device_id
             )
             required_kwh = goal.phase1_required_kwh + goal.phase2_required_kwh
             # Overdue goals are handled entirely outside the MILP (the
             # contributor forces full power directly, see EvChargerContributor)
             # since target_by is already in the past — nothing to schedule here.
-            # Tolerance: the mandatory phase-2 block and the phase-1 deadline
-            # constraint both snap to the step grid, so up to ~1 step's worth
-            # of energy near a window boundary can legitimately be "missing"
-            # here while still being delivered in real time by the
-            # continuous, non-stepped control loop — that's not a bug.
+            # Tolerance: the phase-1 deadline constraint snaps to the step
+            # grid, so up to ~1 step's worth of energy near the window
+            # boundary can legitimately be "missing" here while still being
+            # delivered in real time by the continuous control loop.
             tolerance_kwh = max(0.1, goal.max_charge_kw * step_h * 1.5)
-            under_scheduled = not goal.overdue and scheduled_kwh < required_kwh - tolerance_kwh
+            # Deadline beyond the horizon: only what's worth charging now is
+            # planned (see the soft phase-1 constraint), the rest comes later.
+            beyond_horizon = goal.phase2_start_time > timestamps[-1] + step_td
+            under_scheduled = (
+                not goal.overdue and not beyond_horizon
+                and scheduled_kwh < required_kwh - tolerance_kwh
+            )
             _log.info(
                 "MilpHigsOptimizer: EV %r scheduled %.1f/%.1f kWh (phase1=%.1f phase2=%.1f) "
                 "by %s%s",
                 goal.asset_id, scheduled_kwh, required_kwh,
                 goal.phase1_required_kwh, goal.phase2_required_kwh,
                 goal.target_by.isoformat(),
-                " — UNDER-SCHEDULED, target will likely be missed" if under_scheduled else "",
+                " — deadline beyond planning horizon, rest planned later" if beyond_horizon
+                else " — UNDER-SCHEDULED, target will likely be missed" if under_scheduled
+                else "",
             )
         threshold_intents = _extract_threshold_intents(threshold_devices, variables, timestamps)
 
@@ -395,8 +432,8 @@ class MilpHigsOptimizer:
             PlanFlow(
                 timestep=ts,
                 pv_kw=round(pv_kw[t], 4),
-                grid_import_kw=round((pulp.value(g_imp_v[t]) or 0.0) / _WH / step_h, 4),
-                grid_export_kw=round((pulp.value(g_exp_v[t]) or 0.0) / _WH / step_h, 4),
+                grid_import_kw=round((pulp.value(g_imp_v[t]) or 0.0) / _WH / dur_h[t], 4),
+                grid_export_kw=round((pulp.value(g_exp_v[t]) or 0.0) / _WH / dur_h[t], 4),
             )
             for t, ts in enumerate(timestamps)
         ]
@@ -428,6 +465,8 @@ class MilpHigsOptimizer:
         threshold_devices: list[ThresholdConstraints] | None = None,
         initial_threshold_values: dict[str, float] | None = None,
         initial_threshold_running: dict[str, bool] | None = None,
+        dur_h: list[float] | None = None,
+        slot_starts: list[datetime] | None = None,
     ) -> tuple[pulp.LpProblem, dict]:
         """Construct the PuLP problem and return (problem, variables dict).
 
@@ -458,6 +497,9 @@ class MilpHigsOptimizer:
         initial_vals = initial_threshold_values or {}
         initial_running = initial_threshold_running or {}
         ts_list = timestamps or []
+        # Per-slot duration (h): slot 0 may be partial, see optimize().
+        dur = dur_h if dur_h is not None else [step_h] * n_steps
+        starts = slot_starts if slot_starts is not None else list(ts_list)
 
         # Per-battery W / Wh limits (power_w × step_h = energy_wh)
         bat_max_charge_w    = {sc.device_id: sc.max_charge_kw    * _WH for sc in batteries}
@@ -507,12 +549,21 @@ class MilpHigsOptimizer:
         ev_on:   dict[tuple[str, int], pulp.LpVariable] = {}
         ev_grid: dict[tuple[str, int], pulp.LpVariable] = {}
         for goal in active_ev_goals:
-            max_wh = ev_max_w[goal.asset_id] * step_h
             for t in T:
                 ts = ts_list[t] if t < len(ts_list) else None
                 key = (goal.asset_id, t)
+                max_wh = ev_max_w[goal.asset_id] * dur[t]
                 if ts is not None and ts < goal.phase2_start_time:
-                    ev[key]    = pulp.LpVariable(f"ev__{goal.asset_id}__{t}",    lowBound=0, upBound=max_wh)
+                    # A boundary slot that is partly inside the mandatory
+                    # window already carries that forced energy in net_load;
+                    # only the remaining charger capacity is free for phase 1.
+                    slot_max_wh = max_wh
+                    if goal.phase2_required_kwh > 0.01:
+                        slot_max_wh = max(
+                            0.0,
+                            max_wh - ev_max_w[goal.asset_id] * _mandatory_overlap_h(goal, starts[t], dur[t]),
+                        )
+                    ev[key]    = pulp.LpVariable(f"ev__{goal.asset_id}__{t}",    lowBound=0, upBound=slot_max_wh)
                     ev_on[key] = pulp.LpVariable(f"ev_on__{goal.asset_id}__{t}", cat="Binary")
                     # pv_only goals may never use the grid → fix the binary to 0.
                     ev_grid[key] = pulp.LpVariable(
@@ -611,12 +662,25 @@ class MilpHigsOptimizer:
         # ev_grid=1 is free and labels become arbitrary when ev ≤ surplus).
         ev_grid_tiebreak = 1e-3 * pulp.lpSum(ev_grid.values()) if ev_grid else 0
 
+        # EV urgency tiebreak: a tiny cost growing with slot index on phase-1
+        # EV energy, so among equally priced slots the earliest wins. Without
+        # it, flat price windows are fully degenerate and each 15-minute
+        # replan could pick different, later slots — deferring charging
+        # right up to the deadline. 2e-8 €/Wh per slot ≈ 0.1 ct/kWh per 12 h
+        # of delay: large enough to clear the solver's gap for multi-kWh
+        # shifts, small enough that a genuinely cheaper later slot still wins.
+        ev_urgency = (
+            2e-8 * pulp.lpSum(t * ev[(g, t)] for (g, t) in ev_on)
+            if ev_on else 0
+        )
+
         prob += (
             grid_cost
             + degradation_cost
             + priority_tiebreak
             + pv_priority_tiebreak
             + ev_grid_tiebreak
+            + ev_urgency
             - terminal_value
         ), "total_cost"
 
@@ -630,21 +694,21 @@ class MilpHigsOptimizer:
                 - pulp.lpSum(d[(sc.device_id, t)] for sc in batteries)
                 + pulp.lpSum(ev[(goal.asset_id, t)] for goal in active_ev_goals)
                 + pulp.lpSum(
-                    run[(tc.device_id, t)] * thresh_rated_w[tc.device_id] * step_h
+                    run[(tc.device_id, t)] * thresh_rated_w[tc.device_id] * dur[t]
                     for tc in active_threshold_devices
                 ),
                 f"grid_balance__{t}",
             )
 
         # ── EV semi-continuous constraints (min current) ───────────────
-        # ev is either 0 or ≥ ev_min_w * step_h (no sub-minimum charging).
+        # ev is either 0 or ≥ ev_min_w × slot duration (no sub-minimum charging).
         for goal in active_ev_goals:
-            min_wh = ev_min_w[goal.asset_id] * step_h
-            max_wh = ev_max_w[goal.asset_id] * step_h
             for t in T:
                 key = (goal.asset_id, t)
                 if key not in ev_on:
                     continue
+                min_wh = ev_min_w[goal.asset_id] * dur[t]
+                max_wh = ev_max_w[goal.asset_id] * dur[t]
                 prob += ev[key] >= min_wh * ev_on[key], f"ev_min__{goal.asset_id}__{t}"
                 prob += ev[key] <= max_wh * ev_on[key], f"ev_max__{goal.asset_id}__{t}"
 
@@ -656,11 +720,11 @@ class MilpHigsOptimizer:
         # never materialises (and battery discharge would appear to "fill"
         # PV slots, mislabelling grid/battery energy as PV in the UI).
         for goal in active_ev_goals:
-            max_wh = ev_max_w[goal.asset_id] * step_h
             for t in T:
                 key = (goal.asset_id, t)
                 if key not in ev_grid:
                     continue
+                max_wh = ev_max_w[goal.asset_id] * dur[t]
                 pv_surplus_wh = max(0.0, -net_load_wh[t])
                 prob += (
                     ev[key] <= pv_surplus_wh + max_wh * ev_grid[key],
@@ -668,8 +732,30 @@ class MilpHigsOptimizer:
                 )
 
         # ── EV phase-1 deadline constraints ───────────────────────────
+        # Deadline inside the horizon: hard constraint, all of phase 1 must
+        # be delivered in time.
+        #
+        # Deadline beyond the horizon (a far-off weekly target, or a
+        # no-schedule pv_only goal whose target_by is ~7 days out): only the
+        # part that can't physically fit after the horizon ends stays hard
+        # (usually nothing). The rest is soft — each undelivered Wh is valued
+        # halfway between the best export price and the cheapest import
+        # price. PV surplus that would otherwise be exported still goes into
+        # the car, but buying grid energy early for a deadline the plan
+        # can't see yet never pays, and neither does draining the house
+        # battery into the car (its stored energy is valued near the import
+        # price). Forcing all of it into the horizon charged too early, and
+        # for pv_only goals without enough forecast PV it made the whole
+        # model infeasible, freezing every device on the previous plan.
+        horizon_end = ts_list[-1] + timedelta(hours=step_h) if ts_list else None
+        future_value_per_wh = 0.0
+        if prices:
+            best_export = max(export_prices) if export_prices else 0.0
+            future_value_per_wh = max(0.0, (min(prices) + best_export) / 2.0) / _WH
+        ev_shortfall: dict[str, pulp.LpVariable] = {}
         for goal in active_ev_goals:
-            if ev_phase1_req_wh[goal.asset_id] <= 10.0:   # < 10 Wh ≈ negligible
+            req_wh = ev_phase1_req_wh[goal.asset_id]
+            if req_wh <= 10.0:   # < 10 Wh ≈ negligible
                 continue
             phase1_slots = [
                 t for t in T
@@ -677,10 +763,20 @@ class MilpHigsOptimizer:
             ]
             if not phase1_slots:
                 continue
-            prob += (
-                pulp.lpSum(ev[(goal.asset_id, t)] for t in phase1_slots)
-                >= ev_phase1_req_wh[goal.asset_id],
-                f"ev_phase1_deadline__{goal.asset_id}",
+            delivered = pulp.lpSum(ev[(goal.asset_id, t)] for t in phase1_slots)
+            if horizon_end is None or goal.phase2_start_time <= horizon_end:
+                prob += delivered >= req_wh, f"ev_phase1_deadline__{goal.asset_id}"
+                continue
+            hours_after = (goal.phase2_start_time - horizon_end).total_seconds() / 3600.0
+            hard_wh = req_wh - ev_max_w[goal.asset_id] * hours_after
+            if hard_wh > 10.0:
+                prob += delivered >= hard_wh, f"ev_phase1_deadline__{goal.asset_id}"
+            shortfall = pulp.LpVariable(f"ev_shortfall__{goal.asset_id}", lowBound=0)
+            prob += delivered + shortfall >= req_wh, f"ev_phase1_soft__{goal.asset_id}"
+            ev_shortfall[goal.asset_id] = shortfall
+        if ev_shortfall:
+            prob.setObjective(
+                prob.objective + future_value_per_wh * pulp.lpSum(ev_shortfall.values())
             )
 
         # Tight per-step big-M (Wh): max possible grid import = consumption surplus
@@ -688,21 +784,21 @@ class MilpHigsOptimizer:
         # Used for the no_grid_charge constraints below.
         big_m = [
             max(0.0, net_load_wh[t])
-            + sum(bat_max_charge_w[s.device_id] * step_h for s in batteries)
-            + sum(ev_max_w[g.asset_id] * step_h for g in active_ev_goals)
+            + sum(bat_max_charge_w[s.device_id] * dur[t] for s in batteries)
+            + sum(ev_max_w[g.asset_id] * dur[t] for g in active_ev_goals)
             for t in T
         ]
 
         for sc in batteries:
             b = sc.device_id
-            c_max_wh = bat_max_charge_w[b] * step_h
-            d_max_wh = bat_max_discharge_w[b] * step_h
             eta_c = sc.charge_efficiency
             eta_d = sc.discharge_efficiency
             e_init_wh = bat_e_init_wh[b]
 
             for t in T:
                 # Charge only when u=1; discharge only when u=0
+                c_max_wh = bat_max_charge_w[b] * dur[t]
+                d_max_wh = bat_max_discharge_w[b] * dur[t]
                 prob += c[(b, t)] <= c_max_wh * u[(b, t)], f"c_max__{b}__{t}"
                 prob += d[(b, t)] <= d_max_wh * (1 - u[(b, t)]), f"d_max__{b}__{t}"
                 # PV-only charging: when this battery is charging (u=1), grid import must
@@ -721,17 +817,30 @@ class MilpHigsOptimizer:
                     f"soc__{b}__{t}",
                 )
 
-        # ── EV PV-only constraint ──────────────────────────────────────
-        # For pv_only goals (no schedule): EV may not increase grid import.
-        # Same big-M approach as battery no_grid_charge.
+        # ── EV PV slots: no grid import while the car charges from PV ────
+        # A PV-labelled slot (ev_on=1, ev_grid=0) executes as openWB PV mode,
+        # which only takes the real surplus left at the grid point. The
+        # ev ≤ forecast-surplus cap alone let a battery charge from the same
+        # surplus in the same slot (topping up from the grid), so the plan
+        # counted PV energy for the car that the battery actually took.
+        # Forbidding grid import in such slots makes car and batteries share
+        # the real surplus — same approach as battery no_grid_charge.
+        # pv_only goals have ev_grid fixed to 0, so this covers them too.
+        # Only slots whose forecast surplus reaches the charger minimum can
+        # be PV-labelled at all (ev ≥ min on one side, ev ≤ surplus on the
+        # other), so the constraint is skipped elsewhere — adding it to every
+        # slot made the model markedly slower for no effect.
         for goal in active_ev_goals:
-            if not goal.pv_only:
-                continue
             for t in T:
                 key = (goal.asset_id, t)
                 if key not in ev_on:
                     continue
-                prob += g_imp[t] <= big_m[t] * (1 - ev_on[key]), f"no_grid_charge_ev__{goal.asset_id}__{t}"
+                if max(0.0, -net_load_wh[t]) < ev_min_w[goal.asset_id] * dur[t]:
+                    continue
+                prob += (
+                    g_imp[t] <= big_m[t] * (1 - ev_on[key] + ev_grid[key]),
+                    f"no_grid_charge_ev__{goal.asset_id}__{t}",
+                )
 
         # ── Threshold device value dynamics ───────────────────────────
         # v[d, t] = v[d, t-1]  ± drift × dt  ∓ (active + drift) × dt × run[d, t]
@@ -743,14 +852,14 @@ class MilpHigsOptimizer:
         for tc in active_threshold_devices:
             td_id = tc.device_id
             v_init = initial_vals.get(td_id, (tc.bottom_threshold + tc.top_threshold) / 2.0)
-            combined_rate = (tc.active_rate_per_h + tc.drift_rate_per_h) * step_h
             for t in T:
+                combined_rate = (tc.active_rate_per_h + tc.drift_rate_per_h) * dur[t]
                 v_prev = v_init if t == 0 else val[(td_id, t - 1)]
                 if tc.direction == "reduces":
                     # off: +drift, on: +drift − combined = −active
                     prob += (
                         val[(td_id, t)] == v_prev
-                        + tc.drift_rate_per_h * step_h
+                        + tc.drift_rate_per_h * dur[t]
                         - combined_rate * run[(td_id, t)],
                         f"val_dynamics__{td_id}__{t}",
                     )
@@ -758,7 +867,7 @@ class MilpHigsOptimizer:
                     # off: −drift, on: −drift + combined = +active
                     prob += (
                         val[(td_id, t)] == v_prev
-                        - tc.drift_rate_per_h * step_h
+                        - tc.drift_rate_per_h * dur[t]
                         + combined_rate * run[(td_id, t)],
                         f"val_dynamics__{td_id}__{t}",
                     )
@@ -1067,7 +1176,7 @@ def _extract_ev_intents(
     ev_goals: list[EvChargingGoal],
     variables: dict,
     timestamps: list[datetime],
-    step_h: float,
+    dur_h: list[float],
 ) -> list[ControlIntent]:
     """Convert EV solver values into ``ControlIntent`` objects (phase-1 only).
 
@@ -1099,18 +1208,44 @@ def _extract_ev_intents(
                 intents.append(ControlIntent(
                     device_id=goal.device_id,
                     timestep=ts,
-                    power_kw=round(ev_wh / step_h / _WH, 4),   # Wh/h / 1000 = kW
+                    power_kw=round(ev_wh / dur_h[t] / _WH, 4),   # Wh/h / 1000 = kW
                     grid_allowed=grid_allowed,
                     reserved_kwh=round(ev_kwh, 4),
                 ))
     return intents
 
 
+def _solve_quality(prob: pulp.LpProblem) -> str:
+    """", gap 0.012%, time limit" suffix for the solve log (HiGHS only).
+
+    pulp reports a HiGHS time-limit stop as Optimal, so without this the log
+    can't tell a proven optimum from "best plan found before the limit".
+    """
+    model = getattr(prob, "solverModel", None)
+    if model is None or not hasattr(model, "getInfo"):
+        return ""
+    try:
+        gap = model.getInfo().mip_gap
+        hit_limit = "TimeLimit" in str(model.getModelStatus())
+    except Exception:  # noqa: BLE001 — diagnostics only, never fail a solve
+        return ""
+    return f", gap {gap * 100:.3f}%" + (", time limit reached" if hit_limit else "")
+
+
+def _mandatory_overlap_h(goal: EvChargingGoal, slot_start: datetime, slot_h: float) -> float:
+    """Hours of slot [slot_start, slot_start + step) inside the goal's forced
+    window [phase2_start_time, target_by). 0.0 when they don't overlap."""
+    slot_end = slot_start + timedelta(hours=slot_h)
+    lo = max(goal.phase2_start_time, slot_start)
+    hi = min(goal.target_by, slot_end)
+    return max(0.0, (hi - lo).total_seconds() / 3600.0)
+
+
 def _extract_intents(
     batteries: list[StorageConstraints],
     variables: dict,
     timestamps: list[datetime],
-    step_h: float,
+    dur_h: list[float],
 ) -> list[ControlIntent]:
     """Convert solver values into ``ControlIntent`` objects."""
     c = variables["c"]
@@ -1127,8 +1262,8 @@ def _extract_intents(
             d_wh = pulp.value(d[(b, t)]) or 0.0
             e_wh = pulp.value(e[(b, t)]) or 0.0
             # Wh / h = W (average power over the step)
-            c_w = c_wh / step_h
-            d_w = d_wh / step_h
+            c_w = c_wh / dur_h[t]
+            d_w = d_wh / dur_h[t]
             c_kwh = c_wh / _WH
             d_kwh = d_wh / _WH
             e_kwh = e_wh / _WH
