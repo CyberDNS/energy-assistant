@@ -1100,3 +1100,58 @@ class TestEvPvSlotSharesRealSurplus:
         for ts in pv_slots:
             assert imports[ts] < 0.01, f"PV-labelled EV slot {ts} imports {imports[ts]} kW"
 
+
+class TestEvUrgencyTiebreak:
+    """With flat prices every slot before the deadline is equally cheap, so
+    the model was fully degenerate: the solver placed phase-1 charging at
+    arbitrary, often late slots (+18.5 h for a +30 h deadline in this very
+    setup), and each 15-minute replan could pick different ones — deferring
+    charging towards the deadline. The earliest slots must win, while a
+    genuinely cheaper source (PV) must still be preferred."""
+
+    @staticmethod
+    def _run(pv: bool):
+        from energy_assistant.assets.ev import build_goal_from_parts
+        from energy_assistant.plugins.flat_rate.tariff import FlatRateTariff
+
+        now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        goal = build_goal_from_parts(
+            asset_id="ev1", device_id="cp", capacity_kwh=77.0, max_charge_kw=11.0,
+            min_charge_kw=4.14, charge_limit_soc_pct=90.0, target_soc_pct=90.0,
+            target_by=now + timedelta(hours=30), charge_curve=[], current_soc_pct=60.0,
+            connected=True,
+        )   # 23.1 kWh → ~2 h at 11 kW
+        fc = {
+            ForecastQuantity.PRICE: _hourly_prices(now, [0.30] * 48),
+            ForecastQuantity.CONSUMPTION: [ForecastPoint(timestamp=now + timedelta(hours=h), value=0.6)
+                                           for h in range(48)],
+        }
+        if pv:
+            fc[ForecastQuantity.PV_GENERATION] = [
+                ForecastPoint(timestamp=now + timedelta(hours=h), value=8.0 if 20 <= h <= 26 else 0.0)
+                for h in range(48)]
+        ctx = OptimizationContext(
+            device_states={"cp": DeviceState(device_id="cp", soc_pct=60.0, available=True),
+                           "bat": _state("bat", soc_pct=50.0)},
+            storage_constraints=[_battery("bat")],
+            tariffs={"grid": FlatRateTariff("grid", import_price_eur_per_kwh=0.30,
+                                            export_price_eur_per_kwh=0.08)},
+            forecasts=fc,
+            horizon=timedelta(hours=47),
+            ev_charging_goals=[goal],
+        )
+        return now, goal, ctx
+
+    async def test_flat_prices_charge_as_early_as_possible(self) -> None:
+        now, goal, ctx = self._run(pv=False)
+        plan = await MilpHigsOptimizer(step_minutes=15, precision=0.25).optimize(ctx)
+        ev = [i for i in plan.intents if i.device_id == "cp"]
+        assert sum(i.reserved_kwh for i in ev) >= goal.phase1_required_kwh - 0.01
+        assert max(i.timestep for i in ev) <= now + timedelta(hours=4)
+
+    async def test_cheaper_pv_later_still_wins_over_earliness(self) -> None:
+        now, goal, ctx = self._run(pv=True)
+        plan = await MilpHigsOptimizer(step_minutes=15, precision=0.25).optimize(ctx)
+        ev = [i for i in plan.intents if i.device_id == "cp"]
+        assert sum(i.reserved_kwh for i in ev) >= goal.phase1_required_kwh - 0.01
+        assert min(i.timestep for i in ev) >= now + timedelta(hours=20)
