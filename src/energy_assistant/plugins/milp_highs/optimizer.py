@@ -662,12 +662,25 @@ class MilpHigsOptimizer:
         # ev_grid=1 is free and labels become arbitrary when ev ≤ surplus).
         ev_grid_tiebreak = 1e-3 * pulp.lpSum(ev_grid.values()) if ev_grid else 0
 
+        # EV urgency tiebreak: a tiny cost growing with slot index on phase-1
+        # EV energy, so among equally priced slots the earliest wins. Without
+        # it, flat price windows are fully degenerate and each 15-minute
+        # replan could pick different, later slots — deferring charging
+        # right up to the deadline. 2e-8 €/Wh per slot ≈ 0.1 ct/kWh per 12 h
+        # of delay: large enough to clear the solver's gap for multi-kWh
+        # shifts, small enough that a genuinely cheaper later slot still wins.
+        ev_urgency = (
+            2e-8 * pulp.lpSum(t * ev[(g, t)] for (g, t) in ev_on)
+            if ev_on else 0
+        )
+
         prob += (
             grid_cost
             + degradation_cost
             + priority_tiebreak
             + pv_priority_tiebreak
             + ev_grid_tiebreak
+            + ev_urgency
             - terminal_value
         ), "total_cost"
 
