@@ -919,3 +919,74 @@ class TestMandatoryBlockMidSlot:
         assert ev[0].reserved_kwh == pytest.approx(max_kw * 8 / 60, abs=0.01)
         # Whole forced window accounted for — no missing slot.
         assert sum(i.reserved_kwh for i in ev) == pytest.approx(forced_kwh, abs=0.01)
+
+
+class TestEvDeadlineBeyondHorizon:
+    """Phase-1 energy for a deadline beyond the planning horizon must not be
+    forced into the horizon. Regressions:
+    - a far-off weekly target charged everything early from the grid;
+    - a no-schedule (pv_only) goal without enough forecast PV made the whole
+      model infeasible, freezing every device on the previous plan.
+    """
+
+    @staticmethod
+    def _now() -> datetime:
+        return datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+
+    @staticmethod
+    def _goal(now: datetime, target_by: datetime, *, soc: float = 20.0, pv_only: bool = False):
+        from energy_assistant.assets.ev import build_goal_from_parts
+        return build_goal_from_parts(
+            asset_id="ev1", device_id="cp", capacity_kwh=77.0,
+            max_charge_kw=11.0, min_charge_kw=4.14, charge_limit_soc_pct=90.0,
+            target_soc_pct=90.0, target_by=target_by, charge_curve=[],
+            current_soc_pct=soc, connected=True, pv_only=pv_only,
+        )
+
+    @staticmethod
+    def _ctx(now: datetime, goal, *, pv_kw: float = 0.0) -> OptimizationContext:
+        from energy_assistant.plugins.flat_rate.tariff import FlatRateTariff
+        pv = [ForecastPoint(timestamp=now + timedelta(hours=h), value=pv_kw) for h in range(24)]
+        return OptimizationContext(
+            device_states={"cp": DeviceState(device_id="cp", soc_pct=goal.current_soc_pct, available=True),
+                           "bat": _state("bat", soc_pct=50.0)},
+            storage_constraints=[_battery("bat")],
+            tariffs={"grid": FlatRateTariff("grid", import_price_eur_per_kwh=0.30,
+                                            export_price_eur_per_kwh=0.08)},
+            forecasts={ForecastQuantity.PRICE: _hourly_prices(now, [0.30] * 24),
+                       ForecastQuantity.PV_GENERATION: pv},
+            horizon=timedelta(hours=24),
+            ev_charging_goals=[goal],
+        )
+
+    @staticmethod
+    def _ev_kwh(plan) -> float:
+        return sum(i.reserved_kwh for i in plan.intents if i.device_id == "cp")
+
+    async def test_pv_only_goal_without_enough_pv_does_not_freeze_the_plan(self) -> None:
+        now = self._now()
+        goal = self._goal(now, now + timedelta(hours=168), pv_only=True)
+        plan = await MilpHigsOptimizer(step_minutes=60).optimize(self._ctx(now, goal))
+        # Solved (no RuntimeError) and the battery still got a real plan.
+        assert any(i.device_id == "bat" for i in plan.intents)
+        assert self._ev_kwh(plan) == 0.0
+
+    async def test_far_deadline_buys_no_grid_energy_early(self) -> None:
+        now = self._now()
+        goal = self._goal(now, now + timedelta(hours=48))
+        plan = await MilpHigsOptimizer(step_minutes=60).optimize(self._ctx(now, goal))
+        assert self._ev_kwh(plan) == 0.0
+
+    async def test_far_deadline_still_absorbs_pv_surplus(self) -> None:
+        now = self._now()
+        goal = self._goal(now, now + timedelta(hours=48))
+        plan = await MilpHigsOptimizer(step_minutes=60).optimize(self._ctx(now, goal, pv_kw=8.0))
+        assert self._ev_kwh(plan) > 10.0
+
+    async def test_part_that_cannot_fit_after_the_horizon_is_still_forced(self) -> None:
+        now = self._now()
+        # Deadline 1 h after the 24 h horizon ends: at most 11 kWh can come
+        # after it, so ~42.9 of the 53.9 kWh needed must land inside.
+        goal = self._goal(now, now + timedelta(hours=25))
+        plan = await MilpHigsOptimizer(step_minutes=60).optimize(self._ctx(now, goal))
+        assert self._ev_kwh(plan) >= goal.phase1_required_kwh - 11.0 - 0.1

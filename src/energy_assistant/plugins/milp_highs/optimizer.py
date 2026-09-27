@@ -394,14 +394,22 @@ class MilpHigsOptimizer:
             # boundary can legitimately be "missing" here while still being
             # delivered in real time by the continuous control loop.
             tolerance_kwh = max(0.1, goal.max_charge_kw * step_h * 1.5)
-            under_scheduled = not goal.overdue and scheduled_kwh < required_kwh - tolerance_kwh
+            # Deadline beyond the horizon: only what's worth charging now is
+            # planned (see the soft phase-1 constraint), the rest comes later.
+            beyond_horizon = goal.phase2_start_time > timestamps[-1] + step_td
+            under_scheduled = (
+                not goal.overdue and not beyond_horizon
+                and scheduled_kwh < required_kwh - tolerance_kwh
+            )
             _log.info(
                 "MilpHigsOptimizer: EV %r scheduled %.1f/%.1f kWh (phase1=%.1f phase2=%.1f) "
                 "by %s%s",
                 goal.asset_id, scheduled_kwh, required_kwh,
                 goal.phase1_required_kwh, goal.phase2_required_kwh,
                 goal.target_by.isoformat(),
-                " — UNDER-SCHEDULED, target will likely be missed" if under_scheduled else "",
+                " — deadline beyond planning horizon, rest planned later" if beyond_horizon
+                else " — UNDER-SCHEDULED, target will likely be missed" if under_scheduled
+                else "",
             )
         threshold_intents = _extract_threshold_intents(threshold_devices, variables, timestamps)
 
@@ -696,8 +704,30 @@ class MilpHigsOptimizer:
                 )
 
         # ── EV phase-1 deadline constraints ───────────────────────────
+        # Deadline inside the horizon: hard constraint, all of phase 1 must
+        # be delivered in time.
+        #
+        # Deadline beyond the horizon (a far-off weekly target, or a
+        # no-schedule pv_only goal whose target_by is ~7 days out): only the
+        # part that can't physically fit after the horizon ends stays hard
+        # (usually nothing). The rest is soft — each undelivered Wh is valued
+        # halfway between the best export price and the cheapest import
+        # price. PV surplus that would otherwise be exported still goes into
+        # the car, but buying grid energy early for a deadline the plan
+        # can't see yet never pays, and neither does draining the house
+        # battery into the car (its stored energy is valued near the import
+        # price). Forcing all of it into the horizon charged too early, and
+        # for pv_only goals without enough forecast PV it made the whole
+        # model infeasible, freezing every device on the previous plan.
+        horizon_end = ts_list[-1] + timedelta(hours=step_h) if ts_list else None
+        future_value_per_wh = 0.0
+        if prices:
+            best_export = max(export_prices) if export_prices else 0.0
+            future_value_per_wh = max(0.0, (min(prices) + best_export) / 2.0) / _WH
+        ev_shortfall: dict[str, pulp.LpVariable] = {}
         for goal in active_ev_goals:
-            if ev_phase1_req_wh[goal.asset_id] <= 10.0:   # < 10 Wh ≈ negligible
+            req_wh = ev_phase1_req_wh[goal.asset_id]
+            if req_wh <= 10.0:   # < 10 Wh ≈ negligible
                 continue
             phase1_slots = [
                 t for t in T
@@ -705,10 +735,20 @@ class MilpHigsOptimizer:
             ]
             if not phase1_slots:
                 continue
-            prob += (
-                pulp.lpSum(ev[(goal.asset_id, t)] for t in phase1_slots)
-                >= ev_phase1_req_wh[goal.asset_id],
-                f"ev_phase1_deadline__{goal.asset_id}",
+            delivered = pulp.lpSum(ev[(goal.asset_id, t)] for t in phase1_slots)
+            if horizon_end is None or goal.phase2_start_time <= horizon_end:
+                prob += delivered >= req_wh, f"ev_phase1_deadline__{goal.asset_id}"
+                continue
+            hours_after = (goal.phase2_start_time - horizon_end).total_seconds() / 3600.0
+            hard_wh = req_wh - ev_max_w[goal.asset_id] * hours_after
+            if hard_wh > 10.0:
+                prob += delivered >= hard_wh, f"ev_phase1_deadline__{goal.asset_id}"
+            shortfall = pulp.LpVariable(f"ev_shortfall__{goal.asset_id}", lowBound=0)
+            prob += delivered + shortfall >= req_wh, f"ev_phase1_soft__{goal.asset_id}"
+            ev_shortfall[goal.asset_id] = shortfall
+        if ev_shortfall:
+            prob.setObjective(
+                prob.objective + future_value_per_wh * pulp.lpSum(ev_shortfall.values())
             )
 
         # Tight per-step big-M (Wh): max possible grid import = consumption surplus
