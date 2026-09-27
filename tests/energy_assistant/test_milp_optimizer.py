@@ -874,3 +874,284 @@ class TestEvSchedulingLogs:
         with caplog.at_level("INFO", logger="energy_assistant.plugins.milp_highs.optimizer"):
             await MilpHigsOptimizer(step_minutes=60).optimize(ctx)
         assert not any("UNDER-SCHEDULED" in r.message for r in caplog.records)
+
+
+def _freeze_optimizer_clock(monkeypatch, at: datetime) -> None:
+    """Pin the optimizer's datetime.now() — slot 0 is clipped at real now."""
+    import energy_assistant.plugins.milp_highs.optimizer as om
+
+    class _Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return at
+
+    monkeypatch.setattr(om, "datetime", _Frozen)
+
+
+class TestMandatoryBlockMidSlot:
+    """Regression (2026-09-27): a forced window starting mid-slot (override set
+    at 10:07, deadline 11:00) dropped the current 10:00-10:15 slot because
+    only slots *starting* inside the window were counted. The plan showed EV
+    charging beginning at 10:15 ("starts in 7 minutes") while the control
+    loop was already charging, and the MILP ignored ~11 kW of EV load in the
+    current slot when planning the house batteries."""
+
+    async def test_current_slot_is_included_when_forcing_starts_mid_slot(self, monkeypatch) -> None:
+        from energy_assistant.assets.ev import EvChargingGoal
+
+        _now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        t0 = _now - timedelta(minutes=_now.minute % 15)   # optimizer's first slot
+        start = t0 + timedelta(minutes=7)
+        _freeze_optimizer_clock(monkeypatch, start)        # forcing starts "now"
+        target_by = t0 + timedelta(minutes=60)
+        max_kw = 11.0
+        forced_kwh = max_kw * 53 / 60                      # 53 min of forcing
+        goal = EvChargingGoal(
+            asset_id="ev1", device_id="cp", capacity_kwh=77.0,
+            max_charge_kw=max_kw, min_charge_kw=4.14, charge_limit_soc_pct=90.0,
+            target_soc_pct=35.0, target_by=target_by, charge_curve=[],
+            current_soc_pct=23.0, connected=True,
+            phase1_required_kwh=0.0, phase2_required_kwh=forced_kwh,
+            phase2_duration_h=forced_kwh / max_kw, phase2_start_time=start,
+            infeasible=True,
+        )
+        ctx = OptimizationContext(
+            device_states={"cp": DeviceState(device_id="cp", soc_pct=23.0, available=True),
+                           "bat": _state("bat", soc_pct=50.0)},
+            storage_constraints=[_battery("bat")],
+            forecasts={ForecastQuantity.PRICE: _hourly_prices(t0, [0.25] * 24)},
+            horizon=timedelta(hours=24),
+            ev_charging_goals=[goal],
+        )
+        plan = await MilpHigsOptimizer(step_minutes=15).optimize(ctx)
+
+        ev = sorted((i for i in plan.intents if i.device_id == "cp"), key=lambda i: i.timestep)
+        assert [i.timestep for i in ev] == [t0 + timedelta(minutes=15 * k) for k in range(4)]
+        # Current slot: full charger power, but only the 8 overlapping minutes of energy.
+        assert ev[0].power_kw == max_kw
+        assert ev[0].reserved_kwh == pytest.approx(max_kw * 8 / 60, abs=0.01)
+        # Whole forced window accounted for — no missing slot.
+        assert sum(i.reserved_kwh for i in ev) == pytest.approx(forced_kwh, abs=0.01)
+
+
+class TestEvDeadlineBeyondHorizon:
+    """Phase-1 energy for a deadline beyond the planning horizon must not be
+    forced into the horizon. Regressions:
+    - a far-off weekly target charged everything early from the grid;
+    - a no-schedule (pv_only) goal without enough forecast PV made the whole
+      model infeasible, freezing every device on the previous plan.
+    """
+
+    @staticmethod
+    def _now() -> datetime:
+        return datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+
+    @staticmethod
+    def _goal(now: datetime, target_by: datetime, *, soc: float = 20.0, pv_only: bool = False):
+        from energy_assistant.assets.ev import build_goal_from_parts
+        return build_goal_from_parts(
+            asset_id="ev1", device_id="cp", capacity_kwh=77.0,
+            max_charge_kw=11.0, min_charge_kw=4.14, charge_limit_soc_pct=90.0,
+            target_soc_pct=90.0, target_by=target_by, charge_curve=[],
+            current_soc_pct=soc, connected=True, pv_only=pv_only,
+        )
+
+    @staticmethod
+    def _ctx(now: datetime, goal, *, pv_kw: float = 0.0) -> OptimizationContext:
+        from energy_assistant.plugins.flat_rate.tariff import FlatRateTariff
+        pv = [ForecastPoint(timestamp=now + timedelta(hours=h), value=pv_kw) for h in range(24)]
+        return OptimizationContext(
+            device_states={"cp": DeviceState(device_id="cp", soc_pct=goal.current_soc_pct, available=True),
+                           "bat": _state("bat", soc_pct=50.0)},
+            storage_constraints=[_battery("bat")],
+            tariffs={"grid": FlatRateTariff("grid", import_price_eur_per_kwh=0.30,
+                                            export_price_eur_per_kwh=0.08)},
+            forecasts={ForecastQuantity.PRICE: _hourly_prices(now, [0.30] * 24),
+                       ForecastQuantity.PV_GENERATION: pv},
+            horizon=timedelta(hours=24),
+            ev_charging_goals=[goal],
+        )
+
+    @staticmethod
+    def _ev_kwh(plan) -> float:
+        return sum(i.reserved_kwh for i in plan.intents if i.device_id == "cp")
+
+    async def test_pv_only_goal_without_enough_pv_does_not_freeze_the_plan(self) -> None:
+        now = self._now()
+        goal = self._goal(now, now + timedelta(hours=168), pv_only=True)
+        plan = await MilpHigsOptimizer(step_minutes=60).optimize(self._ctx(now, goal))
+        # Solved (no RuntimeError) and the battery still got a real plan.
+        assert any(i.device_id == "bat" for i in plan.intents)
+        assert self._ev_kwh(plan) == 0.0
+
+    async def test_far_deadline_buys_no_grid_energy_early(self) -> None:
+        now = self._now()
+        goal = self._goal(now, now + timedelta(hours=48))
+        plan = await MilpHigsOptimizer(step_minutes=60).optimize(self._ctx(now, goal))
+        assert self._ev_kwh(plan) == 0.0
+
+    async def test_far_deadline_still_absorbs_pv_surplus(self) -> None:
+        now = self._now()
+        goal = self._goal(now, now + timedelta(hours=48))
+        plan = await MilpHigsOptimizer(step_minutes=60).optimize(self._ctx(now, goal, pv_kw=8.0))
+        assert self._ev_kwh(plan) > 10.0
+
+    async def test_part_that_cannot_fit_after_the_horizon_is_still_forced(self) -> None:
+        now = self._now()
+        # Deadline 1 h after the 24 h horizon ends: at most 11 kWh can come
+        # after it, so ~42.9 of the 53.9 kWh needed must land inside.
+        goal = self._goal(now, now + timedelta(hours=25))
+        plan = await MilpHigsOptimizer(step_minutes=60).optimize(self._ctx(now, goal))
+        assert self._ev_kwh(plan) >= goal.phase1_required_kwh - 11.0 - 0.1
+
+
+class TestPartialFirstSlot:
+    """Slot 0 starts at the last step boundary, up to a step in the past.
+    Only the part still ahead is plannable: energy bounds must shrink to it,
+    and the power handed to the control loop must be energy / remaining
+    time — otherwise a 5-minute remainder planned as 15 minutes promises
+    3× the energy, and the live setpoint comes out at a third."""
+
+    @staticmethod
+    def _setup(monkeypatch, ev_goal=None):
+        now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        t0 = now - timedelta(minutes=now.minute % 15)
+        _freeze_optimizer_clock(monkeypatch, t0 + timedelta(minutes=10))   # 5 min left
+        prices = [ForecastPoint(timestamp=t0 + timedelta(minutes=15 * k), value=0.05 if k == 0 else 0.40)
+                  for k in range(96)]
+        cons = [ForecastPoint(timestamp=t0 + timedelta(minutes=15 * k), value=1.0) for k in range(96)]
+        ctx = OptimizationContext(
+            device_states={"bat": _state("bat", soc_pct=20.0),
+                           "cp": DeviceState(device_id="cp", soc_pct=40.0, available=True)},
+            storage_constraints=[_battery("bat", max_charge_kw=3.0)],
+            forecasts={ForecastQuantity.PRICE: prices, ForecastQuantity.CONSUMPTION: cons},
+            horizon=timedelta(hours=24),
+            ev_charging_goals=[ev_goal] if ev_goal else [],
+        )
+        return t0, ctx
+
+    async def test_battery_first_slot_energy_and_power(self, monkeypatch) -> None:
+        t0, ctx = self._setup(monkeypatch)
+        plan = await MilpHigsOptimizer(step_minutes=15).optimize(ctx)
+        first = next(i for i in plan.intents if i.device_id == "bat" and i.timestep == t0)
+        assert first.reserved_kwh == pytest.approx(3.0 * 5 / 60, abs=0.01)
+        assert first.power_kw == pytest.approx(3.0, abs=0.01)
+
+    async def test_ev_first_slot_energy_is_capped_to_remaining_time(self, monkeypatch) -> None:
+        from energy_assistant.assets.ev import build_goal_from_parts
+        now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        t0 = now - timedelta(minutes=now.minute % 15)
+        goal = build_goal_from_parts(
+            asset_id="ev1", device_id="cp", capacity_kwh=40.0, max_charge_kw=11.0,
+            min_charge_kw=4.14, charge_limit_soc_pct=90.0, target_soc_pct=50.0,
+            target_by=t0 + timedelta(hours=3), charge_curve=[], current_soc_pct=40.0,
+            connected=True,
+        )
+        t0, ctx = self._setup(monkeypatch, goal)
+        plan = await MilpHigsOptimizer(step_minutes=15).optimize(ctx)
+        ev = [i for i in plan.intents if i.device_id == "cp"]
+        first = next((i for i in ev if i.timestep == t0), None)
+        assert first is not None                       # cheapest slot is used...
+        assert first.reserved_kwh <= 11.0 * 5 / 60 + 0.01   # ...but only 5 min of it
+        assert sum(i.reserved_kwh for i in ev) >= goal.phase1_required_kwh - 0.01
+
+
+class TestEvPvSlotSharesRealSurplus:
+    """A PV-labelled EV slot runs as openWB PV mode, which only takes the
+    surplus actually left at the grid point. The plan must therefore never
+    import from the grid in such a slot — previously a grid-capable battery
+    could charge from the same forecast surplus (topping up from the grid),
+    so the plan counted PV energy for the car that the battery took."""
+
+    async def test_no_grid_import_in_pv_labelled_ev_slots(self) -> None:
+        from energy_assistant.assets.ev import build_goal_from_parts
+        from energy_assistant.plugins.flat_rate.tariff import FlatRateTariff
+
+        now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        # Midday: 6 kW PV, cheap; evening: expensive → battery wants to fill up
+        # at midday, exactly when the car wants the same surplus. Car (32 kWh)
+        # + battery (9 kWh) exceed the 33.6 kWh midday surplus.
+        pv = [ForecastPoint(timestamp=now + timedelta(hours=h), value=6.0 if 1 <= h <= 6 else 0.0)
+              for h in range(24)]
+        prices = _hourly_prices(now, [0.20 if 1 <= h <= 6 else 0.45 for h in range(24)])
+        cons = [ForecastPoint(timestamp=now + timedelta(hours=h), value=0.4) for h in range(24)]
+        goal = build_goal_from_parts(
+            asset_id="ev1", device_id="cp", capacity_kwh=40.0, max_charge_kw=11.0,
+            min_charge_kw=4.14, charge_limit_soc_pct=90.0, target_soc_pct=90.0,
+            target_by=now + timedelta(hours=20), charge_curve=[], current_soc_pct=10.0,
+            connected=True,
+        )
+        ctx = OptimizationContext(
+            device_states={"cp": DeviceState(device_id="cp", soc_pct=10.0, available=True),
+                           "bat": _state("bat", soc_pct=10.0)},
+            storage_constraints=[_battery("bat", capacity_kwh=10.0, max_charge_kw=3.0)],
+            tariffs={"grid": FlatRateTariff("grid", import_price_eur_per_kwh=0.30,
+                                            export_price_eur_per_kwh=0.08)},
+            forecasts={ForecastQuantity.PRICE: prices, ForecastQuantity.PV_GENERATION: pv,
+                       ForecastQuantity.CONSUMPTION: cons},
+            horizon=timedelta(hours=24),
+            ev_charging_goals=[goal],
+        )
+        plan = await MilpHigsOptimizer(step_minutes=60, precision=0.5).optimize(ctx)
+        pv_slots = {i.timestep for i in plan.intents
+                    if i.device_id == "cp" and i.power_kw > 0 and not i.grid_allowed}
+        assert pv_slots, "scenario should produce PV-labelled EV slots"
+        imports = {f.timestep: f.grid_import_kw for f in plan.flows}
+        for ts in pv_slots:
+            assert imports[ts] < 0.01, f"PV-labelled EV slot {ts} imports {imports[ts]} kW"
+
+
+class TestEvUrgencyTiebreak:
+    """With flat prices every slot before the deadline is equally cheap, so
+    the model was fully degenerate: the solver placed phase-1 charging at
+    arbitrary, often late slots (+18.5 h for a +30 h deadline in this very
+    setup), and each 15-minute replan could pick different ones — deferring
+    charging towards the deadline. The earliest slots must win, while a
+    genuinely cheaper source (PV) must still be preferred."""
+
+    @staticmethod
+    def _run(pv: bool):
+        from energy_assistant.assets.ev import build_goal_from_parts
+        from energy_assistant.plugins.flat_rate.tariff import FlatRateTariff
+
+        now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        goal = build_goal_from_parts(
+            asset_id="ev1", device_id="cp", capacity_kwh=77.0, max_charge_kw=11.0,
+            min_charge_kw=4.14, charge_limit_soc_pct=90.0, target_soc_pct=90.0,
+            target_by=now + timedelta(hours=30), charge_curve=[], current_soc_pct=60.0,
+            connected=True,
+        )   # 23.1 kWh → ~2 h at 11 kW
+        fc = {
+            ForecastQuantity.PRICE: _hourly_prices(now, [0.30] * 48),
+            ForecastQuantity.CONSUMPTION: [ForecastPoint(timestamp=now + timedelta(hours=h), value=0.6)
+                                           for h in range(48)],
+        }
+        if pv:
+            fc[ForecastQuantity.PV_GENERATION] = [
+                ForecastPoint(timestamp=now + timedelta(hours=h), value=8.0 if 20 <= h <= 26 else 0.0)
+                for h in range(48)]
+        ctx = OptimizationContext(
+            device_states={"cp": DeviceState(device_id="cp", soc_pct=60.0, available=True),
+                           "bat": _state("bat", soc_pct=50.0)},
+            storage_constraints=[_battery("bat")],
+            tariffs={"grid": FlatRateTariff("grid", import_price_eur_per_kwh=0.30,
+                                            export_price_eur_per_kwh=0.08)},
+            forecasts=fc,
+            horizon=timedelta(hours=47),
+            ev_charging_goals=[goal],
+        )
+        return now, goal, ctx
+
+    async def test_flat_prices_charge_as_early_as_possible(self) -> None:
+        now, goal, ctx = self._run(pv=False)
+        plan = await MilpHigsOptimizer(step_minutes=15, precision=0.25).optimize(ctx)
+        ev = [i for i in plan.intents if i.device_id == "cp"]
+        assert sum(i.reserved_kwh for i in ev) >= goal.phase1_required_kwh - 0.01
+        assert max(i.timestep for i in ev) <= now + timedelta(hours=4)
+
+    async def test_cheaper_pv_later_still_wins_over_earliness(self) -> None:
+        now, goal, ctx = self._run(pv=True)
+        plan = await MilpHigsOptimizer(step_minutes=15, precision=0.25).optimize(ctx)
+        ev = [i for i in plan.intents if i.device_id == "cp"]
+        assert sum(i.reserved_kwh for i in ev) >= goal.phase1_required_kwh - 0.01
+        assert min(i.timestep for i in ev) >= now + timedelta(hours=20)
