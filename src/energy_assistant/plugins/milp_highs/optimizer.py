@@ -320,12 +320,13 @@ class MilpHigsOptimizer:
         # API endpoint (and the control loop) for the duration.
         status = await asyncio.to_thread(prob.solve, self._get_solver())
         _log.info(
-            "MilpHigsOptimizer: solved in %.2fs — %d steps, %d batteries, %d EVs, status=%s",
+            "MilpHigsOptimizer: solved in %.2fs — %d steps, %d batteries, %d EVs, status=%s%s",
             time.monotonic() - t0,
             n_steps,
             len(batteries),
             len([g for g in (ev_goals or []) if g.connected]),
             pulp.LpStatus[status],
+            _solve_quality(prob),
         )
 
         if pulp.LpStatus[status] not in ("Optimal", "Feasible"):
@@ -1172,6 +1173,23 @@ def _extract_ev_intents(
                     reserved_kwh=round(ev_kwh, 4),
                 ))
     return intents
+
+
+def _solve_quality(prob: pulp.LpProblem) -> str:
+    """", gap 0.012%, time limit" suffix for the solve log (HiGHS only).
+
+    pulp reports a HiGHS time-limit stop as Optimal, so without this the log
+    can't tell a proven optimum from "best plan found before the limit".
+    """
+    model = getattr(prob, "solverModel", None)
+    if model is None or not hasattr(model, "getInfo"):
+        return ""
+    try:
+        gap = model.getInfo().mip_gap
+        hit_limit = "TimeLimit" in str(model.getModelStatus())
+    except Exception:  # noqa: BLE001 — diagnostics only, never fail a solve
+        return ""
+    return f", gap {gap * 100:.3f}%" + (", time limit reached" if hit_limit else "")
 
 
 def _mandatory_overlap_h(goal: EvChargingGoal, slot_start: datetime, step_h: float) -> float:
