@@ -804,17 +804,30 @@ class MilpHigsOptimizer:
                     f"soc__{b}__{t}",
                 )
 
-        # ── EV PV-only constraint ──────────────────────────────────────
-        # For pv_only goals (no schedule): EV may not increase grid import.
-        # Same big-M approach as battery no_grid_charge.
+        # ── EV PV slots: no grid import while the car charges from PV ────
+        # A PV-labelled slot (ev_on=1, ev_grid=0) executes as openWB PV mode,
+        # which only takes the real surplus left at the grid point. The
+        # ev ≤ forecast-surplus cap alone let a battery charge from the same
+        # surplus in the same slot (topping up from the grid), so the plan
+        # counted PV energy for the car that the battery actually took.
+        # Forbidding grid import in such slots makes car and batteries share
+        # the real surplus — same approach as battery no_grid_charge.
+        # pv_only goals have ev_grid fixed to 0, so this covers them too.
+        # Only slots whose forecast surplus reaches the charger minimum can
+        # be PV-labelled at all (ev ≥ min on one side, ev ≤ surplus on the
+        # other), so the constraint is skipped elsewhere — adding it to every
+        # slot made the model markedly slower for no effect.
         for goal in active_ev_goals:
-            if not goal.pv_only:
-                continue
             for t in T:
                 key = (goal.asset_id, t)
                 if key not in ev_on:
                     continue
-                prob += g_imp[t] <= big_m[t] * (1 - ev_on[key]), f"no_grid_charge_ev__{goal.asset_id}__{t}"
+                if max(0.0, -net_load_wh[t]) < ev_min_w[goal.asset_id] * dur[t]:
+                    continue
+                prob += (
+                    g_imp[t] <= big_m[t] * (1 - ev_on[key] + ev_grid[key]),
+                    f"no_grid_charge_ev__{goal.asset_id}__{t}",
+                )
 
         # ── Threshold device value dynamics ───────────────────────────
         # v[d, t] = v[d, t-1]  ± drift × dt  ∓ (active + drift) × dt × run[d, t]

@@ -1054,3 +1054,49 @@ class TestPartialFirstSlot:
         assert first is not None                       # cheapest slot is used...
         assert first.reserved_kwh <= 11.0 * 5 / 60 + 0.01   # ...but only 5 min of it
         assert sum(i.reserved_kwh for i in ev) >= goal.phase1_required_kwh - 0.01
+
+
+class TestEvPvSlotSharesRealSurplus:
+    """A PV-labelled EV slot runs as openWB PV mode, which only takes the
+    surplus actually left at the grid point. The plan must therefore never
+    import from the grid in such a slot — previously a grid-capable battery
+    could charge from the same forecast surplus (topping up from the grid),
+    so the plan counted PV energy for the car that the battery took."""
+
+    async def test_no_grid_import_in_pv_labelled_ev_slots(self) -> None:
+        from energy_assistant.assets.ev import build_goal_from_parts
+        from energy_assistant.plugins.flat_rate.tariff import FlatRateTariff
+
+        now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        # Midday: 6 kW PV, cheap; evening: expensive → battery wants to fill up
+        # at midday, exactly when the car wants the same surplus. Car (32 kWh)
+        # + battery (9 kWh) exceed the 33.6 kWh midday surplus.
+        pv = [ForecastPoint(timestamp=now + timedelta(hours=h), value=6.0 if 1 <= h <= 6 else 0.0)
+              for h in range(24)]
+        prices = _hourly_prices(now, [0.20 if 1 <= h <= 6 else 0.45 for h in range(24)])
+        cons = [ForecastPoint(timestamp=now + timedelta(hours=h), value=0.4) for h in range(24)]
+        goal = build_goal_from_parts(
+            asset_id="ev1", device_id="cp", capacity_kwh=40.0, max_charge_kw=11.0,
+            min_charge_kw=4.14, charge_limit_soc_pct=90.0, target_soc_pct=90.0,
+            target_by=now + timedelta(hours=20), charge_curve=[], current_soc_pct=10.0,
+            connected=True,
+        )
+        ctx = OptimizationContext(
+            device_states={"cp": DeviceState(device_id="cp", soc_pct=10.0, available=True),
+                           "bat": _state("bat", soc_pct=10.0)},
+            storage_constraints=[_battery("bat", capacity_kwh=10.0, max_charge_kw=3.0)],
+            tariffs={"grid": FlatRateTariff("grid", import_price_eur_per_kwh=0.30,
+                                            export_price_eur_per_kwh=0.08)},
+            forecasts={ForecastQuantity.PRICE: prices, ForecastQuantity.PV_GENERATION: pv,
+                       ForecastQuantity.CONSUMPTION: cons},
+            horizon=timedelta(hours=24),
+            ev_charging_goals=[goal],
+        )
+        plan = await MilpHigsOptimizer(step_minutes=60, precision=0.5).optimize(ctx)
+        pv_slots = {i.timestep for i in plan.intents
+                    if i.device_id == "cp" and i.power_kw > 0 and not i.grid_allowed}
+        assert pv_slots, "scenario should produce PV-labelled EV slots"
+        imports = {f.timestep: f.grid_import_kw for f in plan.flows}
+        for ts in pv_slots:
+            assert imports[ts] < 0.01, f"PV-labelled EV slot {ts} imports {imports[ts]} kW"
+
