@@ -876,6 +876,18 @@ class TestEvSchedulingLogs:
         assert not any("UNDER-SCHEDULED" in r.message for r in caplog.records)
 
 
+def _freeze_optimizer_clock(monkeypatch, at: datetime) -> None:
+    """Pin the optimizer's datetime.now() — slot 0 is clipped at real now."""
+    import energy_assistant.plugins.milp_highs.optimizer as om
+
+    class _Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return at
+
+    monkeypatch.setattr(om, "datetime", _Frozen)
+
+
 class TestMandatoryBlockMidSlot:
     """Regression (2026-09-27): a forced window starting mid-slot (override set
     at 10:07, deadline 11:00) dropped the current 10:00-10:15 slot because
@@ -884,12 +896,13 @@ class TestMandatoryBlockMidSlot:
     loop was already charging, and the MILP ignored ~11 kW of EV load in the
     current slot when planning the house batteries."""
 
-    async def test_current_slot_is_included_when_forcing_starts_mid_slot(self) -> None:
+    async def test_current_slot_is_included_when_forcing_starts_mid_slot(self, monkeypatch) -> None:
         from energy_assistant.assets.ev import EvChargingGoal
 
         _now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
         t0 = _now - timedelta(minutes=_now.minute % 15)   # optimizer's first slot
         start = t0 + timedelta(minutes=7)
+        _freeze_optimizer_clock(monkeypatch, start)        # forcing starts "now"
         target_by = t0 + timedelta(minutes=60)
         max_kw = 11.0
         forced_kwh = max_kw * 53 / 60                      # 53 min of forcing
@@ -990,3 +1003,54 @@ class TestEvDeadlineBeyondHorizon:
         goal = self._goal(now, now + timedelta(hours=25))
         plan = await MilpHigsOptimizer(step_minutes=60).optimize(self._ctx(now, goal))
         assert self._ev_kwh(plan) >= goal.phase1_required_kwh - 11.0 - 0.1
+
+
+class TestPartialFirstSlot:
+    """Slot 0 starts at the last step boundary, up to a step in the past.
+    Only the part still ahead is plannable: energy bounds must shrink to it,
+    and the power handed to the control loop must be energy / remaining
+    time — otherwise a 5-minute remainder planned as 15 minutes promises
+    3× the energy, and the live setpoint comes out at a third."""
+
+    @staticmethod
+    def _setup(monkeypatch, ev_goal=None):
+        now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        t0 = now - timedelta(minutes=now.minute % 15)
+        _freeze_optimizer_clock(monkeypatch, t0 + timedelta(minutes=10))   # 5 min left
+        prices = [ForecastPoint(timestamp=t0 + timedelta(minutes=15 * k), value=0.05 if k == 0 else 0.40)
+                  for k in range(96)]
+        cons = [ForecastPoint(timestamp=t0 + timedelta(minutes=15 * k), value=1.0) for k in range(96)]
+        ctx = OptimizationContext(
+            device_states={"bat": _state("bat", soc_pct=20.0),
+                           "cp": DeviceState(device_id="cp", soc_pct=40.0, available=True)},
+            storage_constraints=[_battery("bat", max_charge_kw=3.0)],
+            forecasts={ForecastQuantity.PRICE: prices, ForecastQuantity.CONSUMPTION: cons},
+            horizon=timedelta(hours=24),
+            ev_charging_goals=[ev_goal] if ev_goal else [],
+        )
+        return t0, ctx
+
+    async def test_battery_first_slot_energy_and_power(self, monkeypatch) -> None:
+        t0, ctx = self._setup(monkeypatch)
+        plan = await MilpHigsOptimizer(step_minutes=15).optimize(ctx)
+        first = next(i for i in plan.intents if i.device_id == "bat" and i.timestep == t0)
+        assert first.reserved_kwh == pytest.approx(3.0 * 5 / 60, abs=0.01)
+        assert first.power_kw == pytest.approx(3.0, abs=0.01)
+
+    async def test_ev_first_slot_energy_is_capped_to_remaining_time(self, monkeypatch) -> None:
+        from energy_assistant.assets.ev import build_goal_from_parts
+        now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        t0 = now - timedelta(minutes=now.minute % 15)
+        goal = build_goal_from_parts(
+            asset_id="ev1", device_id="cp", capacity_kwh=40.0, max_charge_kw=11.0,
+            min_charge_kw=4.14, charge_limit_soc_pct=90.0, target_soc_pct=50.0,
+            target_by=t0 + timedelta(hours=3), charge_curve=[], current_soc_pct=40.0,
+            connected=True,
+        )
+        t0, ctx = self._setup(monkeypatch, goal)
+        plan = await MilpHigsOptimizer(step_minutes=15).optimize(ctx)
+        ev = [i for i in plan.intents if i.device_id == "cp"]
+        first = next((i for i in ev if i.timestep == t0), None)
+        assert first is not None                       # cheapest slot is used...
+        assert first.reserved_kwh <= 11.0 * 5 / 60 + 0.01   # ...but only 5 min of it
+        assert sum(i.reserved_kwh for i in ev) >= goal.phase1_required_kwh - 0.01
