@@ -217,8 +217,9 @@ class MilpHigsOptimizer:
                 continue
             mandatory_slots = 0
             for t, ts in enumerate(timestamps):
-                if goal.phase2_start_time <= ts < goal.target_by:
-                    net_load[t] += goal.max_charge_kw * step_h
+                overlap_h = _mandatory_overlap_h(goal, ts, step_h)
+                if overlap_h > 0:
+                    net_load[t] += goal.max_charge_kw * overlap_h
                     mandatory_slots += 1
             # overdue goals have phase2_start_time == now, target_by in the
             # past — there's no sensible future window to inject, and the
@@ -346,34 +347,52 @@ class MilpHigsOptimizer:
         ev_intents = _extract_ev_intents(
             ev_goals, variables, timestamps, step_h
         )
-        # Phase-2 intents (mandatory top-off slots, handled outside the MILP)
+        # Phase-2 intents (mandatory top-off slots, handled outside the MILP).
+        # A slot counts if it *overlaps* the forced window, not only if it
+        # starts inside it — otherwise the slot "now" falls in is dropped
+        # whenever forcing begins mid-slot, and the plan shows charging
+        # starting at the next slot while the control loop is already
+        # charging. Power is the charger's actual draw; reserved_kwh is only
+        # the overlapping part of the slot.
         for goal in ev_goals:
             if not goal.connected or goal.phase2_required_kwh <= 0.01:
                 continue
             for t, ts in enumerate(timestamps):
-                if goal.phase2_start_time <= ts < goal.target_by:
-                    ev_intents.append(ControlIntent(
-                        device_id=goal.device_id,
-                        timestep=ts,
-                        power_kw=round(goal.max_charge_kw, 4),
-                        grid_allowed=True,
-                        reserved_kwh=round(goal.max_charge_kw * step_h, 4),
-                    ))
+                overlap_h = _mandatory_overlap_h(goal, ts, step_h)
+                if overlap_h <= 0:
+                    continue
+                mandatory_kwh = goal.max_charge_kw * overlap_h
+                existing = next(
+                    (i for i in ev_intents
+                     if i.device_id == goal.device_id and i.timestep == ts),
+                    None,
+                )
+                if existing is not None:
+                    # Phase-1 energy was also planned in this boundary slot:
+                    # merge into a single intent so the control loop sees one.
+                    ev_intents.remove(existing)
+                    mandatory_kwh += existing.reserved_kwh
+                ev_intents.append(ControlIntent(
+                    device_id=goal.device_id,
+                    timestep=ts,
+                    power_kw=round(goal.max_charge_kw, 4),
+                    grid_allowed=True,
+                    reserved_kwh=round(mandatory_kwh, 4),
+                ))
         for goal in ev_goals:
             if not goal.connected:
                 continue
             scheduled_kwh = sum(
-                i.power_kw * step_h for i in ev_intents if i.device_id == goal.device_id
+                i.reserved_kwh for i in ev_intents if i.device_id == goal.device_id
             )
             required_kwh = goal.phase1_required_kwh + goal.phase2_required_kwh
             # Overdue goals are handled entirely outside the MILP (the
             # contributor forces full power directly, see EvChargerContributor)
             # since target_by is already in the past — nothing to schedule here.
-            # Tolerance: the mandatory phase-2 block and the phase-1 deadline
-            # constraint both snap to the step grid, so up to ~1 step's worth
-            # of energy near a window boundary can legitimately be "missing"
-            # here while still being delivered in real time by the
-            # continuous, non-stepped control loop — that's not a bug.
+            # Tolerance: the phase-1 deadline constraint snaps to the step
+            # grid, so up to ~1 step's worth of energy near the window
+            # boundary can legitimately be "missing" here while still being
+            # delivered in real time by the continuous control loop.
             tolerance_kwh = max(0.1, goal.max_charge_kw * step_h * 1.5)
             under_scheduled = not goal.overdue and scheduled_kwh < required_kwh - tolerance_kwh
             _log.info(
@@ -512,7 +531,16 @@ class MilpHigsOptimizer:
                 ts = ts_list[t] if t < len(ts_list) else None
                 key = (goal.asset_id, t)
                 if ts is not None and ts < goal.phase2_start_time:
-                    ev[key]    = pulp.LpVariable(f"ev__{goal.asset_id}__{t}",    lowBound=0, upBound=max_wh)
+                    # A boundary slot that is partly inside the mandatory
+                    # window already carries that forced energy in net_load;
+                    # only the remaining charger capacity is free for phase 1.
+                    slot_max_wh = max_wh
+                    if goal.phase2_required_kwh > 0.01:
+                        slot_max_wh = max(
+                            0.0,
+                            max_wh - ev_max_w[goal.asset_id] * _mandatory_overlap_h(goal, ts, step_h),
+                        )
+                    ev[key]    = pulp.LpVariable(f"ev__{goal.asset_id}__{t}",    lowBound=0, upBound=slot_max_wh)
                     ev_on[key] = pulp.LpVariable(f"ev_on__{goal.asset_id}__{t}", cat="Binary")
                     # pv_only goals may never use the grid → fix the binary to 0.
                     ev_grid[key] = pulp.LpVariable(
@@ -1104,6 +1132,15 @@ def _extract_ev_intents(
                     reserved_kwh=round(ev_kwh, 4),
                 ))
     return intents
+
+
+def _mandatory_overlap_h(goal: EvChargingGoal, slot_start: datetime, step_h: float) -> float:
+    """Hours of slot [slot_start, slot_start + step) inside the goal's forced
+    window [phase2_start_time, target_by). 0.0 when they don't overlap."""
+    slot_end = slot_start + timedelta(hours=step_h)
+    lo = max(goal.phase2_start_time, slot_start)
+    hi = min(goal.target_by, slot_end)
+    return max(0.0, (hi - lo).total_seconds() / 3600.0)
 
 
 def _extract_intents(

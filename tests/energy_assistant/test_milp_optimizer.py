@@ -874,3 +874,48 @@ class TestEvSchedulingLogs:
         with caplog.at_level("INFO", logger="energy_assistant.plugins.milp_highs.optimizer"):
             await MilpHigsOptimizer(step_minutes=60).optimize(ctx)
         assert not any("UNDER-SCHEDULED" in r.message for r in caplog.records)
+
+
+class TestMandatoryBlockMidSlot:
+    """Regression (2026-09-27): a forced window starting mid-slot (override set
+    at 10:07, deadline 11:00) dropped the current 10:00-10:15 slot because
+    only slots *starting* inside the window were counted. The plan showed EV
+    charging beginning at 10:15 ("starts in 7 minutes") while the control
+    loop was already charging, and the MILP ignored ~11 kW of EV load in the
+    current slot when planning the house batteries."""
+
+    async def test_current_slot_is_included_when_forcing_starts_mid_slot(self) -> None:
+        from energy_assistant.assets.ev import EvChargingGoal
+
+        _now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        t0 = _now - timedelta(minutes=_now.minute % 15)   # optimizer's first slot
+        start = t0 + timedelta(minutes=7)
+        target_by = t0 + timedelta(minutes=60)
+        max_kw = 11.0
+        forced_kwh = max_kw * 53 / 60                      # 53 min of forcing
+        goal = EvChargingGoal(
+            asset_id="ev1", device_id="cp", capacity_kwh=77.0,
+            max_charge_kw=max_kw, min_charge_kw=4.14, charge_limit_soc_pct=90.0,
+            target_soc_pct=35.0, target_by=target_by, charge_curve=[],
+            current_soc_pct=23.0, connected=True,
+            phase1_required_kwh=0.0, phase2_required_kwh=forced_kwh,
+            phase2_duration_h=forced_kwh / max_kw, phase2_start_time=start,
+            infeasible=True,
+        )
+        ctx = OptimizationContext(
+            device_states={"cp": DeviceState(device_id="cp", soc_pct=23.0, available=True),
+                           "bat": _state("bat", soc_pct=50.0)},
+            storage_constraints=[_battery("bat")],
+            forecasts={ForecastQuantity.PRICE: _hourly_prices(t0, [0.25] * 24)},
+            horizon=timedelta(hours=24),
+            ev_charging_goals=[goal],
+        )
+        plan = await MilpHigsOptimizer(step_minutes=15).optimize(ctx)
+
+        ev = sorted((i for i in plan.intents if i.device_id == "cp"), key=lambda i: i.timestep)
+        assert [i.timestep for i in ev] == [t0 + timedelta(minutes=15 * k) for k in range(4)]
+        # Current slot: full charger power, but only the 8 overlapping minutes of energy.
+        assert ev[0].power_kw == max_kw
+        assert ev[0].reserved_kwh == pytest.approx(max_kw * 8 / 60, abs=0.01)
+        # Whole forced window accounted for — no missing slot.
+        assert sum(i.reserved_kwh for i in ev) == pytest.approx(forced_kwh, abs=0.01)
