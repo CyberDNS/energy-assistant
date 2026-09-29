@@ -432,27 +432,6 @@ class DayOverrideBody(BaseModel):
     target_by: str | None = None   # "HH:MM" asset-local
 
 
-def _initial_overdue_dismissal(
-    assets: list[EvChargingAsset], now: datetime
-) -> dict[str, date]:
-    """Pre-dismiss today's missed-deadline catch-up for every EV asset.
-
-    Called once on startup. ``Application._ev_prev_plugged`` and
-    ``_ev_overdue_dismissed`` are in-memory only, so a restart loses the plug
-    history that would normally decide whether an already-passed deadline
-    should still be force-charged (see ``_check_force_charge_reset``).
-    Rather than resume forcing full power based on an unknown history —
-    the car may well have been unplugged and driven somewhere during the
-    downtime — treat today as already dismissed for every asset, exactly as
-    an explicit unplug would. A genuinely new miss after startup still
-    triggers the catch-up normally.
-    """
-    return {
-        asset.asset_id: now.astimezone(asset_zoneinfo(asset)).date()
-        for asset in assets
-    }
-
-
 class Application:
     """Main orchestrator — wires and runs all platform loops.
 
@@ -518,10 +497,15 @@ class Application:
         # Last seen plugged state per asset — detects the plugged→unplugged
         # transition that cancels an active force charge.
         self._ev_prev_plugged: dict[str, bool] = {}
-        # Local calendar date, per asset, whose missed deadline was dismissed
-        # by an unplug — resolve_active_goals stops chasing that date's
-        # target so a later replug follows the next scheduled plan instead
-        # of resuming the forced full-power catch-up. See _check_force_charge_reset.
+        # When each car was plugged in (None = unplugged or not yet seen).
+        # A missed deadline is only caught up at full power if the car was
+        # plugged in when it passed and has stayed plugged in since — see
+        # resolve_active_goals. Set on the first plugged observation (so a
+        # restart counts as a fresh plug-in) and cleared on unplug.
+        self._ev_plugged_since: dict[str, datetime | None] = {}
+        # Local date per asset whose target was already met today — written
+        # by resolve_active_goals so SoC dropping afterwards (the car being
+        # driven) doesn't resurrect that deadline as overdue.
         self._ev_overdue_dismissed: dict[str, date] = {}
         # Last seen `available` state per EV device — detects a car
         # connecting so we can replan immediately instead of waiting up to
@@ -620,16 +604,6 @@ class Application:
             asset = next(a for a in self._ev_assets if a.device_id == contrib.device_id)
             contrib.set_disabled(asset.asset_id in self._disabled_chargepoints)
             contrib.set_force_charge(self._ev_force_charge.get(asset.asset_id))
-        # Suppress the missed-deadline catch-up for today on every restart:
-        # _ev_prev_plugged/_ev_overdue_dismissed are in-memory only, so a
-        # restart loses whatever plug history would normally decide whether
-        # an already-passed deadline should still be force-charged. Rather
-        # than guess, assume the worst (the car may have been away for part
-        # of the downtime) and require a fresh miss — today's date is
-        # pre-dismissed for every asset, same as an explicit unplug would do.
-        self._ev_overdue_dismissed = _initial_overdue_dismissal(
-            self._ev_assets, datetime.now(timezone.utc)
-        )
         _log.info(
             "Loaded %d EV assets (%d weekly plans, %d day overrides, %d forced, %d disabled)",
             len(self._ev_assets), len(self._ev_weekly_plans),
@@ -1052,6 +1026,7 @@ class Application:
         ev_goals = resolve_active_goals(
             active_assets, device_states, self._ev_weekly_plans, self._ev_day_overrides,
             overdue_dismissed=self._ev_overdue_dismissed,
+            plugged_since=self._ev_plugged_since,
             feasibility_margin=self._ev_feasibility_margin,
         )
         self._last_ev_goals = ev_goals
@@ -1181,8 +1156,8 @@ class Application:
         self, device_states: dict[str, Any], now: datetime | None = None,
     ) -> None:
         """Auto-clear force charges: on plugged→unplugged transition or when
-        the target SoC is reached.  Also dismisses today's missed-deadline
-        catch-up on unplug (see below).
+        the target SoC is reached.  Also tracks when each car was plugged in,
+        which gates the missed-deadline catch-up (see resolve_active_goals).
 
         Uses the plug state from ``extra["plugged"]`` — not ``available``,
         which also drops on MQTT bridge loss; a broker hiccup or restart must
@@ -1202,26 +1177,19 @@ class Application:
             prev = self._ev_prev_plugged.get(asset.asset_id)
             self._ev_prev_plugged[asset.asset_id] = plugged
 
-            if prev is True and not plugged:
-                # Unplugged: dismiss today's target unconditionally, not only
-                # when the goal happens to already be overdue at this exact
-                # instant. Regression: a car unplugged while merely
-                # `infeasible` (deadline still ahead but unreachable at max
-                # power) — or with no goal at all, e.g. already at target —
-                # would sail past its deadline while away with nothing
-                # watching, then resume forcing full power the moment it
-                # reconnected, because dismissal was never recorded. Dismissal
-                # only ever suppresses the *overdue* catch-up for a deadline
-                # that has already passed by the time it's checked — it has
-                # no effect if the deadline is still ahead on replug, so this
-                # is safe to do every time regardless of the goal's state.
-                dismissed_day = now.astimezone(asset_zoneinfo(asset)).date()
-                self._ev_overdue_dismissed[asset.asset_id] = dismissed_day
-                _log.info(
-                    "EV %r unplugged — dismissing any missed target for %s, "
-                    "will follow the next scheduled plan on replug",
-                    asset.asset_id, dismissed_day.isoformat(),
-                )
+            if plugged and prev is not True:
+                # Plugged in (or first seen plugged after a restart — how
+                # long it had been plugged before is unknown, so it counts
+                # as a fresh plug-in and no pre-restart deadline is chased).
+                self._ev_plugged_since[asset.asset_id] = now
+            elif not plugged:
+                if prev is True:
+                    _log.info(
+                        "EV %r unplugged — a deadline passing while away won't "
+                        "be caught up; will follow the next scheduled plan on replug",
+                        asset.asset_id,
+                    )
+                self._ev_plugged_since[asset.asset_id] = None
 
             target = self._ev_force_charge.get(asset.asset_id)
             if target is None:
@@ -1843,6 +1811,7 @@ class Application:
                 self._ev_assets, device_states,
                 self._ev_weekly_plans, self._ev_day_overrides,
                 overdue_dismissed=self._ev_overdue_dismissed,
+                plugged_since=self._ev_plugged_since,
                 feasibility_margin=self._ev_feasibility_margin,
             )
             result = []
