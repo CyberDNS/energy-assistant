@@ -27,6 +27,9 @@ _log = logging.getLogger(__name__)
 
 _THRESHOLD_TYPE = "threshold"
 
+# Sentinel: plug tracking unavailable — don't gate the overdue catch-up on it.
+_ALWAYS = object()
+
 
 def parse_ev_assets(raw_assets: dict[str, Any]) -> list[EvChargingAsset]:
     """Parse the ``assets:`` section of the YAML config into ``EvChargingAsset`` objects.
@@ -151,6 +154,7 @@ def resolve_active_goals(
     now: datetime | None = None,
     overdue_dismissed: dict[str, date] | None = None,
     feasibility_margin: float = _FEASIBILITY_MARGIN,
+    plugged_since: dict[str, datetime | None] | None = None,
 ) -> list[EvChargingGoal]:
     """Compute an ``EvChargingGoal`` for every asset that has an active target.
 
@@ -167,14 +171,22 @@ def resolve_active_goals(
     now:
         Override "now" for testing.  Defaults to ``datetime.now(UTC)``.
     overdue_dismissed:
-        asset_id → local date whose missed deadline should no longer be
-        chased (set when the car was unplugged while overdue for that
-        date — see ``Application._check_force_charge_reset``).  A later
-        replug on the same date then follows the next scheduled target
-        instead of resuming the forced full-power catch-up.
+        asset_id → local date whose target was already met. Written here
+        (mutated in place) the moment today's target is reached, so SoC
+        dropping afterwards — the car being driven — doesn't resurrect that
+        deadline as overdue.
     feasibility_margin:
         Safety buffer passed to ``build_goal_from_parts`` — see there.
         Overridable via ``controller.ev_feasibility_margin`` in config.yaml.
+    plugged_since:
+        asset_id → when the car was plugged in (None = unplugged / not yet
+        seen), tracked by ``Application._check_force_charge_reset``. A missed
+        deadline is only caught up at full power if the car was plugged in
+        when it passed and has stayed plugged in since: a deadline that
+        passed while the car was away — unplugged the evening before, driven
+        off before the deadline, or during a container restart — is left
+        behind, and the car follows the next scheduled target on replug.
+        ``None`` (the argument itself) disables the gate, e.g. in tests.
     """
     if now is None:
         now = datetime.now(timezone.utc)
@@ -219,6 +231,9 @@ def resolve_active_goals(
             now,
             current_soc,
             overdue_dismissed.get(asset.asset_id),
+            catch_up_if_plugged_since=(
+                _ALWAYS if plugged_since is None else plugged_since.get(asset.asset_id)
+            ),
         )
         if target_info is None:
             # No schedule: include connected EV as PV-only absorber so the plan
@@ -330,6 +345,7 @@ def _resolve_target(
     now: datetime,
     current_soc: float,
     dismissed_day: date | None = None,
+    catch_up_if_plugged_since: "datetime | None | object" = None,
 ) -> tuple[float, datetime, bool] | None:
     """Return the next (target_soc_pct, target_by UTC, overdue) deadline, or None.
 
@@ -341,11 +357,14 @@ def _resolve_target(
     forcing the car toward today's target instead of silently rolling over
     to the next scheduled day.  This naturally stops at local midnight, once
     "today" advances past the missed deadline's date — or sooner, if
-    *dismissed_day* (set when the car was unplugged while overdue for that
-    date) matches: the catch-up is then skipped and the walk moves on to the
-    next scheduled day, so a replug follows the new plan rather than
-    resuming the forced full-power chase of the deadline that was missed
-    while the car was away.
+    *dismissed_day* (today's target was already met once) matches: the
+    catch-up is then skipped and the walk moves on to the next scheduled
+    day.
+
+    *catch_up_if_plugged_since* is the car's plug-in time: the overdue
+    catch-up only applies if it is at or before the missed deadline (the car
+    was plugged in when it passed). ``None`` = not plugged in / unknown → no
+    catch-up; ``_ALWAYS`` disables the check.
     """
     tz = asset_zoneinfo(asset)
     now_local = now.astimezone(tz)
@@ -360,8 +379,14 @@ def _resolve_target(
         h, m = _parse_hhmm(hhmm)
         deadline_local = datetime(day.year, day.month, day.day, h, m, tzinfo=tz)
         if deadline_local <= now_local:
-            if days_ahead == 0 and current_soc < soc and day != dismissed_day:
-                return soc, deadline_local.astimezone(timezone.utc), True
+            deadline_utc = deadline_local.astimezone(timezone.utc)
+            plugged_at_deadline = catch_up_if_plugged_since is _ALWAYS or (
+                isinstance(catch_up_if_plugged_since, datetime)
+                and catch_up_if_plugged_since <= deadline_utc
+            )
+            if (days_ahead == 0 and current_soc < soc and day != dismissed_day
+                    and plugged_at_deadline):
+                return soc, deadline_utc, True
             continue
 
         return soc, deadline_local.astimezone(timezone.utc), False
