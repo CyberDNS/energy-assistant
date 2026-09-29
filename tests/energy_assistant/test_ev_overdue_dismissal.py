@@ -1,231 +1,176 @@
-"""Tests for Application._check_force_charge_reset's missed-deadline dismissal.
+"""Tests for the missed-deadline catch-up gate.
 
-Regression 1: unplugging a car that was in the forced full-power catch-up
-(overdue) state, then replugging it later the same day, used to resume
-chasing the same missed deadline immediately — instead of following the
-next scheduled plan, as if the car had never been unplugged at all.
+A missed deadline is only caught up at full power if the car was plugged in
+when it passed and has stayed plugged in since. Application tracks the
+plug-in time (``_ev_plugged_since``) in ``_check_force_charge_reset``;
+``resolve_active_goals`` applies the rule.
 
-Regression 2: dismissal only fired when the goal was already `overdue` at
-the exact instant of the unplug. A car unplugged while merely `infeasible`
-(deadline still ahead but unreachable at max power) — or with no goal at
-all, e.g. already at target — would sail past its deadline while away with
-nothing watching, then resume forcing full power the moment it reconnected,
-because no dismissal was ever recorded. Dismissal is now unconditional on
-any unplug: it only ever suppresses the overdue catch-up for a deadline
-that has *already passed* by the time it's checked, so it's a no-op if the
-deadline is still ahead on replug — safe to always record.
+This replaced date-based dismissal on unplug and at startup, which kept
+leaking cases:
+- dismissal only fired if the goal was already overdue at the instant of
+  the unplug, so a car unplugged while merely infeasible — or with no goal
+  at all — resumed forcing full power on return;
+- dismissal was keyed to the calendar day of the unplug, so a car unplugged
+  the evening before (2026-09-29, schlumpf) had the next morning's deadline
+  pass while it was away and was force-charged on its return that
+  afternoon.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
+from datetime import date, datetime, timedelta, timezone
 
-from energy_assistant.assets.ev import EvChargingAsset, EvWeeklyTarget, build_goal_from_parts
-from energy_assistant.assets.loader import asset_zoneinfo, resolve_active_goals
+from energy_assistant.assets.ev import (
+    ChargeCurvePoint,
+    EvChargingAsset,
+    EvDayOverride,
+    EvWeeklyTarget,
+)
+from energy_assistant.assets.loader import resolve_active_goals
 from energy_assistant.core.models import DeviceState
-from energy_assistant.server import Application, _initial_overdue_dismissal
+from energy_assistant.server import Application
 
 NOW = datetime(2026, 7, 15, 10, 0, tzinfo=timezone.utc)  # 12:00 Europe/Berlin
+WEEKLY_90_BY_0600 = {
+    wd: EvWeeklyTarget(weekday=wd, enabled=True, target_soc_pct=90.0, target_by="06:00")
+    for wd in range(1, 8)
+}
 
 
-def _asset() -> EvChargingAsset:
-    return EvChargingAsset(
-        asset_id="ev1", device_id="wallbox", label="EV",
-        capacity_kwh=60.0, max_charge_kw=11.0,
-    )
+def _asset(**kw) -> EvChargingAsset:
+    params = dict(asset_id="ev1", device_id="wallbox", label="EV",
+                  capacity_kwh=60.0, max_charge_kw=11.0, timezone="Europe/Berlin")
+    params.update(kw)
+    return EvChargingAsset(**params)
 
 
-def _overdue_goal(now: datetime) -> object:
-    return build_goal_from_parts(
-        asset_id="ev1", device_id="wallbox", capacity_kwh=60.0,
-        max_charge_kw=11.0, min_charge_kw=4.14, charge_limit_soc_pct=90.0,
-        target_soc_pct=90.0, target_by=now - timedelta(hours=4),
-        charge_curve=[], current_soc_pct=40.0, connected=True,
-        now=now, overdue=True,
-    )
-
-
-def _plugged_state(plugged: bool, soc: float = 40.0) -> DeviceState:
+def _state(plugged: bool, soc: float = 40.0) -> DeviceState:
     return DeviceState(
-        device_id="wallbox", power_w=0.0, soc_pct=soc, available=True,
+        device_id="wallbox", power_w=0.0, soc_pct=soc, available=plugged,
         extra={"plugged": plugged},
     )
 
 
-def _app_with_overdue_goal() -> Application:
+def _app(asset: EvChargingAsset | None = None) -> Application:
     app = Application()
-    app._ev_assets = [_asset()]
+    app._ev_assets = [asset or _asset()]
     app._ev_force_charge = {}
     app._ev_prev_plugged = {}
+    app._ev_plugged_since = {}
     app._ev_overdue_dismissed = {}
-    app._last_ev_goals = [_overdue_goal(NOW)]
     return app
 
 
-async def test_unplug_while_overdue_records_dismissal() -> None:
-    app = _app_with_overdue_goal()
-
-    # Plugged in, then unplugged.
-    await app._check_force_charge_reset({"wallbox": _plugged_state(True)}, now=NOW)
-    await app._check_force_charge_reset({"wallbox": _plugged_state(False)}, now=NOW)
-
-    assert app._ev_overdue_dismissed.get("ev1") == NOW.astimezone(ZoneInfo("Europe/Berlin")).date()
+async def _tick(app: Application, plugged: bool, at: datetime, soc: float = 40.0) -> None:
+    await app._check_force_charge_reset({"wallbox": _state(plugged, soc)}, now=at)
 
 
-async def test_dismissal_happens_even_when_goal_is_only_infeasible_not_overdue() -> None:
-    """The deadline is still ahead (merely infeasible, not yet overdue) at
-    the moment of unplug — dismissal must still be recorded, because the
-    deadline can quietly pass while the car is away with nobody watching."""
-    app = _app_with_overdue_goal()
-    app._last_ev_goals = [
-        build_goal_from_parts(
-            asset_id="ev1", device_id="wallbox", capacity_kwh=60.0,
-            max_charge_kw=11.0, min_charge_kw=4.14, charge_limit_soc_pct=90.0,
-            target_soc_pct=90.0, target_by=NOW + timedelta(minutes=30),
-            charge_curve=[], current_soc_pct=10.0, connected=True, now=NOW,
-        )
-    ]
-    assert app._last_ev_goals[0].infeasible
-    assert not app._last_ev_goals[0].overdue
-
-    await app._check_force_charge_reset({"wallbox": _plugged_state(True)}, now=NOW)
-    await app._check_force_charge_reset({"wallbox": _plugged_state(False)}, now=NOW)
-
-    assert app._ev_overdue_dismissed.get("ev1") == NOW.astimezone(ZoneInfo("Europe/Berlin")).date()
-
-
-async def test_dismissal_happens_even_with_no_goal_at_all() -> None:
-    """No goal exists at all (e.g. target already met) — dismissal must
-    still be recorded on unplug, since a later drop in SoC (the car being
-    driven) after the deadline passes must not resurrect it as overdue."""
-    app = _app_with_overdue_goal()
-    app._last_ev_goals = []
-
-    await app._check_force_charge_reset({"wallbox": _plugged_state(True)}, now=NOW)
-    await app._check_force_charge_reset({"wallbox": _plugged_state(False)}, now=NOW)
-
-    assert app._ev_overdue_dismissed.get("ev1") == NOW.astimezone(ZoneInfo("Europe/Berlin")).date()
-
-
-async def test_dismissal_blocks_overdue_on_replug_same_day() -> None:
-    """End-to-end: after the unplug dismisses today's missed target,
-    resolve_active_goals must not return it as overdue again on replug."""
-    app = _app_with_overdue_goal()
-    await app._check_force_charge_reset({"wallbox": _plugged_state(True)}, now=NOW)
-    await app._check_force_charge_reset({"wallbox": _plugged_state(False)}, now=NOW)
-    assert app._ev_overdue_dismissed  # sanity: dismissal was recorded
-
-    weekly = {
-        wd: EvWeeklyTarget(weekday=wd, enabled=True, target_soc_pct=90.0, target_by="06:00")
-        for wd in range(1, 8)
-    }
-    goals = resolve_active_goals(
-        app._ev_assets,
-        {"wallbox": _plugged_state(True, soc=40.0)},  # replugged
-        {"ev1": weekly},
-        {},
-        now=NOW,
-        overdue_dismissed=app._ev_overdue_dismissed,
+def _goals(app: Application, at: datetime, soc: float, overrides=None):
+    return resolve_active_goals(
+        app._ev_assets, {"wallbox": _state(True, soc)},
+        {"ev1": WEEKLY_90_BY_0600}, {"ev1": overrides or {}},
+        now=at, overdue_dismissed=app._ev_overdue_dismissed,
+        plugged_since=app._ev_plugged_since,
     )
-    assert len(goals) == 1
-    assert not goals[0].overdue
 
 
 # ---------------------------------------------------------------------------
-# Startup: don't resume overdue catch-up after a restart
+# Plug tracking
 # ---------------------------------------------------------------------------
 
 
-def test_initial_overdue_dismissal_covers_every_asset_today() -> None:
-    asset_a = _asset()
-    asset_b = EvChargingAsset(
-        asset_id="ev2", device_id="wallbox2", label="EV2",
-        capacity_kwh=40.0, max_charge_kw=7.4,
-    )
-    dismissed = _initial_overdue_dismissal([asset_a, asset_b], NOW)
-    expected_day = NOW.astimezone(asset_zoneinfo(asset_a)).date()
-    assert dismissed == {"ev1": expected_day, "ev2": expected_day}
+async def test_plug_in_time_is_tracked_and_cleared_on_unplug() -> None:
+    app = _app()
+    await _tick(app, False, NOW)
+    assert app._ev_plugged_since["ev1"] is None
+    plug_in = NOW + timedelta(minutes=5)
+    await _tick(app, True, plug_in)
+    assert app._ev_plugged_since["ev1"] == plug_in
+    await _tick(app, True, plug_in + timedelta(minutes=5))       # staying plugged
+    assert app._ev_plugged_since["ev1"] == plug_in
+    await _tick(app, False, plug_in + timedelta(minutes=10))
+    assert app._ev_plugged_since["ev1"] is None
 
 
-async def test_startup_dismissal_prevents_overdue_on_first_cycle_after_restart() -> None:
-    """A car that's already overdue for today's deadline when the container
-    comes back up must NOT immediately start forcing full power — it should
-    behave as if it had just been unplugged and follow the next plan."""
-    asset = _asset()
-    dismissed = _initial_overdue_dismissal([asset], NOW)
+async def test_first_observation_after_restart_counts_as_fresh_plug_in() -> None:
+    """How long the car was plugged before a restart is unknown, so a
+    deadline that passed before the restart must not be caught up."""
+    app = _app()
+    await _tick(app, True, NOW)
+    assert app._ev_plugged_since["ev1"] == NOW
+    goals = _goals(app, NOW, soc=40.0)               # 06:00 today already passed
+    assert len(goals) == 1 and not goals[0].overdue
 
-    weekly = {
-        wd: EvWeeklyTarget(weekday=wd, enabled=True, target_soc_pct=90.0, target_by="06:00")
-        for wd in range(1, 8)
-    }
-    goals = resolve_active_goals(
-        [asset],
-        {"wallbox": _plugged_state(True, soc=40.0)},
-        {"ev1": weekly},
-        {},
-        now=NOW,
-        overdue_dismissed=dismissed,
-    )
+
+# ---------------------------------------------------------------------------
+# The rule
+# ---------------------------------------------------------------------------
+
+
+async def test_car_plugged_through_the_deadline_is_still_caught_up() -> None:
+    """The catch-up itself must keep working: plugged in overnight, deadline
+    missed (e.g. unreachable), still plugged → keep forcing toward it."""
+    app = _app()
+    await _tick(app, True, datetime(2026, 7, 14, 20, 0, tzinfo=timezone.utc))  # evening before
+    goals = _goals(app, NOW, soc=40.0)
+    assert len(goals) == 1
+    assert goals[0].overdue
+    assert goals[0].target_by == datetime(2026, 7, 15, 4, 0, tzinfo=timezone.utc)
+
+
+async def test_unplugged_while_catching_up_then_back_follows_next_plan() -> None:
+    app = _app()
+    await _tick(app, True, datetime(2026, 7, 14, 20, 0, tzinfo=timezone.utc))
+    assert _goals(app, NOW, soc=40.0)[0].overdue
+    await _tick(app, False, NOW + timedelta(minutes=10))
+    back = NOW + timedelta(hours=3)
+    await _tick(app, True, back)
+    goals = _goals(app, back, soc=35.0)
+    assert not goals[0].overdue
+    assert goals[0].target_by == datetime(2026, 7, 16, 4, 0, tzinfo=timezone.utc)   # tomorrow
+
+
+async def test_schlumpf_2026_09_29_unplugged_evening_before_deadline_passes_while_away() -> None:
+    """Replay: unplugged on the 28th, away overnight while the 29th 06:00
+    deadline passes, back at 16:42 on the 29th at 28% — must follow the
+    next day's plan, not force-charge toward the deadline missed while away."""
+    app = _app(_asset(capacity_kwh=52.0, charge_curve=[
+        ChargeCurvePoint(90.0, 0.90), ChargeCurvePoint(100.0, 0.55)]))
+    await _tick(app, True, datetime(2026, 9, 28, 15, 0, tzinfo=timezone.utc))
+    await _tick(app, False, datetime(2026, 9, 28, 16, 30, tzinfo=timezone.utc))  # 18:30 local
+    back = datetime(2026, 9, 29, 14, 42, tzinfo=timezone.utc)                    # 16:42 local
+    await _tick(app, True, back, soc=28.0)
+    goals = _goals(app, back, soc=28.0)
     assert len(goals) == 1
     assert not goals[0].overdue
+    assert goals[0].target_by == datetime(2026, 9, 30, 4, 0, tzinfo=timezone.utc)
 
 
-async def test_real_world_override_unplug_then_return_after_deadline_plans_tomorrow() -> None:
-    """Reproduces the 2026-09-27 log: day override 35% by 11:00 local, goal
-    goes infeasible, car is unplugged at 10:46 local (deadline still ahead,
-    so NOT overdue yet), the deadline passes while away, car returns at
-    13:29 local well below 35%. It must plan for tomorrow's weekly target
-    instead of force-charging toward today's already-blown override."""
-    from datetime import date
-    from energy_assistant.assets.ev import EvDayOverride
-
+async def test_override_unplugged_before_its_deadline_then_back_after_plans_tomorrow() -> None:
+    """Replay of 2026-09-27: override 35% by 11:00, infeasible, unplugged at
+    10:46 (deadline still ahead), back at 13:29 at 25%."""
+    app = _app(_asset(capacity_kwh=77.0, min_charge_kw=4.14, charge_limit_soc_pct=90.0,
+                      charge_curve=[ChargeCurvePoint(90.0, 0.90), ChargeCurvePoint(100.0, 0.55)]))
     today = date(2026, 9, 27)
-    weekly = {
-        wd: EvWeeklyTarget(weekday=wd, enabled=True, target_soc_pct=90.0, target_by="06:00")
-        for wd in range(1, 8)
-    }
     overrides = {today: EvDayOverride(date=today, skip=False, target_soc_pct=35.0, target_by="11:00")}
-
-    from energy_assistant.assets.ev import ChargeCurvePoint
-
-    app = Application()
-    # banzert's real parameters from the deployed config
-    app._ev_assets = [EvChargingAsset(
-        asset_id="ev1", device_id="wallbox", label="Banzert",
-        capacity_kwh=77.0, max_charge_kw=11.0, min_charge_kw=4.14,
-        charge_limit_soc_pct=90.0, timezone="Europe/Berlin",
-        charge_curve=[ChargeCurvePoint(90.0, 0.90), ChargeCurvePoint(100.0, 0.55)],
-    )]
-    app._ev_force_charge = {}
-    app._ev_prev_plugged = {}
-    app._ev_overdue_dismissed = {}
-
-    # 10:07 local: override set, goal is infeasible (not overdue).
+    await _tick(app, True, datetime(2026, 9, 26, 18, 0, tzinfo=timezone.utc), soc=23.0)
     t_set = datetime(2026, 9, 27, 8, 7, tzinfo=timezone.utc)
-    goals = resolve_active_goals(
-        app._ev_assets, {"wallbox": _plugged_state(True, soc=23.0)},
-        {"ev1": weekly}, {"ev1": overrides},
-        now=t_set, overdue_dismissed=app._ev_overdue_dismissed,
-    )
-    app._last_ev_goals = goals
+    goals = _goals(app, t_set, soc=23.0, overrides=overrides)
     assert goals[0].infeasible and not goals[0].overdue
 
-    # 10:46 local: unplugged while still merely infeasible.
-    t_unplug = datetime(2026, 9, 27, 8, 46, tzinfo=timezone.utc)
-    await app._check_force_charge_reset({"wallbox": _plugged_state(True, soc=30.0)}, now=t_unplug)
-    await app._check_force_charge_reset({"wallbox": _plugged_state(False, soc=30.0)}, now=t_unplug)
+    await _tick(app, False, datetime(2026, 9, 27, 8, 46, tzinfo=timezone.utc), soc=30.0)
+    back = datetime(2026, 9, 27, 11, 29, tzinfo=timezone.utc)
+    await _tick(app, True, back, soc=25.0)
+    goals = _goals(app, back, soc=25.0, overrides=overrides)
+    assert not goals[0].overdue and not goals[0].infeasible
+    assert goals[0].target_soc_pct == 90.0
+    assert goals[0].target_by == datetime(2026, 9, 28, 4, 0, tzinfo=timezone.utc)
 
-    # 13:29 local: back home, well below 35%, deadline long passed.
-    t_back = datetime(2026, 9, 27, 11, 29, tzinfo=timezone.utc)
-    goals = resolve_active_goals(
-        app._ev_assets, {"wallbox": _plugged_state(True, soc=25.0)},
-        {"ev1": weekly}, {"ev1": overrides},
-        now=t_back, overdue_dismissed=app._ev_overdue_dismissed,
-    )
-    assert len(goals) == 1
-    g = goals[0]
-    assert not g.overdue
-    assert not g.infeasible
-    assert g.target_soc_pct == 90.0
-    assert g.target_by == datetime(2026, 9, 28, 4, 0, tzinfo=timezone.utc)  # tomorrow 06:00 local
+
+async def test_away_car_is_not_shown_as_overdue() -> None:
+    """While the car is unplugged its goal is still computed (for the UI and
+    logs); it must point at the next target, not claim to force full power."""
+    app = _app()
+    await _tick(app, False, NOW)
+    goals = _goals(app, NOW, soc=40.0)
+    assert not goals[0].overdue
