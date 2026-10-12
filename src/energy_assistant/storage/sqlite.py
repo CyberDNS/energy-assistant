@@ -7,6 +7,12 @@ Schema
 A single ``measurements`` table with a composite primary key on
 ``(device_id, timestamp)``.  No external database server is required.
 
+Retention
+---------
+History tables are not self-limiting: the owner calls ``purge_before()``
+periodically.  ``enable_incremental_vacuum()`` converts the DB once so that
+purged pages are actually returned to the filesystem.
+
 Lifecycle
 ---------
 Call ``start()`` before the first write/query and ``stop()`` on shutdown::
@@ -80,10 +86,16 @@ WHERE device_id = ? AND timestamp BETWEEN ? AND ?
 ORDER BY timestamp
 """
 
-_CREATE_INDEX = """
-CREATE INDEX IF NOT EXISTS idx_device_timestamp
-    ON measurements (device_id, timestamp)
-"""
+# Redundant with the measurements primary key (same columns) — it only
+# doubled the index size on disk.  Dropped on startup for existing DBs.
+_DROP_REDUNDANT_INDEX = "DROP INDEX IF EXISTS idx_device_timestamp"
+
+_PURGE_MEASUREMENTS = "DELETE FROM measurements WHERE timestamp < ?"
+
+_PURGE_LEDGER_HISTORY = "DELETE FROM ledger_history WHERE timestamp < ?"
+
+# PRAGMA auto_vacuum value for INCREMENTAL mode.
+_AUTO_VACUUM_INCREMENTAL = 2
 
 _CREATE_EV_WEEKLY_PLAN_TABLE = """
 CREATE TABLE IF NOT EXISTS ev_weekly_plan (
@@ -236,7 +248,7 @@ class SqliteStorageBackend:
         await self._db.execute(_CREATE_EV_DISABLED_TABLE)
         # Superseded by ev_weekly_plan + ev_day_overrides
         await self._db.execute("DROP TABLE IF EXISTS ev_targets")
-        await self._db.execute(_CREATE_INDEX)
+        await self._db.execute(_DROP_REDUNDANT_INDEX)
         await self._db.execute(_CREATE_LEDGER_HISTORY_INDEX)
         await self._db.commit()
 
@@ -263,6 +275,45 @@ class SqliteStorageBackend:
             ),
         )
         await self._db.commit()
+
+    async def purge_before(self, cutoff: datetime) -> int:
+        """Delete measurements and ledger history older than *cutoff*.
+
+        Freed pages are returned to the filesystem via ``incremental_vacuum``
+        (a no-op until ``enable_incremental_vacuum()`` has converted the DB).
+        Returns the number of rows deleted.
+        """
+        assert self._db is not None, "Call start() before purge_before()"
+        ts = cutoff.isoformat()
+        deleted = 0
+        for sql in (_PURGE_MEASUREMENTS, _PURGE_LEDGER_HISTORY):
+            async with self._db.execute(sql, (ts,)) as cursor:
+                deleted += max(cursor.rowcount, 0)
+        await self._db.commit()
+        # incremental_vacuum frees one page per step — the result rows must
+        # be consumed or only the first page is released.
+        async with self._db.execute("PRAGMA incremental_vacuum") as cursor:
+            await cursor.fetchall()
+        await self._db.commit()
+        return deleted
+
+    async def enable_incremental_vacuum(self) -> bool:
+        """Switch the DB to ``auto_vacuum=INCREMENTAL``, rebuilding it once.
+
+        Changing ``auto_vacuum`` on an existing DB only takes effect after a
+        full ``VACUUM``, which also shrinks the file to its live data.  Runs
+        only when the mode is not already set, so the rebuild happens once.
+        Returns True if the VACUUM was performed.
+        """
+        assert self._db is not None, "Call start() before enable_incremental_vacuum()"
+        async with self._db.execute("PRAGMA auto_vacuum") as cursor:
+            row = await cursor.fetchone()
+        if row is not None and int(row[0]) == _AUTO_VACUUM_INCREMENTAL:
+            return False
+        await self._db.commit()
+        await self._db.execute(f"PRAGMA auto_vacuum = {_AUTO_VACUUM_INCREMENTAL}")
+        await self._db.execute("VACUUM")
+        return True
 
     async def query(
         self,
