@@ -574,9 +574,6 @@ class Application:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._storage = SqliteStorageBackend(self._db_path)
         await self._storage.start()
-        await self._purge_history()
-        if await self._storage.enable_incremental_vacuum():
-            _log.info("Compacted history DB (one-time VACUUM)")
 
         # 5 — Event bus
         self._bus = EventBus()
@@ -843,13 +840,27 @@ class Application:
             _log.info("Purged %d history rows older than %s", deleted, cutoff.isoformat())
 
     async def _retention_loop(self) -> None:
-        """Purge expired history once per hour (startup purge runs in start())."""
+        """Purge expired history now and then once per hour.
+
+        Runs in the background rather than in start(): on a large legacy DB
+        the first purge takes minutes, and blocking startup that long got the
+        add-on killed (and the work rolled back) before it ever finished.
+        The first pass also performs the one-time migration — dropping the
+        redundant index and the VACUUM — once the purge has shrunk the data,
+        so both are quick.
+        """
+        first = True
         while True:
-            await asyncio.sleep(_RETENTION_INTERVAL_S)
             try:
                 await self._purge_history()
+                if first:
+                    await self._storage.drop_redundant_index()
+                    if await self._storage.enable_incremental_vacuum():
+                        _log.info("Compacted history DB (one-time VACUUM)")
+                    first = False
             except Exception as exc:  # noqa: BLE001
-                _log.warning("History purge failed: %s", exc)
+                _log.warning("History maintenance failed: %s", exc)
+            await asyncio.sleep(_RETENTION_INTERVAL_S)
 
     # ------------------------------------------------------------------
     # Polling loop
