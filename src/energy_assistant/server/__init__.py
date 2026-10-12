@@ -98,6 +98,9 @@ from ..storage.sqlite import SqliteStorageBackend
 
 _log = logging.getLogger(__name__)
 
+# How often expired history rows are purged from SQLite.
+_RETENTION_INTERVAL_S = 3600.0
+
 
 @dataclasses.dataclass
 class _TariffZone:
@@ -483,6 +486,7 @@ class Application:
         self._plan_interval_s: float
         self._poll_interval_s: float
         self._control_interval_s: float
+        self._history_retention: timedelta
         self._dry_run: bool
         self._dry_run_log_gate = ChangeGate()
         self._first_poll_done: asyncio.Event
@@ -548,6 +552,11 @@ class Application:
         # build_goal_from_parts. 1.2 = require 20% more time than the bare
         # minimum before declaring a deadline still reachable.
         self._ev_feasibility_margin = float(ctl.get("ev_feasibility_margin", _FEASIBILITY_MARGIN))
+        # Measurements / ledger history older than this are purged.  The
+        # history API serves at most 7 days, so keep one extra day of slack.
+        self._history_retention = timedelta(
+            days=float(self._cfg.server.get("history_retention_days", 8))
+        )
         horizon_h = int(opt.get("horizon_hours", 24))
         self._horizon = timedelta(hours=horizon_h)
 
@@ -565,6 +574,9 @@ class Application:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._storage = SqliteStorageBackend(self._db_path)
         await self._storage.start()
+        await self._purge_history()
+        if await self._storage.enable_incremental_vacuum():
+            _log.info("Compacted history DB (one-time VACUUM)")
 
         # 5 — Event bus
         self._bus = EventBus()
@@ -683,6 +695,7 @@ class Application:
             asyncio.create_task(self._planning_loop(), name="planning"),
             asyncio.create_task(self._control_task(), name="control"),
             asyncio.create_task(self._api_task(port), name="api"),
+            asyncio.create_task(self._retention_loop(), name="retention"),
         ]
         _log.info("All loops started")
 
@@ -819,6 +832,26 @@ class Application:
             asyncio.create_task(self._run_plan())
 
     # ------------------------------------------------------------------
+    # History retention
+    # ------------------------------------------------------------------
+
+    async def _purge_history(self) -> None:
+        """Delete measurements and ledger history older than the retention."""
+        cutoff = datetime.now(timezone.utc) - self._history_retention
+        deleted = await self._storage.purge_before(cutoff)
+        if deleted:
+            _log.info("Purged %d history rows older than %s", deleted, cutoff.isoformat())
+
+    async def _retention_loop(self) -> None:
+        """Purge expired history once per hour (startup purge runs in start())."""
+        while True:
+            await asyncio.sleep(_RETENTION_INTERVAL_S)
+            try:
+                await self._purge_history()
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("History purge failed: %s", exc)
+
+    # ------------------------------------------------------------------
     # Polling loop
     # ------------------------------------------------------------------
 
@@ -852,7 +885,8 @@ class Application:
                             power_w=state.power_w,
                             energy_kwh=state.energy_kwh,
                             soc_pct=state.soc_pct,
-                            extra=state.extra,
+                            # extra is never read back from history — storing
+                            # its JSON on every poll only bloated the DB.
                         )
                     )
                 except Exception as exc:  # noqa: BLE001

@@ -107,6 +107,9 @@ controller:
 server:
   # Port for the built-in web UI and REST API.
   port: 8088
+  # Days of measurement / battery-ledger history kept in the SQLite DB.
+  # Older rows are purged hourly. The history API serves at most 7 days.
+  history_retention_days: 8
 
 # ---------------------------------------------------------------------------
 # Integrations
