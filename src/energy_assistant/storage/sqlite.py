@@ -87,12 +87,24 @@ ORDER BY timestamp
 """
 
 # Redundant with the measurements primary key (same columns) — it only
-# doubled the index size on disk.  Dropped on startup for existing DBs.
+# doubled the index size on disk.  Dropped by drop_redundant_index(), after
+# the purge has shrunk it (dropping a multi-GB index is slow).
 _DROP_REDUNDANT_INDEX = "DROP INDEX IF EXISTS idx_device_timestamp"
 
-_PURGE_MEASUREMENTS = "DELETE FROM measurements WHERE timestamp < ?"
+# Batched deletes: each batch is its own short transaction so other writes
+# interleave and an interrupted purge keeps the progress it made.  Rows are
+# inserted chronologically, so the oldest ones come first in rowid order and
+# the LIMIT scan stops early.
+_PURGE_BATCH_SQL = {
+    table: f"""
+DELETE FROM {table} WHERE rowid IN (
+    SELECT rowid FROM {table} WHERE timestamp < ? LIMIT ?
+)
+"""
+    for table in ("measurements", "ledger_history")
+}
 
-_PURGE_LEDGER_HISTORY = "DELETE FROM ledger_history WHERE timestamp < ?"
+_PURGE_BATCH_SIZE = 10_000
 
 # PRAGMA auto_vacuum value for INCREMENTAL mode.
 _AUTO_VACUUM_INCREMENTAL = 2
@@ -248,7 +260,6 @@ class SqliteStorageBackend:
         await self._db.execute(_CREATE_EV_DISABLED_TABLE)
         # Superseded by ev_weekly_plan + ev_day_overrides
         await self._db.execute("DROP TABLE IF EXISTS ev_targets")
-        await self._db.execute(_DROP_REDUNDANT_INDEX)
         await self._db.execute(_CREATE_LEDGER_HISTORY_INDEX)
         await self._db.commit()
 
@@ -276,26 +287,45 @@ class SqliteStorageBackend:
         )
         await self._db.commit()
 
-    async def purge_before(self, cutoff: datetime) -> int:
+    async def purge_before(
+        self,
+        cutoff: datetime,
+        batch_size: int = _PURGE_BATCH_SIZE,
+    ) -> int:
         """Delete measurements and ledger history older than *cutoff*.
 
-        Freed pages are returned to the filesystem via ``incremental_vacuum``
-        (a no-op until ``enable_incremental_vacuum()`` has converted the DB).
-        Returns the number of rows deleted.
+        Deletes in committed batches of *batch_size* rows (see
+        ``_PURGE_BATCH_SQL``).  Freed pages are returned to the filesystem via
+        ``incremental_vacuum`` (a no-op until ``enable_incremental_vacuum()``
+        has converted the DB).  Returns the number of rows deleted.
         """
         assert self._db is not None, "Call start() before purge_before()"
         ts = cutoff.isoformat()
         deleted = 0
-        for sql in (_PURGE_MEASUREMENTS, _PURGE_LEDGER_HISTORY):
-            async with self._db.execute(sql, (ts,)) as cursor:
-                deleted += max(cursor.rowcount, 0)
-        await self._db.commit()
+        next_log = 1_000_000
+        for sql in _PURGE_BATCH_SQL.values():
+            while True:
+                async with self._db.execute(sql, (ts, batch_size)) as cursor:
+                    n = max(cursor.rowcount, 0)
+                await self._db.commit()
+                deleted += n
+                if deleted >= next_log:
+                    _log.info("History purge: %d rows deleted so far", deleted)
+                    next_log += 1_000_000
+                if n < batch_size:
+                    break
         # incremental_vacuum frees one page per step — the result rows must
         # be consumed or only the first page is released.
         async with self._db.execute("PRAGMA incremental_vacuum") as cursor:
             await cursor.fetchall()
         await self._db.commit()
         return deleted
+
+    async def drop_redundant_index(self) -> None:
+        """Drop the obsolete ``idx_device_timestamp`` index if present."""
+        assert self._db is not None, "Call start() before drop_redundant_index()"
+        await self._db.execute(_DROP_REDUNDANT_INDEX)
+        await self._db.commit()
 
     async def enable_incremental_vacuum(self) -> bool:
         """Switch the DB to ``auto_vacuum=INCREMENTAL``, rebuilding it once.
@@ -310,9 +340,18 @@ class SqliteStorageBackend:
             row = await cursor.fetchone()
         if row is not None and int(row[0]) == _AUTO_VACUUM_INCREMENTAL:
             return False
-        await self._db.commit()
         await self._db.execute(f"PRAGMA auto_vacuum = {_AUTO_VACUUM_INCREMENTAL}")
-        await self._db.execute("VACUUM")
+        # The connection is shared with the polling writes: one may open an
+        # implicit transaction between our commit and the VACUUM, which
+        # SQLite rejects — commit and retry.
+        for attempt in range(5):
+            await self._db.commit()
+            try:
+                await self._db.execute("VACUUM")
+                return True
+            except sqlite3.OperationalError as exc:
+                if "transaction" not in str(exc) or attempt == 4:
+                    raise
         return True
 
     async def query(
