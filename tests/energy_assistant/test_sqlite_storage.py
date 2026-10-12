@@ -98,7 +98,7 @@ class TestSqliteStorageRetention:
 
         assert db_path.stat().st_size < size_full / 2
 
-    async def test_start_drops_redundant_index(self, tmp_path: Path) -> None:
+    async def test_drop_redundant_index(self, tmp_path: Path) -> None:
         db_path = tmp_path / "h.db"
         with sqlite3.connect(db_path) as conn:
             conn.execute(
@@ -110,8 +110,27 @@ class TestSqliteStorageRetention:
 
         backend = SqliteStorageBackend(db_path)
         await backend.start()
+        await backend.drop_redundant_index()
         await backend.stop()
 
         with sqlite3.connect(db_path) as conn:
             names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
         assert "idx_device_timestamp" not in names
+
+    async def test_purge_in_batches_deletes_everything_expired(self, tmp_path: Path) -> None:
+        backend = SqliteStorageBackend(tmp_path / "h.db")
+        await backend.start()
+        now = datetime.now(timezone.utc)
+        start = now - timedelta(days=10)
+        for i in range(10):
+            await backend.write(
+                Measurement(device_id="m", timestamp=start + timedelta(minutes=i), power_w=1.0)
+            )
+        await backend.write(Measurement(device_id="m", timestamp=now, power_w=1.0))
+
+        deleted = await backend.purge_before(now - timedelta(days=1), batch_size=3)
+
+        assert deleted == 10
+        rows = await backend.query("m", start - timedelta(days=1), now)
+        assert [r.timestamp for r in rows] == [now]
+        await backend.stop()
