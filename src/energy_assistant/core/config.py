@@ -61,6 +61,8 @@ class IoBrokerConfig:
     host: str
     port: int = 8087
     api_token: str | None = None
+    username: str | None = None
+    password: str | None = None
     timeout_s: float = 5.0
 
 

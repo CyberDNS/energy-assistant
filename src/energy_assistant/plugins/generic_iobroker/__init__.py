@@ -29,7 +29,8 @@ def _build(device_id: str, cfg: dict[str, Any], ctx: BuildContext) -> object | N
         _log.warning("Device %r (generic_iobroker) requires ioBroker backend — skipping", device_id)
         return None
     iob = ctx.backends.iobroker
-    client = ctx.iobroker_pool.get(host=iob.host, port=iob.port, api_token=iob.api_token)
+    client = ctx.iobroker_pool.get(host=iob.host, port=iob.port, api_token=iob.api_token,
+        username=iob.username, password=iob.password)
     try:
         return GenericIoBrokerDevice(
             device_id=device_id,

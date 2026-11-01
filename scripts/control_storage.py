@@ -55,8 +55,13 @@ def _load_config(path: Path) -> dict:
     if not path.exists():
         print(f"WARNING: {path} not found, using defaults.")
         return {}
+    # Secret-aware loader so ``!secret`` tags (e.g. ioBroker credentials) resolve.
+    from energy_assistant.config.yaml import _make_loader
+    from energy_assistant.secrets import SecretsManager
+
+    loader = _make_loader(SecretsManager(path.parent / "secrets.yaml"))
     with path.open() as f:
-        return yaml.safe_load(f) or {}
+        return yaml.load(f, Loader=loader) or {}  # noqa: S506
 
 
 def _find_device_cfg(cfg: dict, device_id: str) -> dict:
@@ -79,6 +84,8 @@ def _make_client(cfg: dict) -> IoBrokerClient:
         host=iob.get("host", "127.0.0.1"),
         port=int(iob.get("port", 8087)),
         api_token=iob.get("api_token"),
+        username=iob.get("username"),
+        password=iob.get("password"),
     )
 
 
