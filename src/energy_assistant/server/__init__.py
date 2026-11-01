@@ -939,7 +939,12 @@ class Application:
         """Run the MILP optimizer periodically and publish the resulting plan."""
         await self._first_poll_done.wait()  # ensure registry has live SoC before first run
         while True:
-            await self._run_plan()
+            try:
+                await self._run_plan()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("Planning run failed, will retry: %s", exc)
             await asyncio.sleep(self._plan_interval_s)
 
     async def _run_plan(self) -> None:
@@ -1194,7 +1199,15 @@ class Application:
             dt_hours = (now_mono - last) / 3600.0
             last = now_mono
 
-            await self._do_control_tick(dt_hours)
+            try:
+                await self._do_control_tick(dt_hours)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                # A transient failure (e.g. ioBroker restarting during a
+                # container update) must not kill the task: asyncio.gather in
+                # run_forever would propagate it and terminate the process.
+                _log.warning("Control tick failed, will retry: %s", exc)
             await asyncio.sleep(self._control_interval_s)
 
     async def _check_force_charge_reset(
