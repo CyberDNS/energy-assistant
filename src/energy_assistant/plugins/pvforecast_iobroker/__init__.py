@@ -26,5 +26,6 @@ def _build(forecast_id: str, cfg: dict[str, Any], ctx: BuildContext) -> object |
 
     oid = cfg.get("oid", "pvforecast.0.plants.pv.JSONData")
     iob = ctx.backends.iobroker
-    client = ctx.iobroker_pool.get(host=iob.host, port=iob.port, api_token=iob.api_token)
+    client = ctx.iobroker_pool.get(host=iob.host, port=iob.port, api_token=iob.api_token,
+        username=iob.username, password=iob.password)
     return PvForecastIoBrokerForecast(forecast_id=forecast_id, client=client, oid=oid)

@@ -17,6 +17,8 @@ referenced with the ``!secret`` tag::
     backends:
       iobroker:
         api_token: !secret iobroker_api_token
+        username: !secret iobroker_user
+        password: !secret iobroker_password
       homeassistant:
         token: !secret ha_token
 
@@ -214,6 +216,8 @@ def _parse_backends(cfg: dict[str, Any]) -> BackendsConfig:
             host=iob_cfg["host"],
             port=int(iob_cfg.get("port", 8087)),
             api_token=iob_cfg.get("api_token"),
+            username=iob_cfg.get("username"),
+            password=iob_cfg.get("password"),
             timeout_s=float(iob_cfg.get("timeout_s", 5.0)),
         )
 
