@@ -12,6 +12,10 @@
 iobroker:
   host: "192.168.x.x"
   port: 8087
+  # Only needed if authentication is enabled in the ioBroker simple-api adapter.
+  # Put the values in secrets.yaml (iobroker_user / iobroker_password).
+  # username: !secret iobroker_user
+  # password: !secret iobroker_password
 
 homeassistant:
   # Direct Home Assistant REST API connection (for devices not bridged via ioBroker).

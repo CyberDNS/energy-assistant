@@ -26,7 +26,8 @@ def _build_tariff(tariff_id: str, cfg: dict[str, Any], ctx: BuildContext) -> obj
         _log.warning("Tariff %r (tibber_iobroker): 'home_id' is required — skipping", tariff_id)
         return None
     iob = ctx.backends.iobroker
-    client = ctx.iobroker_pool.get(host=iob.host, port=iob.port, api_token=iob.api_token)
+    client = ctx.iobroker_pool.get(host=iob.host, port=iob.port, api_token=iob.api_token,
+        username=iob.username, password=iob.password)
     return TibberIoBrokerTariff(tariff_id=tariff_id, client=client, home_id=home_id)
 
 
@@ -40,7 +41,8 @@ def _build_device(device_id: str, cfg: dict[str, Any], ctx: BuildContext) -> obj
         _log.warning("Device %r (tibber_iobroker): 'home_id' is required — skipping", device_id)
         return None
     iob = ctx.backends.iobroker
-    client = ctx.iobroker_pool.get(host=iob.host, port=iob.port, api_token=iob.api_token)
+    client = ctx.iobroker_pool.get(host=iob.host, port=iob.port, api_token=iob.api_token,
+        username=iob.username, password=iob.password)
     return TibberIoBrokerDevice(
         device_id=device_id,
         role=parse_device_role(cfg.get("role"), default=parse_device_role("meter")),
