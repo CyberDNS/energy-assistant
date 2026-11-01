@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from .client import IoBrokerClient
 
-_PoolKey = tuple[str, int]
+_PoolKey = tuple[str, int, str | None, str | None]
 
 
 class IoBrokerConnectionPool:
@@ -32,15 +32,19 @@ class IoBrokerConnectionPool:
         port: int = 8087,
         api_token: str | None = None,
         timeout: float = 5.0,
+        username: str | None = None,
+        password: str | None = None,
     ) -> IoBrokerClient:
-        """Return (or create) the client for *(host, port)*."""
-        key: _PoolKey = (host, port)
+        """Return (or create) the client for *(host, port, credentials)*."""
+        key: _PoolKey = (host, port, username, password)
         if key not in self._pool:
             self._pool[key] = IoBrokerClient(
                 host=host,
                 port=port,
                 api_token=api_token,
                 timeout=timeout,
+                username=username,
+                password=password,
             )
         return self._pool[key]
 

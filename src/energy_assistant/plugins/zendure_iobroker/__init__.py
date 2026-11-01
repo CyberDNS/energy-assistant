@@ -28,7 +28,8 @@ def _build(device_id: str, cfg: dict[str, Any], ctx: BuildContext) -> object | N
         )
         return None
     iob = ctx.backends.iobroker
-    client = ctx.iobroker_pool.get(host=iob.host, port=iob.port, api_token=iob.api_token)
+    client = ctx.iobroker_pool.get(host=iob.host, port=iob.port, api_token=iob.api_token,
+        username=iob.username, password=iob.password)
     purchase_price = cfg.get("purchase_price_eur")
     cycle_life = cfg.get("cycle_life")
     return ZendureIoBrokerDevice(

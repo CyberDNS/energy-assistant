@@ -39,7 +39,10 @@ class IoBrokerClient:
     port:
         simple-api port (default 8087).
     api_token:
-        Optional Bearer token, set in the simple-api adapter security settings.
+        Optional Bearer token.
+    username, password:
+        Optional credentials for a simple-api instance with authentication
+        enabled; sent as HTTP Basic auth. Both must be given together.
     timeout:
         Per-request timeout in seconds.
     """
@@ -50,13 +53,23 @@ class IoBrokerClient:
         port: int = 8087,
         api_token: str | None = None,
         timeout: float = _DEFAULT_TIMEOUT,
+        username: str | None = None,
+        password: str | None = None,
     ) -> None:
+        if bool(username) != bool(password):
+            raise ValueError("ioBroker username and password must be set together")
+        if api_token and username:
+            raise ValueError(
+                "ioBroker: configure either api_token or username/password, not both"
+            )
+        auth = httpx.BasicAuth(username, password) if username and password else None
         headers: dict[str, str] = {}
         if api_token:
             headers["Authorization"] = f"Bearer {api_token}"
         self._client = httpx.AsyncClient(
             base_url=f"http://{host}:{port}",
             headers=headers,
+            auth=auth,
             timeout=timeout,
         )
 
