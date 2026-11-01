@@ -10,7 +10,7 @@ how versions are managed, images are published, and release notes are produced.
 The canonical application version lives in **`pyproject.toml`** under
 `[project] version`. Version tags (`vX.Y.Z`) must match this value.
 
-Current version: `0.1.0`
+Current version: `0.1.2`
 
 There is no separate prerelease tag format anymore — every tag is a normal
 release. What used to be "prerelease vs. stable" is now "edge vs. promoted
