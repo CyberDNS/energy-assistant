@@ -2,7 +2,7 @@
 
 Publishes one HA device per EV chargepoint (keyed by asset_id) containing:
   - sensor:        soc, charging_mode, target_soc, deadline  (read-only)
-  - binary_sensor: override_active                           (read-only)
+  - binary_sensor: override_active, plugged                  (read-only)
   - number:        target_soc_set   (writable — stages SoC)
   - date:          deadline_date    (writable — stages date, asset local tz)
   - time:          deadline_time    (writable — stages time, asset local tz)
@@ -12,6 +12,13 @@ Setting the number/date/time pickers updates staged values only — the optimize
 is not affected until the switch is turned ON. Turning the switch OFF reverts
 the optimizer to the schedule but keeps the staged values intact so the user
 can re-enable with the same settings.
+
+Availability is deliberately NOT tied to whether the car is plugged in:
+  - ``energy_assistant/status`` (LWT) — Energy Assistant is running; gates
+    every entity.
+  - ``energy_assistant/ev/{asset_id}/available`` — chargepoint data (SoC) is
+    readable; additionally gates the SoC and plug sensors.
+Plug state is exposed separately via the ``plugged`` binary_sensor.
 """
 
 from __future__ import annotations
@@ -33,6 +40,7 @@ _log = logging.getLogger(__name__)
 
 _BASE = "energy_assistant/ev"
 _DISC = "homeassistant"
+_STATUS_TOPIC = "energy_assistant/status"
 _RECONNECT_DELAY_S = 30
 
 
@@ -66,6 +74,13 @@ class EvMqttPublisher:
         self._task = asyncio.create_task(self._run(), name="mqtt_publisher")
 
     async def stop(self) -> None:
+        # A clean disconnect does not fire the LWT — mark offline explicitly.
+        # Best effort: drained by the publish loop if still connected.
+        await self._queue.put((_STATUS_TOPIC, "offline", True))
+        try:
+            await asyncio.wait_for(self._queue.join(), timeout=2)
+        except asyncio.TimeoutError:
+            pass
         if self._task:
             self._task.cancel()
             await asyncio.gather(self._task, return_exceptions=True)
@@ -109,7 +124,11 @@ class EvMqttPublisher:
                 await asyncio.sleep(_RECONNECT_DELAY_S)
 
     async def _connect_and_run(self) -> None:
-        kwargs: dict[str, Any] = {"hostname": self._cfg.host, "port": self._cfg.port}
+        kwargs: dict[str, Any] = {
+            "hostname": self._cfg.host,
+            "port": self._cfg.port,
+            "will": aiomqtt.Will(_STATUS_TOPIC, "offline", qos=1, retain=True),
+        }
         if self._cfg.username:
             kwargs["username"] = self._cfg.username
         if self._cfg.password:
@@ -118,6 +137,7 @@ class EvMqttPublisher:
         async with aiomqtt.Client(**kwargs) as client:
             _log.info("MQTT connected to %s:%d", self._cfg.host, self._cfg.port)
             await self._publish_discovery(client)
+            await client.publish(_STATUS_TOPIC, "online", qos=1, retain=True)
             for asset in self._assets:
                 slug = asset.asset_id
                 await client.subscribe(f"{_BASE}/{slug}/target_soc/set")
@@ -260,7 +280,16 @@ def _discovery_configs(
 ) -> list[tuple[str, dict]]:
     slug = asset.asset_id
     base = f"{_BASE}/{slug}"
-    avail = f"{base}/available"
+    # Bridge-only availability for entities that don't depend on live data
+    # (goal, mode, setters); data-gated availability for the live readings.
+    bridge_avail = {"availability_topic": _STATUS_TOPIC}
+    data_avail = {
+        "availability": [
+            {"topic": _STATUS_TOPIC},
+            {"topic": f"{base}/available"},
+        ],
+        "availability_mode": "all",
+    }
     configs: list[tuple[str, dict]] = []
 
     configs.append((
@@ -270,7 +299,7 @@ def _discovery_configs(
             "name": "State of Charge",
             "device": device,
             "state_topic": f"{base}/soc",
-            "availability_topic": avail,
+            **data_avail,
             "unit_of_measurement": "%",
             "device_class": "battery",
             "state_class": "measurement",
@@ -284,7 +313,7 @@ def _discovery_configs(
             "name": "Charging Mode",
             "device": device,
             "state_topic": f"{base}/charging_mode",
-            "availability_topic": avail,
+            **bridge_avail,
             "icon": "mdi:ev-station",
         },
     ))
@@ -296,7 +325,7 @@ def _discovery_configs(
             "name": "Target SoC",
             "device": device,
             "state_topic": f"{base}/target_soc",
-            "availability_topic": avail,
+            **bridge_avail,
             "unit_of_measurement": "%",
             "icon": "mdi:battery-arrow-up",
         },
@@ -309,7 +338,7 @@ def _discovery_configs(
             "name": "Charging Deadline",
             "device": device,
             "state_topic": f"{base}/deadline",
-            "availability_topic": avail,
+            **bridge_avail,
             "device_class": "timestamp",
         },
     ))
@@ -321,10 +350,24 @@ def _discovery_configs(
             "name": "Override Active",
             "device": device,
             "state_topic": f"{base}/override_active",
-            "availability_topic": avail,
+            **bridge_avail,
             "payload_on": "ON",
             "payload_off": "OFF",
             "icon": "mdi:pencil-circle",
+        },
+    ))
+
+    configs.append((
+        f"{_DISC}/binary_sensor/ea_ev_{slug}_plugged/config",
+        {
+            "unique_id": f"ea_ev_{slug}_plugged",
+            "name": "Plugged In",
+            "device": device,
+            "state_topic": f"{base}/plugged",
+            **data_avail,
+            "payload_on": "ON",
+            "payload_off": "OFF",
+            "device_class": "plug",
         },
     ))
 
@@ -336,7 +379,7 @@ def _discovery_configs(
             "device": device,
             "state_topic": f"{base}/staged_soc/state",
             "command_topic": f"{base}/target_soc/set",
-            "availability_topic": avail,
+            **bridge_avail,
             "unit_of_measurement": "%",
             "min": 0,
             "max": 100,
@@ -354,7 +397,7 @@ def _discovery_configs(
             "device": device,
             "state_topic": f"{base}/staged_date/state",
             "command_topic": f"{base}/deadline_date/set",
-            "availability_topic": avail,
+            **bridge_avail,
             "icon": "mdi:calendar-clock",
         },
     ))
@@ -367,7 +410,7 @@ def _discovery_configs(
             "device": device,
             "state_topic": f"{base}/staged_time/state",
             "command_topic": f"{base}/deadline_time/set",
-            "availability_topic": avail,
+            **bridge_avail,
             "icon": "mdi:clock-end",
         },
     ))
@@ -380,7 +423,7 @@ def _discovery_configs(
             "device": device,
             "state_topic": f"{base}/override_active",
             "command_topic": f"{base}/override/set",
-            "availability_topic": avail,
+            **bridge_avail,
             "payload_on": "ON",
             "payload_off": "OFF",
             "icon": "mdi:flash",
@@ -404,13 +447,21 @@ def _build_state_messages(
     """Return list of (topic, payload, retain) for one asset."""
     slug = asset.asset_id
     base = f"{_BASE}/{slug}"
-    connected = state is not None and state.available
+    # Data availability: we could read the chargepoint (have a SoC).  This is
+    # intentionally independent of plug state — an unplugged car still has a
+    # valid last-known SoC.  ``state.available`` means "ready to charge" and
+    # only drives charging_mode / plugged.
+    data_ok = state is not None and state.soc_pct is not None
     msgs: list[tuple[str, str, bool]] = []
 
-    msgs.append((f"{base}/available", "online" if connected else "offline", True))
+    msgs.append((f"{base}/available", "online" if data_ok else "offline", True))
 
     if state is not None and state.soc_pct is not None:
         msgs.append((f"{base}/soc", f"{state.soc_pct:.0f}", True))
+
+    plugged = state.extra.get("plugged") if state is not None else None
+    if plugged is not None:
+        msgs.append((f"{base}/plugged", "ON" if plugged else "OFF", True))
 
     msgs.append((f"{base}/charging_mode", _derive_mode(goal, state), True))
     msgs.append((f"{base}/override_active", "ON" if override_active else "OFF", True))
