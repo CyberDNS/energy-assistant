@@ -20,6 +20,7 @@ body {
 }
 
 .wrap { max-width: 1500px; margin: 0 auto; padding: 14px 16px; }
+.wrap.embed { padding: 6px; }
 
 /* ── header ── */
 .top { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; flex-wrap:wrap; gap:8px; }

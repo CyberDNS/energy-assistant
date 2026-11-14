@@ -58,6 +58,7 @@ from ..assets.ev import (
     EvChargingGoal,
     EvDayOverride,
     EvWeeklyTarget,
+    default_weekly_target,
 )
 from ..assets.loader import (
     asset_zoneinfo,
@@ -637,7 +638,9 @@ class Application:
                 on_stage=self._mqtt_stage_target,
                 on_enable_override=self._mqtt_enable_override,
                 on_disable_override=self._mqtt_disable_override,
+                on_set_weekly=self._mqtt_set_weekly,
             )
+            await self._mqtt_publisher.publish_weekly_plans(self._ev_weekly_plans)
             await self._mqtt_publisher.start()
             _log.info("MQTT publisher started")
 
@@ -725,6 +728,16 @@ class Application:
 
     def _ev_asset(self, asset_id: str) -> EvChargingAsset | None:
         return next((a for a in self._ev_assets if a.asset_id == asset_id), None)
+
+    async def _save_ev_weekly_plan(self, asset_id: str, entries: list[EvWeeklyTarget]) -> None:
+        """Persist the weekly plan, mirror it to MQTT and trigger a re-plan."""
+        await self._storage.set_ev_weekly_plan(asset_id, entries)
+        self._ev_weekly_plans[asset_id] = {e.weekday: e for e in entries}
+        _log.info("EV weekly plan saved: %r (%d enabled days)",
+                  asset_id, sum(e.enabled for e in entries))
+        if self._mqtt_publisher is not None:
+            await self._mqtt_publisher.publish_weekly_plans(self._ev_weekly_plans)
+        asyncio.create_task(self._run_plan())
 
     async def _set_ev_day_override(self, asset_id: str, override: EvDayOverride) -> None:
         await self._storage.set_ev_day_override(asset_id, override)
@@ -817,6 +830,15 @@ class Application:
         )
         _log.info("MQTT override enabled: %r → %.0f%% on %s at %s", asset_id, soc, day, hhmm)
         asyncio.create_task(self._run_plan())
+
+    async def _mqtt_set_weekly(self, asset_id: str, weekday: int, changes: dict[str, Any]) -> None:
+        """Change one field of one weekday's target (HA weekly-plan entities)."""
+        asset = self._ev_asset(asset_id)
+        if asset is None:
+            return
+        rows = dict(self._ev_weekly_plans.get(asset_id, {}))
+        rows[weekday] = dataclasses.replace(default_weekly_target(asset, rows, weekday), **changes)
+        await self._save_ev_weekly_plan(asset_id, [rows[wd] for wd in sorted(rows)])
 
     async def _mqtt_disable_override(self, asset_id: str) -> None:
         parts = self._staged_override_parts(asset_id)
@@ -2142,9 +2164,9 @@ class Application:
                 "weekly": [
                     {
                         "weekday": wd,
-                        "enabled": (wt := weekly.get(wd)) is not None and wt.enabled,
-                        "target_soc_pct": wt.target_soc_pct if wt else asset.charge_limit_soc_pct,
-                        "target_by": wt.target_by if wt else "06:00",
+                        "enabled": (wt := default_weekly_target(asset, weekly, wd)).enabled,
+                        "target_soc_pct": wt.target_soc_pct,
+                        "target_by": wt.target_by,
                     }
                     for wd in range(1, 8)
                 ],
@@ -2177,11 +2199,7 @@ class Application:
                     target_soc_pct=row.target_soc_pct,
                     target_by=_validate_hhmm(row.target_by),
                 ))
-            await self._storage.set_ev_weekly_plan(asset_id, entries)
-            self._ev_weekly_plans[asset_id] = {e.weekday: e for e in entries}
-            _log.info("EV weekly plan saved: %r (%d enabled days)",
-                      asset_id, sum(e.enabled for e in entries))
-            asyncio.create_task(self._run_plan())
+            await self._save_ev_weekly_plan(asset_id, entries)
             return {"status": "ok", "asset_id": asset_id}
 
         @api.put("/api/ev/{asset_id}/plan/{day}")
@@ -2300,7 +2318,11 @@ class Application:
             class _NoCacheMiddleware(BaseHTTPMiddleware):
                 async def dispatch(self, request, call_next):
                     response = await call_next(request)
-                    if request.url.path.startswith("/ui/"):
+                    path = request.url.path
+                    if path.startswith("/ui/vendor/"):
+                        # Third-party libraries: versioned filenames, safe to cache.
+                        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+                    elif path.startswith("/ui/"):
                         response.headers["Cache-Control"] = "no-store"
                     return response
 

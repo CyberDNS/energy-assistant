@@ -7,6 +7,10 @@ Publishes one HA device per EV chargepoint (keyed by asset_id) containing:
   - date:          deadline_date    (writable — stages date, asset local tz)
   - time:          deadline_time    (writable — stages time, asset local tz)
   - switch:        override_active  (ON = apply staged, OFF = revert to schedule)
+  - weekly plan, per weekday (config entities, written straight to the plan):
+      number  weekly_{day}_soc      target SoC
+      time    weekly_{day}_time     departure time (asset local tz)
+      switch  weekly_{day}_enabled  whether the day has a target at all
 
 Setting the number/date/time pickers updates staged values only — the optimizer
 is not affected until the switch is turned ON. Turning the switch OFF reverts
@@ -32,7 +36,7 @@ from zoneinfo import ZoneInfo
 
 import aiomqtt
 
-from ..assets.ev import EvChargingAsset, EvChargingGoal
+from ..assets.ev import EvChargingAsset, EvChargingGoal, EvWeeklyTarget, default_weekly_target
 from ..core.config import MqttConfig
 from ..core.models import DeviceState
 
@@ -42,6 +46,9 @@ _BASE = "energy_assistant/ev"
 _DISC = "homeassistant"
 _STATUS_TOPIC = "energy_assistant/status"
 _RECONNECT_DELAY_S = 30
+# ISO weekday (1=Mon … 7=Sun) → topic / unique_id key
+_WEEKDAY_KEYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+_WEEKDAY_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 
 class EvMqttPublisher:
@@ -54,12 +61,16 @@ class EvMqttPublisher:
         on_stage: Callable[[str, float, datetime], Awaitable[None]],
         on_enable_override: Callable[[str], Awaitable[None]],
         on_disable_override: Callable[[str], Awaitable[None]],
+        on_set_weekly: Callable[[str, int, dict[str, Any]], Awaitable[None]] | None = None,
     ) -> None:
         self._cfg = cfg
         self._assets = assets
         self._on_stage = on_stage
         self._on_enable_override = on_enable_override
         self._on_disable_override = on_disable_override
+        self._on_set_weekly = on_set_weekly
+        # Latest weekly plans per asset — re-published on every (re)connect.
+        self._weekly_plans: dict[str, dict[int, EvWeeklyTarget]] = {}
         self._queue: asyncio.Queue[tuple[str, str, bool]] = asyncio.Queue()
         self._task: asyncio.Task[None] | None = None
         # Cached staged values per asset — updated on each publish_states call.
@@ -109,6 +120,15 @@ class EvMqttPublisher:
             ):
                 await self._queue.put((topic, payload, retain))
 
+    async def publish_weekly_plans(
+        self, plans: dict[str, dict[int, EvWeeklyTarget]]
+    ) -> None:
+        """Publish every asset's weekly plan (call at startup and on change)."""
+        self._weekly_plans = {aid: dict(rows) for aid, rows in plans.items()}
+        for asset in self._assets:
+            for msg in _weekly_state_messages(asset, self._weekly_plans.get(asset.asset_id, {})):
+                await self._queue.put(msg)
+
     # ------------------------------------------------------------------
     # Internal loop
     # ------------------------------------------------------------------
@@ -144,6 +164,11 @@ class EvMqttPublisher:
                 await client.subscribe(f"{_BASE}/{slug}/deadline_date/set")
                 await client.subscribe(f"{_BASE}/{slug}/deadline_time/set")
                 await client.subscribe(f"{_BASE}/{slug}/override/set")
+                await client.subscribe(f"{_BASE}/{slug}/weekly/+/+/set")
+                for topic, payload, retain in _weekly_state_messages(
+                    asset, self._weekly_plans.get(slug, {})
+                ):
+                    await client.publish(topic, payload, retain=retain)
 
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(self._drain_queue(client))
@@ -182,6 +207,19 @@ class EvMqttPublisher:
         asset = next((a for a in self._assets if a.asset_id == asset_id), None)
         if asset is None:
             _log.warning("MQTT command for unknown asset: %r", asset_id)
+            return
+
+        if cmd == "weekly":
+            # energy_assistant/ev/{asset_id}/weekly/{day}/{field}/set
+            if len(parts) != 7 or self._on_set_weekly is None:
+                return
+            change = _parse_weekly_command(parts[4], parts[5], payload)
+            if change is None:
+                _log.warning("MQTT weekly command invalid: topic=%r payload=%r", topic, payload)
+                return
+            weekday, changes = change
+            _log.info("MQTT weekly plan: %r weekday=%d %s", asset_id, weekday, changes)
+            await self._on_set_weekly(asset_id, weekday, changes)
             return
 
         tz = ZoneInfo(asset.timezone)
@@ -430,7 +468,98 @@ def _discovery_configs(
         },
     ))
 
+    configs.extend(_weekly_discovery_configs(asset, device))
     return configs
+
+
+def _weekly_discovery_configs(
+    asset: EvChargingAsset, device: dict
+) -> list[tuple[str, dict]]:
+    """Number + time + switch per weekday, editing the weekly plan directly."""
+    slug = asset.asset_id
+    configs: list[tuple[str, dict]] = []
+    for key, day in zip(_WEEKDAY_KEYS, _WEEKDAY_NAMES):
+        topic = f"{_BASE}/{slug}/weekly/{key}"
+        uid = f"ea_ev_{slug}_weekly_{key}"
+
+        def common(field: str, name: str) -> dict:
+            return {
+                "unique_id": f"{uid}_{field}",
+                "name": f"Weekly {day} {name}",
+                "device": device,
+                "state_topic": f"{topic}/{field}/state",
+                "command_topic": f"{topic}/{field}/set",
+                "availability_topic": _STATUS_TOPIC,
+                "entity_category": "config",
+            }
+
+        configs.append((
+            f"{_DISC}/number/{uid}_soc/config",
+            {
+                **common("soc", "Target SoC"),
+                "unit_of_measurement": "%",
+                "min": 0,
+                "max": 100,
+                "step": 5,
+                "mode": "box",
+                "icon": "mdi:battery-arrow-up-outline",
+            },
+        ))
+        configs.append((
+            f"{_DISC}/time/{uid}_time/config",
+            {**common("time", "Departure"), "icon": "mdi:clock-end"},
+        ))
+        configs.append((
+            f"{_DISC}/switch/{uid}_enabled/config",
+            {
+                **common("enabled", "Enabled"),
+                "payload_on": "ON",
+                "payload_off": "OFF",
+                "icon": "mdi:calendar-check",
+            },
+        ))
+    return configs
+
+
+def _weekly_state_messages(
+    asset: EvChargingAsset, weekly: dict[int, EvWeeklyTarget]
+) -> list[tuple[str, str, bool]]:
+    """(topic, payload, retain) for all 7 weekdays; unset days show defaults."""
+    msgs: list[tuple[str, str, bool]] = []
+    for weekday, key in enumerate(_WEEKDAY_KEYS, start=1):
+        row = default_weekly_target(asset, weekly, weekday)
+        topic = f"{_BASE}/{asset.asset_id}/weekly/{key}"
+        msgs.append((f"{topic}/soc/state", f"{row.target_soc_pct:.0f}", True))
+        msgs.append((f"{topic}/time/state", f"{row.target_by}:00", True))
+        msgs.append((f"{topic}/enabled/state", "ON" if row.enabled else "OFF", True))
+    return msgs
+
+
+def _parse_weekly_command(
+    day_key: str, field: str, payload: str
+) -> tuple[int, dict[str, Any]] | None:
+    """Map a weekly ``…/{day}/{field}/set`` command to (ISO weekday, changes).
+
+    Returns None for an unknown day/field or an out-of-range payload.
+    """
+    if day_key not in _WEEKDAY_KEYS:
+        return None
+    weekday = _WEEKDAY_KEYS.index(day_key) + 1
+    try:
+        if field == "soc":
+            soc = float(payload)
+            if not 0 <= soc <= 100:
+                return None
+            return weekday, {"target_soc_pct": soc}
+        if field == "time":
+            # HA time entity sends HH:MM:SS in local time
+            t = time.fromisoformat(payload)
+            return weekday, {"target_by": f"{t.hour:02d}:{t.minute:02d}"}
+        if field == "enabled":
+            return weekday, {"enabled": payload.strip().upper() in ("ON", "TRUE", "1")}
+    except ValueError:
+        return None
+    return None
 
 
 # ------------------------------------------------------------------

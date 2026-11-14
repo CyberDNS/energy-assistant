@@ -131,6 +131,17 @@ class EvChargingAsset:
     timezone: str = "Europe/Berlin"
 
 
+def default_weekly_target(
+    asset: EvChargingAsset, weekly: dict[int, EvWeeklyTarget], weekday: int
+) -> EvWeeklyTarget:
+    """The stored target for *weekday*, or the disabled default shown for an
+    unset day (charge limit by 06:00) — shared by the REST API and MQTT."""
+    return weekly.get(weekday) or EvWeeklyTarget(
+        weekday=weekday, enabled=False,
+        target_soc_pct=asset.charge_limit_soc_pct, target_by="06:00",
+    )
+
+
 @dataclass
 class EvChargingGoal:
     """Active charging target for one EV — computed by the asset loader.
