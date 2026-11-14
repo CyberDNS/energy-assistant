@@ -1,4 +1,5 @@
-import { defineComponent, ref, watch, onMounted, onUnmounted } from 'vue'
+import { defineComponent, ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { useRoute } from 'vue-router'
 import { fetchPlan, fetchForecast, fetchEv, fetchControllable, triggerPlanRefresh } from '../api.js'
 import { planVersion, planning } from '../composables/useStatus.js'
 import PlotlyChart from '../components/PlotlyChart.js'
@@ -132,6 +133,14 @@ export default defineComponent({
   components: { PlotlyChart, EvCard, ControllableDeviceCard },
 
   setup() {
+    // Single-vehicle view: #/plan/<vehicle> or #/plan?vehicle=<vehicle>.
+    // Matches the EV's asset_id (or label), case-insensitively.
+    const route = useRoute()
+    const vehicle = computed(() => {
+      const v = route.params.vehicle ?? route.query.vehicle
+      return v ? String(v).trim().toLowerCase() : null
+    })
+    const loaded       = ref(false)
     const evList       = ref([])
     const controllable = ref([])
     const planMeta     = ref('')
@@ -171,8 +180,17 @@ export default defineComponent({
         socTraces.value   = buildSocTraces(plan.intents, forecast, evDeviceIds)
       } catch (e) {
         console.error('PlanView refresh failed', e)
+      } finally {
+        loaded.value = true
       }
     }
+
+    const vehicleEv = computed(() => vehicle.value && evList.value.find(e =>
+      e.asset_id.toLowerCase() === vehicle.value || e.label?.toLowerCase() === vehicle.value
+    ))
+    const vehicleDevice = computed(() => vehicleEv.value &&
+      controllable.value.find(d => d.device_id === vehicleEv.value.device_id)
+    )
 
     onMounted(() => { refresh(); timer = setInterval(refresh, 60_000) })
     onUnmounted(() => clearInterval(timer))
@@ -180,11 +198,34 @@ export default defineComponent({
     // event) — e.g. after '↺ Refresh plan' finishes or a scheduled re-solve.
     watch(planVersion, () => refresh())
 
-    return { evList, controllable, planMeta, flowTraces, fcastTraces, priceTraces, socTraces, refresh, triggerRefresh, refreshing, planning, XAXIS }
+    return { vehicle, vehicleEv, vehicleDevice, loaded, evList, controllable, planMeta, flowTraces, fcastTraces, priceTraces, socTraces, refresh, triggerRefresh, refreshing, planning, XAXIS }
   },
 
   template: `
-    <div>
+    <div v-if="vehicle">
+      <transition name="fade">
+        <p v-if="planning" class="plan-busy" style="margin-bottom:8px">
+          <span class="spinner"></span> Recalculating plan…
+        </p>
+      </transition>
+      <template v-if="vehicleEv">
+        <div class="full">
+          <EvCard :key="vehicleEv.asset_id" :ev="vehicleEv" @refresh="refresh" />
+        </div>
+        <div v-if="vehicleDevice" class="full panel">
+          <h2>Charging Plan</h2>
+          <div class="ctrl-list">
+            <ControllableDeviceCard :device="vehicleDevice" />
+          </div>
+        </div>
+      </template>
+      <p v-else-if="loaded" class="footnote">
+        Unknown vehicle “{{ vehicle }}”.
+        <template v-if="evList.length">Available: {{ evList.map(e => e.asset_id).join(', ') }}</template>
+      </p>
+    </div>
+
+    <div v-else>
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">
         <p class="footnote" style="margin:0">{{ planMeta }}</p>
         <button class="btn btn-neutral" style="padding:4px 10px;font-size:.78rem" :disabled="refreshing || planning" @click="triggerRefresh">
