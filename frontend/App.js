@@ -1,5 +1,6 @@
 import { defineComponent, computed, provide } from 'vue'
-import { RouterView, RouterLink } from 'vue-router'
+import { RouterView, RouterLink, useRoute } from 'vue-router'
+import { embedFromSearch, isOn } from './deeplink.js'
 import { useStatus } from './composables/useStatus.js'
 
 function fmt(v, dec = 0) {
@@ -18,6 +19,10 @@ export default defineComponent({
     const { status, error, refresh } = useStatus()
     provide('status', status)
     provide('refresh', refresh)
+
+    // Embed mode (?embed=1): content only — no header, KPI tiles or tab bar.
+    const route = useRoute()
+    const embed = computed(() => embedFromSearch || isOn(route.query.embed))
 
     const stamp = computed(() => {
       if (!status.value) return 'Loading…'
@@ -38,12 +43,12 @@ export default defineComponent({
       soc: l.capacity_kwh ? fmt(l.stored_energy_kwh / l.capacity_kwh * 100, 0) + '%' : '—',
     })))
 
-    return { status, error, refresh, stamp, kpiGrid, kpiPv, kpiPrice, kpiExport, kpiDryRun, batteryKpis }
+    return { embed, status, error, refresh, stamp, kpiGrid, kpiPv, kpiPrice, kpiExport, kpiDryRun, batteryKpis }
   },
 
   template: `
-    <div class="wrap">
-      <div class="top">
+    <div :class="['wrap', { embed }]">
+      <div v-if="!embed" class="top">
         <h1>⚡ Energy Assistant</h1>
         <span class="stamp">{{ stamp }}</span>
       </div>
@@ -52,7 +57,7 @@ export default defineComponent({
         ⚠ {{ error }}
       </div>
 
-      <div class="kpis">
+      <div v-if="!embed" class="kpis">
         <div class="card"><div class="k">Grid</div><div class="v">{{ kpiGrid }}</div></div>
         <div class="card"><div class="k">Import Price</div><div class="v">{{ kpiPrice }}</div></div>
         <div class="card"><div class="k">Export Price</div><div class="v">{{ kpiExport }}</div></div>
@@ -66,7 +71,7 @@ export default defineComponent({
         </div>
       </div>
 
-      <div class="tab-nav">
+      <div v-if="!embed" class="tab-nav">
         <RouterLink class="tab-btn" to="/">Live</RouterLink>
         <RouterLink class="tab-btn" to="/plan">Plan</RouterLink>
       </div>
