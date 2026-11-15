@@ -74,6 +74,7 @@ export default defineComponent({
       <div v-if="!embed" class="tab-nav">
         <RouterLink class="tab-btn" to="/">Live</RouterLink>
         <RouterLink class="tab-btn" to="/plan">Plan</RouterLink>
+        <RouterLink class="tab-btn" to="/learning">Learning</RouterLink>
       </div>
 
       <RouterView />
