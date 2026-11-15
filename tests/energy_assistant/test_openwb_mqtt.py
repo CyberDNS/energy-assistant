@@ -12,6 +12,7 @@ from energy_assistant.plugins.openwb_mqtt import device as device_module
 from energy_assistant.plugins.openwb_mqtt.device import (
     OpenWBMqttBridge,
     OpenWBMqttDevice,
+    _range_km,
 )
 
 
@@ -94,7 +95,39 @@ async def test_get_state_maps_simpleapi_values() -> None:
     assert state.soc_pct == 58.0
     assert state.power_w == 10850.0
     assert state.available is True
-    assert state.extra == {"plugged": True, "chargemode": "pv"}
+    assert state.extra == {"plugged": True, "chargemode": "pv", "range_km": None}
+
+
+@pytest.mark.asyncio
+async def test_get_state_reads_vehicle_range() -> None:
+    bridge = FakeBridge({
+        ("5", "soc/soc"): "70",
+        ("5", "soc/range"): "342",
+        ("5", "soc/range_unit"): "km",
+        ("5", "plug_state"): "True",
+    })
+    state = await _device(bridge).get_state()
+    assert state.extra["range_km"] == 342.0
+
+
+@pytest.mark.asyncio
+async def test_get_state_range_null_when_not_reported() -> None:
+    # SoC module without range data → openWB publishes JSON null
+    bridge = FakeBridge({
+        ("5", "soc/soc"): "100",
+        ("5", "soc/range"): "null",
+        ("5", "plug_state"): "True",
+    })
+    state = await _device(bridge).get_state()
+    assert state.extra["range_km"] is None
+
+
+def test_range_km_parsing() -> None:
+    assert _range_km("365", "km") == 365.0
+    assert _range_km("342", None) == 342.0
+    assert _range_km("null", "km") is None
+    assert _range_km("-1", "km") is None
+    assert round(_range_km("100", '"mi"'), 1) == 160.9
 
 
 @pytest.mark.asyncio
