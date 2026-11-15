@@ -312,6 +312,7 @@ class LiveStream:
         self._task: asyncio.Task[None] | None = None
         self._latest: LiveMeasurement | None = None
         self._latest_mono = 0.0
+        self._session_got_data = False
 
     def ensure_started(self) -> None:
         if self._task is None or self._task.done():
@@ -331,17 +332,25 @@ class LiveStream:
     def _store(self, m: LiveMeasurement) -> None:
         self._latest = m
         self._latest_mono = time.monotonic()
+        self._session_got_data = True
 
     async def _run(self) -> None:
         backoff = _LIVE_BACKOFF_MIN_S
         while True:
-            got_data = False
+            # Set by _store — survives a session that ends with an exception,
+            # so a healthy connection that drops resets the backoff.
+            self._session_got_data = False
             try:
-                got_data = await self._connect_and_listen()
+                await self._connect_and_listen()
             except asyncio.CancelledError:
                 raise
+            except TimeoutError:
+                _log.warning(
+                    "Tibber live stream silent for %.0f s — reconnecting", _LIVE_STALL_S
+                )
             except Exception as exc:  # noqa: BLE001
-                _log.warning("Tibber live stream disconnected: %s", exc)
+                _log.warning("Tibber live stream disconnected: %r", exc)
+            got_data = self._session_got_data
             backoff = _LIVE_BACKOFF_MIN_S if got_data else min(backoff * 2, _LIVE_BACKOFF_MAX_S)
             delay = backoff * random.uniform(0.8, 1.2)
             _log.info("Tibber live stream reconnecting in %.0f s", delay)
