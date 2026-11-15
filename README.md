@@ -99,5 +99,75 @@ is execution. Use Home Assistant's `utility_meter` or statistics cards to get
 daily, monthly or yearly figures from the totals.
 
 Threshold devices count as fixed load and contribute no saving. Nothing is
-published in dry-run mode. The Savings tab of the web UI shows the same
+published in dry-run mode.
+
+### Price curve in Home Assistant
+
+With `backends.mqtt` configured, the "Energy Assistant" device also exposes:
+
+| Sensor | Meaning |
+|---|---|
+| `sensor.energy_assistant_electricity_price` | Current import price (€/kWh); its attributes hold the whole curve |
+| `sensor.energy_assistant_effective_electricity_price` | What one extra kWh costs right now, given the PV and consumption forecasts |
+
+The effective price is the import price while the site imports, the feed-in
+price while PV surplus is forecast (using the energy loses that income), and
+a blend of both in between (`share = (load − pv) / load`). It is a display
+figure; the optimizer plans against the raw prices. Details:
+`src/energy_assistant/core/price_curve.py`.
+
+The curve attribute `data` has one row per slot,
+`[epoch_ms, price, effective, feed_in, estimated]`, from the start of the
+last 24 hours to the end of the plan (refreshed after every plan).
+`estimated = 1` marks prices the tariff has not published yet (repeated from
+the previous day). An [ApexCharts card](https://github.com/RomRider/apexcharts-card):
+
+```yaml
+type: custom:apexcharts-card
+header:
+  show: true
+  title: Electricity prices
+graph_span: 2d
+span:
+  start: day
+now:
+  show: true
+  label: now
+apex_config:
+  legend:
+    show: true
+  yaxis:
+    - decimalsInFloat: 3
+series:
+  - entity: sensor.energy_assistant_electricity_price
+    name: Import
+    color: '#e07070'
+    curve: stepline
+    extend_to: false
+    data_generator: |
+      return (entity.attributes.data || []).map(r => [r[0], r[4] ? null : r[1]]);
+  - entity: sensor.energy_assistant_electricity_price
+    name: Import (estimated)
+    color: '#e07070'
+    stroke_dash: 4
+    curve: stepline
+    extend_to: false
+    data_generator: |
+      return (entity.attributes.data || []).map(r => [r[0], r[4] ? r[1] : null]);
+  - entity: sensor.energy_assistant_electricity_price
+    name: Effective
+    color: orange
+    curve: stepline
+    extend_to: false
+    data_generator: |
+      return (entity.attributes.data || []).map(r => [r[0], r[2]]);
+  - entity: sensor.energy_assistant_electricity_price
+    name: Feed-in
+    color: '#4caf7d'
+    stroke_dash: 6
+    curve: stepline
+    extend_to: false
+    data_generator: |
+      return (entity.attributes.data || []).map(r => [r[0], r[3]]);
+``` The Savings tab of the web UI shows the same
 numbers per day; `GET /api/savings?days=30` returns them as JSON. Details: `src/energy_assistant/core/savings.py`.
