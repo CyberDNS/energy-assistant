@@ -111,6 +111,36 @@ def build_all_forecasts(
     return build_top_level_forecasts(app_config, ctx) + build_device_forecasts(app_config, ctx)
 
 
+def build_device_forecast_map(
+    app_config: AppConfig,
+    ctx: "BuildContext | None" = None,
+) -> dict[str, object]:
+    """Like ``build_device_forecasts`` but keyed by device id.
+
+    Lets callers that need one particular device's forecast (e.g. the
+    tariff-weighted price curve) reuse the instance that planning already
+    uses, instead of building a second one — which matters for providers
+    that hold state, such as a fitted ``learned`` model.
+    """
+    if ctx is None:
+        ctx = BuildContext(backends=app_config.backends)
+
+    providers: dict[str, object] = {}
+    for device_id, cfg in app_config.devices.items():
+        forecast_cfg = cfg.get("forecast")
+        if not forecast_cfg or not isinstance(forecast_cfg, dict):
+            continue
+        try:
+            provider = plugin_registry.build_forecast(f"{device_id}_forecast", forecast_cfg, ctx)
+            if provider is not None:
+                providers[device_id] = provider
+        except Exception as exc:  # noqa: BLE001
+            _log.warning(
+                "Could not build forecast for device %r: %s", device_id, exc
+            )
+    return providers
+
+
 def build_device_forecasts(
     app_config: AppConfig,
     ctx: "BuildContext | None" = None,
@@ -139,26 +169,7 @@ def build_device_forecasts(
     list:
         Forecast provider instances for each device that declared one.
     """
-    from ..core.plugin_registry import BuildContext as _BuildContext
-
-    if ctx is None:
-        ctx = _BuildContext(backends=app_config.backends)
-
-    providers = []
-    for device_id, cfg in app_config.devices.items():
-        forecast_cfg = cfg.get("forecast")
-        if not forecast_cfg or not isinstance(forecast_cfg, dict):
-            continue
-        forecast_id = f"{device_id}_forecast"
-        try:
-            provider = plugin_registry.build_forecast(forecast_id, forecast_cfg, ctx)
-            if provider is not None:
-                providers.append(provider)
-        except Exception as exc:  # noqa: BLE001
-            _log.warning(
-                "Could not build forecast for device %r: %s", device_id, exc
-            )
-    return providers
+    return list(build_device_forecast_map(app_config, ctx).values())
 
 
 def build(

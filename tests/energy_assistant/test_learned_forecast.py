@@ -383,3 +383,22 @@ async def test_diagnostics_without_model_reports_fallback_and_error():
     assert diag["model"] is None
     assert diag["last_error"] == "statistics unavailable"
     assert diag["days"] == [] and diag["forecast"]["points"] == []
+
+
+def test_device_forecast_map_is_keyed_by_device_and_matches_the_list():
+    from energy_assistant.core.config import AppConfig
+    from energy_assistant.loader.device_loader import (
+        build_device_forecast_map,
+        build_device_forecasts,
+    )
+
+    cfg = AppConfig(devices={
+        "heatpump": {"type": "generic_consumer", "role": "consumer", "forecast": _cfg()},
+        "plain": {"type": "generic_consumer", "role": "consumer"},
+    })
+    ctx = BuildContext(backends=BackendsConfig(), ha_client=FakeHAClient())
+    by_device = build_device_forecast_map(cfg, ctx)
+    assert list(by_device) == ["heatpump"]
+    assert isinstance(by_device["heatpump"], LearnedConsumptionForecast)
+    assert by_device["heatpump"].forecast_id == "heatpump_forecast"
+    assert len(build_device_forecasts(cfg, ctx)) == 1
