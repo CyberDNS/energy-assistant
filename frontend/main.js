@@ -3,6 +3,7 @@ import { createRouter, createWebHashHistory } from 'vue-router'
 import App from './App.js'
 import LiveView from './views/LiveView.js'
 import PlanView from './views/PlanView.js'
+import LearningView from './views/LearningView.js'
 import { applyInitialRoute, embedFromSearch, isOn, rememberTab } from './deeplink.js'
 
 applyInitialRoute()
@@ -13,6 +14,7 @@ const router = createRouter({
     { path: '/',     component: LiveView },
     { path: '/plan', component: PlanView },
     { path: '/plan/:vehicle', component: PlanView },
+    { path: '/learning', component: LearningView },
   ],
 })
 

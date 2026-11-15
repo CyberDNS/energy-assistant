@@ -14,6 +14,8 @@ needed to construct a device or tariff:
     ctx.ha_client       — HAClient (or None)
     ctx.device_registry — populated DeviceRegistry (set in second pass,
                           available only for deferred factory types)
+    ctx.data_dir        — writable directory for persistent plugin state
+                          (e.g. fitted forecast models), or None
 
 Deferred factories
 ------------------
@@ -26,6 +28,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 from .config import BackendsConfig
@@ -46,6 +49,7 @@ class BuildContext:
     iobroker_pool: Any = None    # IoBrokerConnectionPool | None
     ha_client: Any = None        # HAClient | None
     device_registry: Any = None  # DeviceRegistry | None  (deferred pass only)
+    data_dir: Path | None = None  # writable directory for plugin state (or None)
 
 
 class PluginRegistry:

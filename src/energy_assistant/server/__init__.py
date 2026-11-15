@@ -563,6 +563,9 @@ class Application:
 
         # 2 — Build devices / tariffs / topology (shared connection pool)
         ctx = make_build_context(self._cfg)
+        # Plugins that keep state across restarts (fitted forecast models)
+        # store it next to the database.
+        ctx.data_dir = self._db_path.parent
         self._build_ctx = ctx
         self._registry, self._tariffs, self._topology = build(self._cfg, ctx=ctx)
         _log.info("Loaded %d devices, %d tariffs", len(self._registry), len(self._tariffs))
@@ -1803,6 +1806,34 @@ class Application:
                     for sc in self._storage_constraints
                 },
             }
+
+        @api.get("/api/learned")
+        async def get_learned() -> list[dict]:
+            """Diagnostics of every learned forecast: model, training days, forecast."""
+            out = []
+            for provider in self._forecast_providers:
+                if hasattr(provider, "diagnostics"):
+                    out.append(await provider.diagnostics(self._horizon))
+            return out
+
+        @api.post("/api/learned/{forecast_id}/refit")
+        async def refit_learned(forecast_id: str) -> dict:
+            """Refit one learned forecast from fresh history right now."""
+            provider = next(
+                (p for p in self._forecast_providers
+                 if hasattr(p, "diagnostics") and p.forecast_id == forecast_id),
+                None,
+            )
+            if provider is None:
+                raise HTTPException(404, f"Unknown learned forecast: {forecast_id!r}")
+            try:
+                model = await provider.refit()
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(502, f"Refit failed: {exc}") from exc
+            if model is None:
+                raise HTTPException(409, "Not enough usable history to fit a model")
+            asyncio.create_task(self._run_plan())
+            return {"ok": True, "fitted_at": model.fitted_at}
 
         @api.get("/api/history")
         async def get_history(hours: float = 24.0, device_ids: str = "") -> dict:

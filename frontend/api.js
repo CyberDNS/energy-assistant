@@ -19,6 +19,8 @@ export const fetchLedger   = ()           => call('/api/ledger')
 export const fetchEv           = ()           => call('/api/ev')
 export const fetchControllable = ()           => call('/api/controllable')
 export const fetchConfig   = ()           => call('/api/config')
+export const fetchLearned  = ()           => call('/api/learned')
+export const refitLearned  = (id)         => call(`/api/learned/${encodeURIComponent(id)}/refit`, { method: 'POST' })
 
 const _json = (method, body) => ({
   method,
