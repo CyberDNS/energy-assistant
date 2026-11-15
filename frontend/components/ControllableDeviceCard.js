@@ -17,6 +17,7 @@ const MODE_COLOR = {
   'charge_from_pv':   '#8bc34a',  // EV PV surplus — yellow-green
   'charge_from_grid': '#00acc1',  // EV Phase 1 — teal
   'charge_phase2':    '#f57c00',  // EV Phase 2 mandatory — deep orange
+  'force_charging':   '#f57c00',  // EV force charge (max speed) — deep orange
   'discharge':        '#4caf7d',
   'grid_feed_in':     '#3a9ad9',
   'idle':             'rgba(130,130,130,0.18)',
@@ -120,7 +121,8 @@ export default defineComponent({
 
     const modePillClass = computed(() => {
       const m = props.device.plan?.current_mode ?? ''
-      if (m === 'run' || m === 'charge_from_grid' || m === 'charge_from_pv') return 'pill pill-ok'
+      if (m === 'run' || m === 'charge_from_grid' || m === 'charge_from_pv'
+          || m === 'charge_phase2' || m === 'force_charging') return 'pill pill-ok'
       if (m === 'discharge' || m === 'grid_feed_in') return 'pill pill-warn'
       return 'pill pill-off'
     })

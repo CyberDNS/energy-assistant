@@ -1,7 +1,8 @@
 """MQTT Discovery publisher for EV charging entities.
 
 Publishes one HA device per EV chargepoint (keyed by asset_id) containing:
-  - sensor:        soc, charging_mode, target_soc, deadline  (read-only)
+  - sensor:        soc, charging_state, charging_mode, target_soc, deadline
+                   (read-only)
   - binary_sensor: override_active, plugged                  (read-only)
   - number:        target_soc_set   (writable — stages SoC)
   - date:          deadline_date    (writable — stages date, asset local tz)
@@ -23,6 +24,17 @@ Availability is deliberately NOT tied to whether the car is plugged in:
   - ``energy_assistant/ev/{asset_id}/available`` — chargepoint data (SoC) is
     readable; additionally gates the SoC and plug sensors.
 Plug state is exposed separately via the ``plugged`` binary_sensor.
+
+Live charging status (``publish_live_states``, every control tick, published
+only on change and re-published on every reconnect):
+  - ``charging_state`` — the active plan slot's mode, exactly what the UI
+    shows: ``charge_from_pv`` | ``charge_from_grid`` | ``charge_phase2`` |
+    ``idle`` | ``force_charging`` | ``disabled``
+    (see ``core.models.ev_current_mode``).
+  - ``charging_mode`` — the openWB mode Energy Assistant currently commands:
+    ``instant_charging`` | ``pv_charging`` | ``stop``, or ``disconnected``
+    (car not connected, nothing sent) / ``disabled`` (chargepoint disabled,
+    hands off).  See the sentinel encoding in ``assets/ev.py``.
 
 Savings KPIs
 ------------
@@ -46,7 +58,7 @@ import aiomqtt
 
 from ..assets.ev import EvChargingAsset, EvChargingGoal, EvWeeklyTarget, default_weekly_target
 from ..core.config import MqttConfig
-from ..core.models import DeviceState
+from ..core.models import EV_DISPLAY_MODES, DeviceState
 
 _log = logging.getLogger(__name__)
 
@@ -62,6 +74,9 @@ _SAVINGS_SENSORS = (
     ("predicted_latest", "savings_predicted_last_plan", "Predicted savings (last plan)"),
 )
 _RECONNECT_DELAY_S = 30
+CHARGING_MODES = ("instant_charging", "pv_charging", "stop", "disconnected", "disabled")
+# Sentinel boundary between PV and Instant mode — see assets/ev.py.
+_MODE_THRESHOLD_W = 500.0
 # ISO weekday (1=Mon … 7=Sun) → topic / unique_id key
 _WEEKDAY_KEYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 _WEEKDAY_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
@@ -96,6 +111,9 @@ class EvMqttPublisher:
         # Cached staged values per asset — updated on each publish_states call.
         # Used to fill the other half when only date or only time changes.
         self._cached_staged: dict[str, tuple[float, datetime]] = {}
+        # Last live-state payload per topic — dedups the per-tick publishes
+        # and is re-published on every (re)connect.
+        self._live_states: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -139,6 +157,25 @@ class EvMqttPublisher:
                 asset, goal, state, staged_for_asset, override_active
             ):
                 await self._queue.put((topic, payload, retain))
+
+    async def publish_live_states(
+        self, states: dict[str, tuple[str | None, str | None]]
+    ) -> None:
+        """Publish ``(charging_state, charging_mode)`` per asset_id.
+
+        Called on every control tick; only changed values are queued.  A
+        ``None`` entry leaves that topic untouched.
+        """
+        for asset_id, (charging_state, charging_mode) in states.items():
+            base = f"{_BASE}/{asset_id}"
+            for topic, payload in (
+                (f"{base}/charging_state", charging_state),
+                (f"{base}/charging_mode", charging_mode),
+            ):
+                if payload is None or self._live_states.get(topic) == payload:
+                    continue
+                self._live_states[topic] = payload
+                await self._queue.put((topic, payload, True))
 
     async def publish_weekly_plans(
         self, plans: dict[str, dict[int, EvWeeklyTarget]]
@@ -189,6 +226,10 @@ class EvMqttPublisher:
             await client.publish(_STATUS_TOPIC, "online", qos=1, retain=True)
             if self._savings_payload is not None:
                 await client.publish(_SAVINGS_TOPIC, self._savings_payload, retain=True)
+            # Live states change rarely and are deduped, so the broker may
+            # have lost them (restart without persistence) — re-send.
+            for topic, payload in list(self._live_states.items()):
+                await client.publish(topic, payload, retain=True)
             for asset in self._assets:
                 slug = asset.asset_id
                 await client.subscribe(f"{_BASE}/{slug}/target_soc/set")
@@ -379,6 +420,20 @@ def _discovery_configs(
     ))
 
     configs.append((
+        f"{_DISC}/sensor/ea_ev_{slug}_charging_state/config",
+        {
+            "unique_id": f"ea_ev_{slug}_charging_state",
+            "name": "Charging State",
+            "device": device,
+            "state_topic": f"{base}/charging_state",
+            **bridge_avail,
+            "device_class": "enum",
+            "options": list(EV_DISPLAY_MODES),
+            "icon": "mdi:ev-station",
+        },
+    ))
+
+    configs.append((
         f"{_DISC}/sensor/ea_ev_{slug}_charging_mode/config",
         {
             "unique_id": f"ea_ev_{slug}_charging_mode",
@@ -386,7 +441,9 @@ def _discovery_configs(
             "device": device,
             "state_topic": f"{base}/charging_mode",
             **bridge_avail,
-            "icon": "mdi:ev-station",
+            "device_class": "enum",
+            "options": list(CHARGING_MODES),
+            "icon": "mdi:ev-plug-type2",
         },
     ))
 
@@ -644,8 +701,8 @@ def _build_state_messages(
     base = f"{_BASE}/{slug}"
     # Data availability: we could read the chargepoint (have a SoC).  This is
     # intentionally independent of plug state — an unplugged car still has a
-    # valid last-known SoC.  ``state.available`` means "ready to charge" and
-    # only drives charging_mode / plugged.
+    # valid last-known SoC.  Charging state/mode are published per control
+    # tick by ``publish_live_states``.
     data_ok = state is not None and state.soc_pct is not None
     msgs: list[tuple[str, str, bool]] = []
 
@@ -658,7 +715,6 @@ def _build_state_messages(
     if plugged is not None:
         msgs.append((f"{base}/plugged", "ON" if plugged else "OFF", True))
 
-    msgs.append((f"{base}/charging_mode", _derive_mode(goal, state), True))
     msgs.append((f"{base}/override_active", "ON" if override_active else "OFF", True))
 
     if goal is not None:
@@ -680,17 +736,18 @@ def _build_state_messages(
     return msgs
 
 
-def _derive_mode(goal: EvChargingGoal | None, state: DeviceState | None) -> str:
-    if state is None or not state.available:
+def charging_mode_from_setpoint(setpoint_w: float | None, *, disabled: bool) -> str:
+    """Map the EV contributor's commanded sentinel to a ``CHARGING_MODES`` value.
+
+    The contributor returns ``None`` only when the chargepoint is disabled or
+    the car is not connected (see ``EvChargerContributor.desired_setpoint_w``).
+    """
+    if disabled:
+        return "disabled"
+    if setpoint_w is None:
         return "disconnected"
-    soc = state.soc_pct or 0.0
-    if goal is None:
-        return "pv_charging"
-    if soc >= goal.target_soc_pct:
-        return "stop"
-    now = datetime.now(timezone.utc)
-    if goal.phase2_required_kwh > 0.01 and now >= goal.phase2_start_time:
+    if setpoint_w > _MODE_THRESHOLD_W:
         return "instant_charging"
-    if soc >= goal.charge_limit_soc_pct:
-        return "stop"
-    return "pv_charging"
+    if setpoint_w > 0:
+        return "pv_charging"
+    return "stop"
