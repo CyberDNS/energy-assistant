@@ -1,10 +1,20 @@
 """Tests for EV MQTT Discovery: availability semantics and weekly-plan entities."""
 
+from datetime import datetime, timedelta, timezone
+
 from energy_assistant.assets.ev import EvChargingAsset, EvWeeklyTarget
-from energy_assistant.core.models import DeviceState
+from energy_assistant.core.models import (
+    EV_DISPLAY_MODES,
+    ControlIntent,
+    DeviceState,
+    EnergyPlan,
+    ev_current_mode,
+)
 from energy_assistant.plugins.mqtt_publisher import (
     _STATUS_TOPIC,
+    CHARGING_MODES,
     EvMqttPublisher,
+    charging_mode_from_setpoint,
     _build_state_messages,
     _discovery_configs,
     _parse_weekly_command,
@@ -32,7 +42,8 @@ def test_unplugged_car_with_soc_stays_available() -> None:
     assert msgs["energy_assistant/ev/schlumpf/available"] == "online"
     assert msgs["energy_assistant/ev/schlumpf/soc"] == "62"
     assert msgs["energy_assistant/ev/schlumpf/plugged"] == "OFF"
-    assert msgs["energy_assistant/ev/schlumpf/charging_mode"] == "disconnected"
+    # Charging state/mode are published per control tick, not with the plan.
+    assert "energy_assistant/ev/schlumpf/charging_mode" not in msgs
 
 
 def test_plugged_car_reports_plugged_on() -> None:
@@ -60,7 +71,8 @@ def test_discovery_availability_split() -> None:
         assert configs[uid]["availability_mode"] == "all"
     # Setters / goal entities only depend on Energy Assistant being up
     for uid in ("ea_ev_schlumpf_target_soc_set", "ea_ev_schlumpf_override",
-                "ea_ev_schlumpf_charging_mode", "ea_ev_schlumpf_deadline"):
+                "ea_ev_schlumpf_charging_mode", "ea_ev_schlumpf_charging_state",
+                "ea_ev_schlumpf_deadline"):
         assert configs[uid]["availability_topic"] == _STATUS_TOPIC
 
 
@@ -118,3 +130,72 @@ async def test_weekly_command_dispatches_to_callback() -> None:
     await pub._dispatch("energy_assistant/ev/schlumpf/weekly/fri/soc/set", "999")   # rejected
     await pub._dispatch("energy_assistant/ev/unknown/weekly/fri/soc/set", "80")      # unknown asset
     assert calls == [("schlumpf", 5, {"target_by": "05:15"})]
+
+
+# ── Live charging state / mode ────────────────────────────────────────────────
+
+def test_charging_sensors_are_enums_with_documented_options() -> None:
+    configs = {cfg["unique_id"]: cfg for _, cfg in _discovery_configs(_asset(), {})}
+    state = configs["ea_ev_schlumpf_charging_state"]
+    assert state["device_class"] == "enum"
+    assert state["options"] == list(EV_DISPLAY_MODES)
+    assert state["state_topic"] == "energy_assistant/ev/schlumpf/charging_state"
+    mode = configs["ea_ev_schlumpf_charging_mode"]
+    assert mode["device_class"] == "enum"
+    assert mode["options"] == list(CHARGING_MODES)
+
+
+def test_charging_mode_from_setpoint() -> None:
+    assert charging_mode_from_setpoint(11_000.0, disabled=False) == "instant_charging"
+    assert charging_mode_from_setpoint(1.0, disabled=False) == "pv_charging"
+    assert charging_mode_from_setpoint(0.0, disabled=False) == "stop"
+    assert charging_mode_from_setpoint(None, disabled=False) == "disconnected"
+    assert charging_mode_from_setpoint(None, disabled=True) == "disabled"
+
+
+def _intent(ts, kw, grid):
+    return ControlIntent(device_id="cp1", timestep=ts, power_kw=kw, grid_allowed=grid)
+
+
+def test_ev_current_mode_follows_active_slot() -> None:
+    t0 = datetime(2026, 11, 15, 10, 0, tzinfo=timezone.utc)
+    step = timedelta(minutes=15)
+    other = ControlIntent(device_id="bat", timestep=t0 + step, power_kw=0.0)
+    plan = EnergyPlan(intents=[
+        _intent(t0, 10.0, True),            # grid charge
+        other,                               # EV idle in this slot
+        _intent(t0 + 2 * step, 3.0, False),  # PV charge
+    ])
+    assert ev_current_mode(plan, "cp1", None, t0 + timedelta(minutes=5)) == "charge_from_grid"
+    assert ev_current_mode(plan, "cp1", None, t0 + step) == "idle"
+    assert ev_current_mode(plan, "cp1", None, t0 + 2 * step) == "charge_from_pv"
+    assert ev_current_mode(plan, "cp1", t0 + 2 * step, t0 + 2 * step) == "charge_phase2"
+    assert ev_current_mode(plan, "cp1", None, t0 - step) == "charge_from_grid"  # plan in future
+    assert ev_current_mode(None, "cp1", None, t0) == "idle"
+    # Excluded from planning → status comes from the chargepoint flags.
+    assert ev_current_mode(plan, "cp1", None, t0, force_charge=True) == "force_charging"
+    assert ev_current_mode(None, "cp1", None, t0, disabled=True) == "disabled"
+    assert ev_current_mode(plan, "cp1", None, t0, force_charge=True, disabled=True) == "disabled"
+
+
+async def test_live_states_are_deduped_and_replayed_on_reconnect() -> None:
+    async def noop(*_a):
+        pass
+
+    pub = EvMqttPublisher(None, [_asset()], noop, noop, noop)
+    await pub.publish_live_states({"schlumpf": ("charge_from_grid", "instant_charging")})
+    await pub.publish_live_states({"schlumpf": ("charge_from_grid", "instant_charging")})
+    await pub.publish_live_states({"schlumpf": ("idle", None)})
+    queued = []
+    while not pub._queue.empty():
+        queued.append(pub._queue.get_nowait()[:2])
+    assert queued == [
+        ("energy_assistant/ev/schlumpf/charging_state", "charge_from_grid"),
+        ("energy_assistant/ev/schlumpf/charging_mode", "instant_charging"),
+        ("energy_assistant/ev/schlumpf/charging_state", "idle"),
+    ]
+    # Cache holds the latest value per topic for re-publishing on reconnect.
+    assert pub._live_states == {
+        "energy_assistant/ev/schlumpf/charging_state": "idle",
+        "energy_assistant/ev/schlumpf/charging_mode": "instant_charging",
+    }
