@@ -9,6 +9,10 @@ openWB 2.x installation — the wiki docs differ in places):
   {root}/simpleAPI/chargepoint/{id}/power       → charging power (W)
   {root}/simpleAPI/chargepoint/{id}/soc/soc     → vehicle SoC (%) — nested,
                                                   NOT a scalar 'soc' topic
+  {root}/simpleAPI/chargepoint/{id}/soc/range   → vehicle range (unit in
+                                                  soc/range_unit, normally km);
+                                                  "null" when the SoC module
+                                                  provides no range
   {root}/simpleAPI/chargepoint/{id}/plug_state  → cable plugged ("True"/"False")
   {root}/simpleAPI/chargepoint/{id}/chargemode  → long names: instant_charging|
                                                   pv_charging|stop|…
@@ -84,6 +88,23 @@ def _to_float(value: Any) -> float | None:
 
 def _to_bool(value: Any) -> bool:
     return str(value).strip().lower() in ("1", "true", "on", "yes")
+
+
+_MILES_TO_KM = 1.609344
+
+
+def _range_km(value: Any, unit: str | None) -> float | None:
+    """Vehicle range in km from ``soc/range`` + ``soc/range_unit``.
+
+    openWB publishes ``null`` when the vehicle's SoC module delivers no
+    range; the unit is a global openWB setting (``km`` or ``mi``).
+    """
+    rng = _to_float(value)
+    if rng is None or rng < 0:
+        return None
+    if unit is not None and unit.strip().strip('"').lower() in ("mi", "miles"):
+        return rng * _MILES_TO_KM
+    return rng
 
 
 # Read topic reports long mode names; the set topic expects short ones.
@@ -344,6 +365,7 @@ class OpenWBMqttDevice:
         plug_raw = self._value("plug_state")
         plugged = _to_bool(plug_raw) if plug_raw is not None else False
         mode = _normalize_mode(self._value("chargemode"))
+        range_km = _range_km(self._value("soc/range"), self._value("soc/range_unit"))
 
         available = self._bridge.connected and plugged and soc_pct is not None
         return DeviceState(
@@ -351,7 +373,7 @@ class OpenWBMqttDevice:
             power_w=power_w,
             soc_pct=soc_pct,
             available=available,
-            extra={"plugged": plugged, "chargemode": mode},
+            extra={"plugged": plugged, "chargemode": mode, "range_km": range_km},
         )
 
     async def send_command(self, command: DeviceCommand) -> None:
