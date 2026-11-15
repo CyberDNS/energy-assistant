@@ -5,16 +5,17 @@
 //   #/plan/<vehicle>          one vehicle only (asset_id, case-insensitive)
 //   #/plan?vehicle=<vehicle>  same
 //   #/learning                Learning tab (learned consumption models)
+//   #/savings                 Savings tab (predicted vs. real savings)
 //   …?embed=1                 hide header, KPI tiles and tab bar (iframe use)
 //
 // Hosts that drop the URL fragment (e.g. the Home Assistant ingress panel)
 // can pass the same thing as a query string on the page URL instead:
-//   ?view=plan   ?view=learning   ?vehicle=<vehicle>   ?embed=1
+//   ?view=plan   ?view=learning   ?view=savings   ?vehicle=<vehicle>   ?embed=1
 //
 // When neither is given, the last-used tab is restored.
 
 const LAST_TAB_KEY = 'energy-assistant.lastTab'
-const TABS = ['/', '/plan', '/learning']
+const TABS = ['/', '/plan', '/learning', '/savings']
 
 const search = new URLSearchParams(window.location.search)
 
@@ -49,6 +50,7 @@ export function applyInitialRoute() {
   if (vehicle) target = '/plan/' + encodeURIComponent(vehicle)
   else if (view === 'plan') target = '/plan'
   else if (view === 'learning') target = '/learning'
+  else if (view === 'savings') target = '/savings'
   else if (view === 'live') target = '/'
   else if (!embedFromSearch) target = lastTab()
   if (target && target !== '/') {

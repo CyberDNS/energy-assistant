@@ -265,6 +265,30 @@ class PlanFlow(BaseModel):
     grid_import_kw: float
     grid_export_kw: float
 
+    # ── Economics (see ``core/savings.py``) ───────────────────────────
+    # Everything needed to price this slot and to simulate the unplanned
+    # site on the same inputs.  ``load_kw is None`` means the plan carries
+    # no economics.
+    hours: float | None = None
+    """Duration of this slot as solved (the first slot may be partial)."""
+    load_kw: float | None = None
+    """Inflexible load of the primary zone, planned threshold devices
+    included; batteries, EVs and separately billed loads excluded."""
+    storage_kw: float = 0.0
+    """Net AC power of all batteries (positive = charging)."""
+    stored_kwh: dict[str, float] = Field(default_factory=dict)
+    """Stored energy per battery at the END of this slot."""
+    ev_kw: dict[str, float] = Field(default_factory=dict)
+    """Charging power per chargepoint device, mandatory top-off included."""
+    secondary_kw: list[float] = Field(default_factory=list)
+    """Separately billed loads (e.g. heat pump), one entry per load."""
+    secondary_prices: list[float] = Field(default_factory=list)
+    """Import price (€/kWh) of each separately billed load."""
+    import_price: float | None = None
+    """Primary-zone import price (€/kWh)."""
+    export_price: float | None = None
+    """Feed-in price (€/kWh)."""
+
 
 class EnergyPlan(BaseModel):
     """Time-indexed schedule of control intents for all controllable devices.

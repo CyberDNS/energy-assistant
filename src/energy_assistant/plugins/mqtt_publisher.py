@@ -23,6 +23,14 @@ Availability is deliberately NOT tied to whether the car is plugged in:
   - ``energy_assistant/ev/{asset_id}/available`` — chargepoint data (SoC) is
     readable; additionally gates the SoC and plug sensors.
 Plug state is exposed separately via the ``plugged`` binary_sensor.
+
+Savings KPIs
+------------
+With ``savings_kpis=True`` one more HA device, "Energy Assistant", carries
+cumulative monetary totals (``state_class: total``) — predicted savings, real
+savings and their difference.  Home Assistant's long-term statistics turn
+those into any period (utility meter, statistics cards).  See
+``core/savings.py`` for how the numbers are computed.
 """
 
 from __future__ import annotations
@@ -45,6 +53,14 @@ _log = logging.getLogger(__name__)
 _BASE = "energy_assistant/ev"
 _DISC = "homeassistant"
 _STATUS_TOPIC = "energy_assistant/status"
+_SAVINGS_TOPIC = "energy_assistant/kpi/savings"
+# (key in the state payload, unique-id suffix, entity name)
+_SAVINGS_SENSORS = (
+    ("real", "savings_real", "Real savings"),
+    ("predicted", "savings_predicted", "Predicted savings"),
+    ("deviation", "savings_deviation", "Savings deviation"),
+    ("predicted_latest", "savings_predicted_last_plan", "Predicted savings (last plan)"),
+)
 _RECONNECT_DELAY_S = 30
 # ISO weekday (1=Mon … 7=Sun) → topic / unique_id key
 _WEEKDAY_KEYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -62,7 +78,11 @@ class EvMqttPublisher:
         on_enable_override: Callable[[str], Awaitable[None]],
         on_disable_override: Callable[[str], Awaitable[None]],
         on_set_weekly: Callable[[str, int, dict[str, Any]], Awaitable[None]] | None = None,
+        savings_kpis: bool = False,
     ) -> None:
+        self._savings_kpis = savings_kpis
+        # Last published KPI payload — re-published on every (re)connect.
+        self._savings_payload: str | None = None
         self._cfg = cfg
         self._assets = assets
         self._on_stage = on_stage
@@ -129,6 +149,15 @@ class EvMqttPublisher:
             for msg in _weekly_state_messages(asset, self._weekly_plans.get(asset.asset_id, {})):
                 await self._queue.put(msg)
 
+    async def publish_savings(self, totals: dict[str, float]) -> None:
+        """Publish the cumulative savings totals (€) — see ``_SAVINGS_SENSORS``."""
+        if not self._savings_kpis:
+            return
+        self._savings_payload = json.dumps(
+            {key: round(float(totals.get(key, 0.0)), 4) for key, _, _ in _SAVINGS_SENSORS}
+        )
+        await self._queue.put((_SAVINGS_TOPIC, self._savings_payload, True))
+
     # ------------------------------------------------------------------
     # Internal loop
     # ------------------------------------------------------------------
@@ -158,6 +187,8 @@ class EvMqttPublisher:
             _log.info("MQTT connected to %s:%d", self._cfg.host, self._cfg.port)
             await self._publish_discovery(client)
             await client.publish(_STATUS_TOPIC, "online", qos=1, retain=True)
+            if self._savings_payload is not None:
+                await client.publish(_SAVINGS_TOPIC, self._savings_payload, retain=True)
             for asset in self._assets:
                 slug = asset.asset_id
                 await client.subscribe(f"{_BASE}/{slug}/target_soc/set")
@@ -305,6 +336,9 @@ class EvMqttPublisher:
                 "model": "EV Charger",
             }
             for config_topic, config_payload in _discovery_configs(asset, device):
+                await client.publish(config_topic, json.dumps(config_payload), retain=True)
+        if self._savings_kpis:
+            for config_topic, config_payload in _savings_discovery_configs():
                 await client.publish(config_topic, json.dumps(config_payload), retain=True)
         _log.info("MQTT Discovery published for %d EV asset(s)", len(self._assets))
 
@@ -470,6 +504,38 @@ def _discovery_configs(
 
     configs.extend(_weekly_discovery_configs(asset, device))
     return configs
+
+
+def _savings_discovery_configs() -> list[tuple[str, dict]]:
+    """Cumulative savings totals as monetary ``total`` sensors.
+
+    ``total`` rather than ``total_increasing``: a single slot can lose money,
+    and a decreasing value must not be read as a meter reset.
+    """
+    device = {
+        "identifiers": ["energy_assistant_kpis"],
+        "name": "Energy Assistant",
+        "manufacturer": "Energy Assistant",
+        "model": "KPIs",
+    }
+    return [
+        (
+            f"{_DISC}/sensor/ea_{uid}/config",
+            {
+                "unique_id": f"ea_{uid}",
+                "name": name,
+                "device": device,
+                "state_topic": _SAVINGS_TOPIC,
+                "value_template": f"{{{{ value_json.{key} }}}}",
+                "availability_topic": _STATUS_TOPIC,
+                "unit_of_measurement": "EUR",
+                "device_class": "monetary",
+                "state_class": "total",
+                "suggested_display_precision": 2,
+            },
+        )
+        for key, uid, name in _SAVINGS_SENSORS
+    ]
 
 
 def _weekly_discovery_configs(

@@ -468,12 +468,59 @@ class MilpHigsOptimizer:
                 pulp.value(v) or 0.0 for (_, tt), v in s_imp_v.items() if tt == t
             )
 
+        # Slot economics for the savings accounting (core/savings.py): the
+        # solved battery and EV energies plus the inputs the unplanned site
+        # is simulated on.
+        def _kw(var: pulp.LpVariable | None, t: int) -> float:
+            return (pulp.value(var) or 0.0) / _WH / dur_h[t] if var is not None else 0.0
+
+        def _ev_kw(t: int) -> dict[str, float]:
+            out: dict[str, float] = {}
+            for goal in ev_goals:
+                if not goal.connected:
+                    continue
+                kw = _kw(variables["ev"].get((goal.asset_id, t)), t)
+                if goal.phase2_required_kwh > 0.01:
+                    overlap_h = _mandatory_overlap_h(goal, slot_starts[t], dur_h[t])
+                    kw += goal.max_charge_kw * overlap_h / dur_h[t]
+                if kw > 1e-6:
+                    out[goal.device_id] = round(kw, 4)
+            return out
+
+        def _threshold_kw(t: int) -> float:
+            return sum(
+                tc.rated_power_kw
+                for tc in threshold_devices
+                if (pulp.value(variables["run"].get((tc.device_id, t))) or 0.0) > 0.5
+            )
+
         flows = [
             PlanFlow(
                 timestep=ts,
                 pv_kw=round(pv_kw[t], 4),
                 grid_import_kw=round(_site_import_wh(t) / _WH / dur_h[t], 4),
                 grid_export_kw=round((pulp.value(g_exp_v[t]) or 0.0) / _WH / dur_h[t], 4),
+                hours=dur_h[t],
+                load_kw=round(consumption_kw[t] + _threshold_kw(t), 4),
+                storage_kw=round(
+                    sum(
+                        _kw(variables["c"][(sc.device_id, t)], t)
+                        - _kw(variables["d"][(sc.device_id, t)], t)
+                        for sc in batteries
+                    ),
+                    4,
+                ),
+                stored_kwh={
+                    sc.device_id: round(
+                        (pulp.value(variables["e"][(sc.device_id, t)]) or 0.0) / _WH, 4
+                    )
+                    for sc in batteries
+                },
+                ev_kw=_ev_kw(t),
+                secondary_kw=[round(kw[t], 4) for kw in secondary_kw],
+                secondary_prices=[pr[t] for pr in secondary_prices],
+                import_price=prices[t],
+                export_price=export_prices[t],
             )
             for t, ts in enumerate(timestamps)
         ]
