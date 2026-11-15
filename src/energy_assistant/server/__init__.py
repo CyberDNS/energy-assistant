@@ -89,6 +89,7 @@ from ..core.models import (
     intent_display_mode,
 )
 from ..core.optimizer import OptimizationContext, SecondaryTariffLoad
+from ..core.price_curve import PriceCurveHistory, build_price_slots
 from ..core.plugin_registry import BuildContext
 from ..core.registry import DeviceRegistry
 from ..core.savings import (
@@ -731,6 +732,7 @@ class Application:
             None,
         )
         self._pv_opportunity_price = 0.0  # refreshed on first planning cycle
+        self._price_history = PriceCurveHistory()
         self._tariff_zones = self._build_tariff_zones()
         _log.info(
             "Tariff zones: %s",
@@ -1274,6 +1276,10 @@ class Application:
             await self._mqtt_publisher.publish_states(
                 ev_goals, device_states, mqtt_overrides, self._staged_overrides
             )
+            try:
+                await self._publish_price_curve()
+            except Exception as exc:  # noqa: BLE001 — a dashboard must never block planning
+                _log.warning("Could not publish price curve: %s", exc)
 
     # ------------------------------------------------------------------
     # Control loop
@@ -1306,6 +1312,7 @@ class Application:
                         for device in self._registry.all()
                         if (state := self._registry.latest_state(device.device_id)) is not None
                     })
+                    await self._mqtt_publisher.publish_current_price()
             except Exception as exc:  # noqa: BLE001 — reporting must never block control
                 _log.warning("Could not publish EV live states: %s", exc)
             await asyncio.sleep(self._control_interval_s)
@@ -1633,6 +1640,36 @@ class Application:
             slot.baseline_cost, slot.actual_cost, slot.inventory_delta,
         )
         await self._publish_savings()
+
+    async def _publish_price_curve(self) -> None:
+        """Push import, feed-in and effective price per slot to Home Assistant.
+
+        Uses the same aligned series as ``/api/forecast``; already-passed
+        slots of the day are kept by ``PriceCurveHistory`` so a dashboard can
+        show the whole day (see ``core/price_curve.py``).
+        """
+        if self._mqtt_publisher is None:
+            return
+        fc = await self._aligned_forecast()
+        timestamps = [datetime.fromisoformat(t) for t in fc["timestamps"]]
+        if not timestamps:
+            return
+        prices = fc.get("variable_prices") or fc["prices"]
+        estimated = fc.get("variable_price_is_estimated") or fc.get("price_is_estimated") or []
+        slots = build_price_slots(
+            timestamps,
+            prices,
+            fc["export_prices"],
+            fc["pv_kw"],
+            fc["consumption_kw"],
+            [bool(e) for e in estimated] or [False] * len(timestamps),
+        )
+        past = [
+            (p.timestamp, float(p.value))
+            for p in (self._last_variable_price_pts or self._last_forecast_pts.get(ForecastQuantity.PRICE, []))
+        ]
+        curve = self._price_history.update(slots, datetime.now(timezone.utc), past)
+        await self._mqtt_publisher.publish_price_curve(curve, int(fc["step_minutes"]))
 
     async def _publish_savings(self) -> None:
         """Push the all-time savings totals to Home Assistant."""
@@ -2010,115 +2047,7 @@ class Application:
         @api.get("/api/forecast")
         async def get_forecast() -> dict:
             """Last forecast snapshot aligned to the active plan timesteps."""
-            plan = self._display_plan or self._control_loop._active_plan
-            if plan is None or not plan.intents:
-                return {"timestamps": [], "prices": [], "export_prices": [],
-                        "pv_kw": [], "consumption_kw": [], "step_minutes": self._optimizer._step_min,
-                        "storage_capacity": {}}
-
-            # Deduplicate and sort plan timestamps
-            timestamps = sorted({i.timestep for i in plan.intents})
-            pts_price = sorted(self._last_forecast_pts.get(ForecastQuantity.PRICE, []),
-                               key=lambda p: p.timestamp)
-            pts_var_price = sorted(self._last_variable_price_pts, key=lambda p: p.timestamp)
-            pts_pv    = sorted(self._last_forecast_pts.get(ForecastQuantity.PV_GENERATION, []),
-                               key=lambda p: p.timestamp)
-            pts_cons_raw = self._last_forecast_pts.get(ForecastQuantity.CONSUMPTION, [])
-
-            def nn_value(pts: list[ForecastPoint], ts: datetime) -> float:
-                if not pts:
-                    return 0.0
-                best = min(pts, key=lambda p: abs((p.timestamp - ts).total_seconds()))
-                return float(best.value)
-
-            def ff_value(pts: list[ForecastPoint], ts: datetime) -> float:
-                """Forward-fill value at *ts* (piecewise-constant, left-hold).
-
-                For PV this avoids nearest-neighbour artefacts around night gaps
-                (e.g. midnight accidentally snapping to sunrise values).
-                """
-                if not pts:
-                    return 0.0
-                if ts < pts[0].timestamp:
-                    return 0.0
-                prev = pts[0]
-                for p in pts:
-                    if p.timestamp > ts:
-                        break
-                    prev = p
-                return float(prev.value)
-
-            def nn_flag(flags_by_ts: dict[datetime, bool], ts: datetime) -> bool:
-                """Nearest-timestamp mapping for estimated flags.
-
-                Plan timestamps are often 15-min while source schedules may be
-                hourly, so exact dict lookup can miss flags and hide dashed lines.
-                """
-                if not flags_by_ts:
-                    return False
-                nearest_ts = min(flags_by_ts.keys(), key=lambda t: abs((t - ts).total_seconds()))
-                return bool(flags_by_ts.get(nearest_ts, False))
-
-            # Consumption: multiple providers produce duplicate timestamps — sum them.
-            # Strategy: group all raw points by their original timestamp, sum across
-            # providers, then nearest-neighbour interpolate onto plan timestamps.
-            # This is correct regardless of whether the plan step < provider step (e.g.
-            # 15-min plan steps with hourly consumption profiles) because NN fills every
-            # plan step from the closest available summed value.
-            from collections import defaultdict
-            cons_by_ts: dict[datetime, float] = defaultdict(float)
-            for pt in pts_cons_raw:
-                cons_by_ts[pt.timestamp] += float(pt.value)
-            cons_pts_summed = sorted(
-                [ForecastPoint(timestamp=ts, value=v) for ts, v in cons_by_ts.items()],
-                key=lambda p: p.timestamp,
-            )
-
-            # Also fetch export prices from tariff (flat scalar is inaccurate when
-            # the export tariff itself has a schedule, e.g. Tibber spot export).
-            ep_pts: list[ForecastPoint] = []
-            for tariff in self._tariffs.values():
-                try:
-                    sched: list[TariffPoint] = await tariff.export_price_schedule(self._horizon)
-                    if sched and any(tp.price_eur_per_kwh > 0.001 for tp in sched):
-                        ep_pts = sorted(
-                            [ForecastPoint(timestamp=tp.timestamp, value=tp.price_eur_per_kwh)
-                             for tp in sched],
-                            key=lambda p: p.timestamp,
-                        )
-                        break
-                except Exception:  # noqa: BLE001
-                    pass
-
-            def ep_value(ts: datetime) -> float:
-                if ep_pts:
-                    return nn_value(ep_pts, ts)
-                return float(self._pv_opportunity_price)
-
-            return {
-                "timestamps":    [t.isoformat() for t in timestamps],
-                "prices":        [nn_value(pts_price, t) for t in timestamps],
-                "price_is_estimated": [nn_flag(self._last_price_estimated_by_ts, t) for t in timestamps],
-                "variable_prices": [nn_value(pts_var_price, t) for t in timestamps],
-                "variable_price_is_estimated": [
-                    nn_flag(self._last_variable_price_estimated_by_ts, t) for t in timestamps
-                ],
-                "export_prices": [ep_value(t) for t in timestamps],
-                "pv_kw":         [ff_value(pts_pv, t) for t in timestamps],
-                "pv_is_estimated": [nn_flag(self._last_pv_estimated_by_ts, t) for t in timestamps],
-                "consumption_kw": [nn_value(cons_pts_summed, t) for t in timestamps],
-                "step_minutes":  self._optimizer._step_min,
-                "storage_capacity": {
-                    sc.device_id: {
-                        "capacity_kwh":         sc.capacity_kwh,
-                        "min_soc_pct":          sc.min_soc_pct,
-                        "max_soc_pct":          sc.max_soc_pct,
-                        "charge_efficiency":    sc.charge_efficiency,
-                        "discharge_efficiency": sc.discharge_efficiency,
-                    }
-                    for sc in self._storage_constraints
-                },
-            }
+            return await self._aligned_forecast()
 
         @api.get("/api/learned")
         async def get_learned() -> list[dict]:
@@ -3115,6 +3044,121 @@ class Application:
             if (s := device_states.get(did)) is not None and s.power_w is not None
         ]
         return sum(vals) if vals else None
+
+    async def _aligned_forecast(self) -> dict:
+        """Last forecast snapshot aligned to the active plan timesteps.
+
+        Served by ``/api/forecast`` and used for the MQTT price curve.
+        """
+        plan = self._display_plan or self._control_loop._active_plan
+        if plan is None or not plan.intents:
+            return {"timestamps": [], "prices": [], "export_prices": [],
+                    "pv_kw": [], "consumption_kw": [], "step_minutes": self._optimizer._step_min,
+                    "storage_capacity": {}}
+
+        # Deduplicate and sort plan timestamps
+        timestamps = sorted({i.timestep for i in plan.intents})
+        pts_price = sorted(self._last_forecast_pts.get(ForecastQuantity.PRICE, []),
+                           key=lambda p: p.timestamp)
+        pts_var_price = sorted(self._last_variable_price_pts, key=lambda p: p.timestamp)
+        pts_pv    = sorted(self._last_forecast_pts.get(ForecastQuantity.PV_GENERATION, []),
+                           key=lambda p: p.timestamp)
+        pts_cons_raw = self._last_forecast_pts.get(ForecastQuantity.CONSUMPTION, [])
+
+        def nn_value(pts: list[ForecastPoint], ts: datetime) -> float:
+            if not pts:
+                return 0.0
+            best = min(pts, key=lambda p: abs((p.timestamp - ts).total_seconds()))
+            return float(best.value)
+
+        def ff_value(pts: list[ForecastPoint], ts: datetime) -> float:
+            """Forward-fill value at *ts* (piecewise-constant, left-hold).
+
+            For PV this avoids nearest-neighbour artefacts around night gaps
+            (e.g. midnight accidentally snapping to sunrise values).
+            """
+            if not pts:
+                return 0.0
+            if ts < pts[0].timestamp:
+                return 0.0
+            prev = pts[0]
+            for p in pts:
+                if p.timestamp > ts:
+                    break
+                prev = p
+            return float(prev.value)
+
+        def nn_flag(flags_by_ts: dict[datetime, bool], ts: datetime) -> bool:
+            """Nearest-timestamp mapping for estimated flags.
+
+            Plan timestamps are often 15-min while source schedules may be
+            hourly, so exact dict lookup can miss flags and hide dashed lines.
+            """
+            if not flags_by_ts:
+                return False
+            nearest_ts = min(flags_by_ts.keys(), key=lambda t: abs((t - ts).total_seconds()))
+            return bool(flags_by_ts.get(nearest_ts, False))
+
+        # Consumption: multiple providers produce duplicate timestamps — sum them.
+        # Strategy: group all raw points by their original timestamp, sum across
+        # providers, then nearest-neighbour interpolate onto plan timestamps.
+        # This is correct regardless of whether the plan step < provider step (e.g.
+        # 15-min plan steps with hourly consumption profiles) because NN fills every
+        # plan step from the closest available summed value.
+        from collections import defaultdict
+        cons_by_ts: dict[datetime, float] = defaultdict(float)
+        for pt in pts_cons_raw:
+            cons_by_ts[pt.timestamp] += float(pt.value)
+        cons_pts_summed = sorted(
+            [ForecastPoint(timestamp=ts, value=v) for ts, v in cons_by_ts.items()],
+            key=lambda p: p.timestamp,
+        )
+
+        # Also fetch export prices from tariff (flat scalar is inaccurate when
+        # the export tariff itself has a schedule, e.g. Tibber spot export).
+        ep_pts: list[ForecastPoint] = []
+        for tariff in self._tariffs.values():
+            try:
+                sched: list[TariffPoint] = await tariff.export_price_schedule(self._horizon)
+                if sched and any(tp.price_eur_per_kwh > 0.001 for tp in sched):
+                    ep_pts = sorted(
+                        [ForecastPoint(timestamp=tp.timestamp, value=tp.price_eur_per_kwh)
+                         for tp in sched],
+                        key=lambda p: p.timestamp,
+                    )
+                    break
+            except Exception:  # noqa: BLE001
+                pass
+
+        def ep_value(ts: datetime) -> float:
+            if ep_pts:
+                return nn_value(ep_pts, ts)
+            return float(self._pv_opportunity_price)
+
+        return {
+            "timestamps":    [t.isoformat() for t in timestamps],
+            "prices":        [nn_value(pts_price, t) for t in timestamps],
+            "price_is_estimated": [nn_flag(self._last_price_estimated_by_ts, t) for t in timestamps],
+            "variable_prices": [nn_value(pts_var_price, t) for t in timestamps],
+            "variable_price_is_estimated": [
+                nn_flag(self._last_variable_price_estimated_by_ts, t) for t in timestamps
+            ],
+            "export_prices": [ep_value(t) for t in timestamps],
+            "pv_kw":         [ff_value(pts_pv, t) for t in timestamps],
+            "pv_is_estimated": [nn_flag(self._last_pv_estimated_by_ts, t) for t in timestamps],
+            "consumption_kw": [nn_value(cons_pts_summed, t) for t in timestamps],
+            "step_minutes":  self._optimizer._step_min,
+            "storage_capacity": {
+                sc.device_id: {
+                    "capacity_kwh":         sc.capacity_kwh,
+                    "min_soc_pct":          sc.min_soc_pct,
+                    "max_soc_pct":          sc.max_soc_pct,
+                    "charge_efficiency":    sc.charge_efficiency,
+                    "discharge_efficiency": sc.discharge_efficiency,
+                }
+                for sc in self._storage_constraints
+            },
+        }
 
     async def _fetch_tariff_prices(self, now: datetime) -> dict[str, float]:
         """Return current import price for every tariff that has one (> 0 €/kWh).

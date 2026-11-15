@@ -44,6 +44,17 @@ only on change and re-published on every reconnect):
     (car not connected, nothing sent) / ``disabled`` (chargepoint disabled,
     hands off).  See the sentinel encoding in ``assets/ev.py``.
 
+Price curve
+-----------
+Two sensors on the "Energy Assistant" device, fed from one retained topic
+after every planning cycle (``publish_price_curve``):
+
+  - ``sensor.energy_assistant_electricity_price`` — current import price; its
+    attributes hold the whole curve (``columns`` + ``data`` rows of
+    ``[epoch_ms, price, effective, feed_in, estimated]``) for ApexCharts.
+  - ``sensor.energy_assistant_effective_electricity_price`` — current
+    effective price (see ``core/price_curve.py``).
+
 Savings KPIs
 ------------
 With ``savings_kpis=True`` one more HA device, "Energy Assistant", carries
@@ -67,6 +78,7 @@ import aiomqtt
 from ..assets.ev import EvChargingAsset, EvChargingGoal, EvWeeklyTarget, default_weekly_target
 from ..core.config import MqttConfig
 from ..core.models import EV_DISPLAY_MODES, DeviceState
+from ..core.price_curve import PriceSlot, current_slot, price_curve_payload
 
 _log = logging.getLogger(__name__)
 
@@ -74,6 +86,15 @@ _BASE = "energy_assistant/ev"
 _DISC = "homeassistant"
 _STATUS_TOPIC = "energy_assistant/status"
 _SAVINGS_TOPIC = "energy_assistant/kpi/savings"
+_PRICE_TOPIC = "energy_assistant/prices/state"
+_PRICE_ATTR_TOPIC = "energy_assistant/prices/curve"
+# The site-wide "Energy Assistant" device shared by KPI and price sensors.
+_SITE_DEVICE = {
+    "identifiers": ["energy_assistant_kpis"],
+    "name": "Energy Assistant",
+    "manufacturer": "Energy Assistant",
+    "model": "KPIs",
+}
 # (key in the state payload, unique-id suffix, entity name)
 _SAVINGS_SENSORS = (
     ("real", "savings_real", "Real savings"),
@@ -106,6 +127,10 @@ class EvMqttPublisher:
         self._savings_kpis = savings_kpis
         # Last published KPI payload — re-published on every (re)connect.
         self._savings_payload: str | None = None
+        # Last price curve — attributes re-published on reconnect; the state
+        # topic goes through _live_states like the other live values.
+        self._price_slots: list[PriceSlot] = []
+        self._price_attrs: str | None = None
         self._cfg = cfg
         self._assets = assets
         self._on_stage = on_stage
@@ -219,6 +244,32 @@ class EvMqttPublisher:
         )
         await self._queue.put((_SAVINGS_TOPIC, self._savings_payload, True))
 
+    async def publish_price_curve(self, slots: list[PriceSlot], step_minutes: int) -> None:
+        """Publish the price curve — current prices as state, the curve as attributes."""
+        self._price_slots = list(slots)
+        attrs = json.dumps(price_curve_payload(slots, step_minutes), separators=(",", ":"))
+        self._price_attrs = attrs
+        # Attributes first, so the state update renders with the new curve.
+        await self._queue.put((_PRICE_ATTR_TOPIC, attrs, True))
+        await self.publish_current_price()
+
+    async def publish_current_price(self) -> None:
+        """Publish the current slot's prices (call on every control tick).
+
+        Only queued when the slot's values change, so this is cheap.
+        """
+        if not self._price_slots:
+            return
+        cur = current_slot(self._price_slots, datetime.now(timezone.utc))
+        state = json.dumps({
+            "price": round(cur.import_price, 4) if cur else None,
+            "effective": (
+                round(cur.effective_price, 4)
+                if cur and cur.effective_price is not None else None
+            ),
+        })
+        await self._queue_if_changed([(_PRICE_TOPIC, state)])
+
     # ------------------------------------------------------------------
     # Internal loop
     # ------------------------------------------------------------------
@@ -250,6 +301,8 @@ class EvMqttPublisher:
             await client.publish(_STATUS_TOPIC, "online", qos=1, retain=True)
             if self._savings_payload is not None:
                 await client.publish(_SAVINGS_TOPIC, self._savings_payload, retain=True)
+            if self._price_attrs is not None:
+                await client.publish(_PRICE_ATTR_TOPIC, self._price_attrs, retain=True)
             # Live states change rarely and are deduped, so the broker may
             # have lost them (restart without persistence) — re-send.
             for topic, payload in list(self._live_states.items()):
@@ -402,6 +455,8 @@ class EvMqttPublisher:
             }
             for config_topic, config_payload in _discovery_configs(asset, device):
                 await client.publish(config_topic, json.dumps(config_payload), retain=True)
+        for config_topic, config_payload in _price_discovery_configs():
+            await client.publish(config_topic, json.dumps(config_payload), retain=True)
         if self._savings_kpis:
             for config_topic, config_payload in _savings_discovery_configs():
                 await client.publish(config_topic, json.dumps(config_payload), retain=True)
@@ -608,18 +663,47 @@ def _discovery_configs(
     return configs
 
 
+def _price_discovery_configs() -> list[tuple[str, dict]]:
+    """Current import price (with the curve as attributes) and effective price."""
+    common = {
+        "device": _SITE_DEVICE,
+        "state_topic": _PRICE_TOPIC,
+        "availability_topic": _STATUS_TOPIC,
+        "unit_of_measurement": "EUR/kWh",
+        "state_class": "measurement",
+        "suggested_display_precision": 3,
+        "icon": "mdi:cash-clock",
+    }
+    return [
+        (
+            f"{_DISC}/sensor/ea_electricity_price/config",
+            {
+                **common,
+                "unique_id": "ea_electricity_price",
+                "name": "Electricity price",
+                "value_template": "{{ value_json.price }}",
+                "json_attributes_topic": _PRICE_ATTR_TOPIC,
+            },
+        ),
+        (
+            f"{_DISC}/sensor/ea_effective_electricity_price/config",
+            {
+                **common,
+                "unique_id": "ea_effective_electricity_price",
+                "name": "Effective electricity price",
+                "value_template": "{{ value_json.effective }}",
+            },
+        ),
+    ]
+
+
 def _savings_discovery_configs() -> list[tuple[str, dict]]:
     """Cumulative savings totals as monetary ``total`` sensors.
 
     ``total`` rather than ``total_increasing``: a single slot can lose money,
     and a decreasing value must not be read as a meter reset.
     """
-    device = {
-        "identifiers": ["energy_assistant_kpis"],
-        "name": "Energy Assistant",
-        "manufacturer": "Energy Assistant",
-        "model": "KPIs",
-    }
+    device = _SITE_DEVICE
     return [
         (
             f"{_DISC}/sensor/ea_{uid}/config",
