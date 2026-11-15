@@ -1155,3 +1155,153 @@ class TestEvUrgencyTiebreak:
         ev = [i for i in plan.intents if i.device_id == "cp"]
         assert sum(i.reserved_kwh for i in ev) >= goal.phase1_required_kwh - 0.01
         assert min(i.timestep for i in ev) >= now + timedelta(hours=20)
+
+
+class TestSecondaryTariffLoad:
+    """A separately billed load (heat pump on its own tariff) is its own zone.
+
+    Regression: tariffs used to be blended into one price weighted by load.
+    A large, cheaply billed heat pump load then flattened the price curve,
+    so the car charged in expensive spot hours and the battery saw no spread.
+    """
+
+    HP_PRICE = 0.18
+
+    @staticmethod
+    def _now() -> datetime:
+        return datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+
+    @staticmethod
+    def _series(now: datetime, values: list[float]) -> list[ForecastPoint]:
+        return [ForecastPoint(timestamp=now + timedelta(hours=h), value=v)
+                for h, v in enumerate(values)]
+
+    def _ctx(self, now, *, prices, household_kw, heatpump_kw, soc=10.0, pv_kw=None,
+             ev_goal=None, hp_as_secondary=True, export_price=0.08):
+        from energy_assistant.core.optimizer import SecondaryTariffLoad
+
+        n = len(prices)
+        total = [household_kw + heatpump_kw] * n
+        forecasts = {
+            ForecastQuantity.PRICE: self._series(now, prices),
+            ForecastQuantity.CONSUMPTION: self._series(now, total),
+        }
+        if pv_kw is not None:
+            forecasts[ForecastQuantity.PV_GENERATION] = self._series(now, pv_kw)
+        states = {"bat": _state("bat", soc_pct=soc)}
+        if ev_goal is not None:
+            states["cp"] = DeviceState(device_id="cp", soc_pct=ev_goal.current_soc_pct, available=True)
+        return OptimizationContext(
+            device_states=states,
+            storage_constraints=[_battery("bat", capacity_kwh=10.0, max_charge_kw=3.0)],
+            tariffs={"grid": FlatRateTariff("grid", import_price_eur_per_kwh=0.0,
+                                            export_price_eur_per_kwh=export_price)},
+            forecasts=forecasts,
+            horizon=timedelta(hours=n),
+            ev_charging_goals=[ev_goal] if ev_goal else [],
+            secondary_loads=[SecondaryTariffLoad(
+                tariff_id="heatpump",
+                load=self._series(now, [heatpump_kw] * n),
+                prices=self._series(now, [self.HP_PRICE] * n),
+            )] if hp_as_secondary else [],
+        )
+
+    @staticmethod
+    def _bat_kw(plan, now) -> list[float]:
+        by_ts = {i.timestep: i.power_kw for i in plan.intents if i.device_id == "bat"}
+        return [by_ts.get(now + timedelta(hours=h), 0.0) for h in range(len(by_ts))]
+
+    async def test_battery_arbitrage_unaffected_by_heatpump_load(self) -> None:
+        """Cheap/expensive spot hours drive the battery the same with or
+        without a big heat pump load next to it."""
+        now = self._now()
+        prices = [0.10] * 3 + [0.40] * 21
+        opt = MilpHigsOptimizer(step_minutes=60)
+        without = await opt.optimize(self._ctx(now, prices=prices, household_kw=1.0, heatpump_kw=0.0))
+        with_hp = await opt.optimize(self._ctx(now, prices=prices, household_kw=1.0, heatpump_kw=3.0))
+        kw_without, kw_with = self._bat_kw(without, now), self._bat_kw(with_hp, now)
+        assert sum(k for k in kw_with[:3] if k > 0) == pytest.approx(
+            sum(k for k in kw_without[:3] if k > 0), abs=0.01)
+        assert sum(k for k in kw_with[:3] if k > 0) > 5.0      # really charges when cheap
+        assert sum(-k for k in kw_with[3:] if k < 0) > 5.0     # and discharges when dear
+
+    async def test_ev_charges_in_cheapest_primary_hours(self) -> None:
+        """The car pays the primary price: it must pick the cheap spot hours
+        even though the heat pump dominates the load in the other hours."""
+        from energy_assistant.assets.ev import build_goal_from_parts
+
+        now = self._now()
+        prices = [0.40] * 4 + [0.25] * 2 + [0.40] * 6
+        goal = build_goal_from_parts(
+            asset_id="ev1", device_id="cp", capacity_kwh=40.0,
+            max_charge_kw=11.0, min_charge_kw=4.14, charge_limit_soc_pct=90.0,
+            target_soc_pct=90.0, target_by=now + timedelta(hours=11),
+            charge_curve=[], current_soc_pct=50.0, connected=True,
+        )
+        plan = await MilpHigsOptimizer(step_minutes=60).optimize(
+            self._ctx(now, prices=prices, household_kw=0.5, heatpump_kw=3.0, ev_goal=goal))
+        ev = {i.timestep: i.reserved_kwh for i in plan.intents if i.device_id == "cp"}
+        cheap = sum(kwh for ts, kwh in ev.items()
+                    if now + timedelta(hours=4) <= ts < now + timedelta(hours=6))
+        assert cheap == pytest.approx(sum(ev.values()), abs=0.5)
+        assert cheap > 10.0
+
+    async def test_discharge_into_heatpump_load_is_valued_at_heatpump_price(self) -> None:
+        """With no household load, discharging only saves the heat pump price,
+        which is below what the stored energy is worth — so hold it.  The
+        same load billed at the primary price would be worth discharging for."""
+        now = self._now()
+        prices = [0.40] * 12
+        opt = MilpHigsOptimizer(step_minutes=60)
+        as_secondary = await opt.optimize(
+            self._ctx(now, prices=prices, household_kw=0.0, heatpump_kw=2.0, soc=90.0))
+        as_primary = await opt.optimize(
+            self._ctx(now, prices=prices, household_kw=0.0, heatpump_kw=2.0, soc=90.0,
+                      hp_as_secondary=False))
+        assert all(k >= -0.01 for k in self._bat_kw(as_secondary, now))
+        assert any(k < -0.5 for k in self._bat_kw(as_primary, now))
+
+    async def test_pv_surplus_feeds_heatpump_before_export(self) -> None:
+        """Household surplus covers the heat pump first; only the rest is exported."""
+        now = self._now()
+        n = 6
+        plan = await MilpHigsOptimizer(step_minutes=60).optimize(
+            self._ctx(now, prices=[0.30] * n, household_kw=0.5, heatpump_kw=1.0,
+                      pv_kw=[4.0] * n, soc=95.0))  # battery full: surplus has nowhere else to go
+        for flow in plan.flows[1:]:
+            assert flow.grid_import_kw == pytest.approx(0.0, abs=0.01)
+            assert flow.grid_export_kw == pytest.approx(4.0 - 0.5 - 1.0, abs=0.01)
+
+    async def test_site_import_includes_heatpump_load(self) -> None:
+        now = self._now()
+        plan = await MilpHigsOptimizer(step_minutes=60).optimize(
+            self._ctx(now, prices=[0.30] * 6, household_kw=0.5, heatpump_kw=2.0, soc=10.0))
+        for flow in plan.flows[1:]:
+            assert flow.grid_import_kw == pytest.approx(2.5, abs=0.01)
+
+    def test_no_phantom_path_when_primary_price_is_below_heatpump_price(self) -> None:
+        """A cheap spot hour must not 'buy' primary energy for the heat pump:
+        the primary meter cannot import and pass surplus on at the same time."""
+        import pulp
+
+        opt = MilpHigsOptimizer(step_minutes=60)
+        n = 4
+        bat = _battery("bat", capacity_kwh=10.0)
+        prob, v = opt._build_model(
+            n, 1.0, [bat],
+            net_load=[0.5] * n,                 # household, kWh per step
+            prices=[0.05] * n,                  # spot far below the heat pump tariff
+            export_prices=[0.08] * n,
+            initial_energy={"bat": 1.0},
+            terminal_value_basis={"bat": 0.0},
+            secondary_load=[[2.0] * n],
+            secondary_prices=[[self.HP_PRICE] * n],
+        )
+        prob.solve(pulp.HiGHS(msg=False))
+        for t in range(n):
+            g_imp, x = pulp.value(v["g_imp"][t]), pulp.value(v["x"][t])
+            assert min(g_imp, x) == pytest.approx(0.0, abs=1e-6)
+        # the heat pump load is bought on its own tariff unless the battery covers it
+        bought = sum(pulp.value(v["s_imp"][(0, t)]) for t in range(n))
+        discharged = sum(pulp.value(v["d"][("bat", t)]) for t in range(n))
+        assert bought + discharged >= 4 * 2000.0 - 1.0
