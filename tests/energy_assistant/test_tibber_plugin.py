@@ -214,3 +214,36 @@ def test_registry_builds_tibber_tariff_and_device() -> None:
 
     assert "tibber" in registry._tariff
     assert "tibber" in registry._device
+
+
+async def test_live_backoff_grows_without_data_and_resets_after_data(monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    from energy_assistant.plugins.tibber.api import LiveStream
+
+    stream = LiveStream(_api(_Server(_response([], []))), "home-a")
+    measurement = LiveMeasurement(datetime.now(timezone.utc), 100.0, 0.0, None, None, None)
+    # Three silent sessions, then one that delivers data and drops with an error.
+    sessions = iter(["silent", "silent", "silent", "data", "silent"])
+
+    async def fake_session() -> bool:
+        if next(sessions) == "data":
+            stream._store(measurement)
+            raise ConnectionError("dropped")
+        raise TimeoutError
+
+    delays: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        delays.append(delay)
+        if len(delays) == 5:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(stream, "_connect_and_listen", fake_session)
+    monkeypatch.setattr(tibber_api.random, "uniform", lambda a, b: 1.0)
+    monkeypatch.setattr(tibber_api.asyncio, "sleep", fake_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await stream._run()
+
+    assert delays == [10.0, 20.0, 40.0, 5.0, 10.0]
