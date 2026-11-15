@@ -49,6 +49,11 @@ tariffs:
   household_tariff:
     type: tibber_iobroker
     home_id: !secret tibber_home_id  # find under tibberlink.0.Homes.* in ioBroker
+    # Without ioBroker — read prices straight from the Tibber API:
+    # type: tibber
+    # token: !secret tibber_token      # https://developer.tibber.com/settings/access-token
+    # home_id: !secret tibber_home_id  # optional — defaults to the account's first home
+    # resolution: QUARTER_HOURLY       # or HOURLY
 
   # Heat pump tariff: fixed "Wärmepumpentarif" granted by the utility.
   # Lower than the household tariff — that's the value of Messkonzept 8.
@@ -75,6 +80,10 @@ devices:
       # Tibber live measurement — replace <home-id> with your Tibber Home ID
       power_import: "tibberlink.0.Homes.<home-id>.LiveMeasurement.powerImport"
       power_export: "tibberlink.0.Homes.<home-id>.LiveMeasurement.powerExport"
+    # Without ioBroker — live Pulse/Watty stream from the Tibber API
+    # (replaces the source block; import/export also land in extra[...]):
+    # type: tibber
+    # token: !secret tibber_token
     tariff: export_tariff
 
   # Z2 — Household sub-circuit meter.
