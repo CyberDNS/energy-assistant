@@ -1,8 +1,8 @@
 """MQTT Discovery publisher for EV charging entities.
 
 Publishes one HA device per EV chargepoint (keyed by asset_id) containing:
-  - sensor:        soc, charging_state, charging_mode, target_soc, deadline
-                   (read-only)
+  - sensor:        soc, range, charging_state, charging_mode, target_soc,
+                   deadline (read-only)
   - binary_sensor: override_active, plugged                  (read-only)
   - number:        target_soc_set   (writable — stages SoC)
   - date:          deadline_date    (writable — stages date, asset local tz)
@@ -24,6 +24,14 @@ Availability is deliberately NOT tied to whether the car is plugged in:
   - ``energy_assistant/ev/{asset_id}/available`` — chargepoint data (SoC) is
     readable; additionally gates the SoC and plug sensors.
 Plug state is exposed separately via the ``plugged`` binary_sensor.
+  - ``energy_assistant/ev/{asset_id}/range_available`` — the chargepoint
+    reports a vehicle range (``DeviceState.extra["range_km"]``); gates the
+    range sensor, so a car without range data shows "unavailable".
+
+Live readings (``publish_readings``, every control tick, published only on
+change and re-published on every reconnect): ``available``, ``soc``,
+``range_available``, ``range``, ``plugged``.  Goal / override / staged values
+are published after each planning cycle (``publish_states``).
 
 Live charging status (``publish_live_states``, every control tick, published
 only on change and re-published on every reconnect):
@@ -168,14 +176,30 @@ class EvMqttPublisher:
         """
         for asset_id, (charging_state, charging_mode) in states.items():
             base = f"{_BASE}/{asset_id}"
-            for topic, payload in (
+            await self._queue_if_changed([
                 (f"{base}/charging_state", charging_state),
                 (f"{base}/charging_mode", charging_mode),
-            ):
-                if payload is None or self._live_states.get(topic) == payload:
-                    continue
-                self._live_states[topic] = payload
-                await self._queue.put((topic, payload, True))
+            ])
+
+    async def publish_readings(self, device_states: dict[str, DeviceState]) -> None:
+        """Publish each EV's live readings (SoC, range, plug state).
+
+        Called on every control tick with the latest polled states; only
+        changed values are queued.
+        """
+        for asset in self._assets:
+            await self._queue_if_changed(
+                _reading_messages(asset, device_states.get(asset.device_id))
+            )
+
+    async def _queue_if_changed(self, msgs: list[tuple[str, str | None]]) -> None:
+        """Queue retained messages whose payload differs from the last one
+        sent (``None`` leaves the topic untouched)."""
+        for topic, payload in msgs:
+            if payload is None or self._live_states.get(topic) == payload:
+                continue
+            self._live_states[topic] = payload
+            await self._queue.put((topic, payload, True))
 
     async def publish_weekly_plans(
         self, plans: dict[str, dict[int, EvWeeklyTarget]]
@@ -416,6 +440,27 @@ def _discovery_configs(
             "unit_of_measurement": "%",
             "device_class": "battery",
             "state_class": "measurement",
+        },
+    ))
+
+    configs.append((
+        f"{_DISC}/sensor/ea_ev_{slug}_range/config",
+        {
+            "unique_id": f"ea_ev_{slug}_range",
+            "name": "Range",
+            "device": device,
+            "state_topic": f"{base}/range",
+            # Gated on its own topic: a car whose SoC source provides no
+            # range shows "unavailable" instead of a stale or fake value.
+            "availability": [
+                {"topic": _STATUS_TOPIC},
+                {"topic": f"{base}/range_available"},
+            ],
+            "availability_mode": "all",
+            "unit_of_measurement": "km",
+            "device_class": "distance",
+            "state_class": "measurement",
+            "icon": "mdi:map-marker-distance",
         },
     ))
 
@@ -696,24 +741,15 @@ def _build_state_messages(
     staged: tuple[float, datetime] | None,
     override_active: bool,
 ) -> list[tuple[str, str, bool]]:
-    """Return list of (topic, payload, retain) for one asset."""
+    """Return the plan-related (topic, payload, retain) messages for one asset.
+
+    Live readings (SoC, range, plug state) are not part of this — they are
+    published per control tick by ``publish_readings`` (see
+    ``_reading_messages``).
+    """
     slug = asset.asset_id
     base = f"{_BASE}/{slug}"
-    # Data availability: we could read the chargepoint (have a SoC).  This is
-    # intentionally independent of plug state — an unplugged car still has a
-    # valid last-known SoC.  Charging state/mode are published per control
-    # tick by ``publish_live_states``.
-    data_ok = state is not None and state.soc_pct is not None
     msgs: list[tuple[str, str, bool]] = []
-
-    msgs.append((f"{base}/available", "online" if data_ok else "offline", True))
-
-    if state is not None and state.soc_pct is not None:
-        msgs.append((f"{base}/soc", f"{state.soc_pct:.0f}", True))
-
-    plugged = state.extra.get("plugged") if state is not None else None
-    if plugged is not None:
-        msgs.append((f"{base}/plugged", "ON" if plugged else "OFF", True))
 
     msgs.append((f"{base}/override_active", "ON" if override_active else "OFF", True))
 
@@ -733,6 +769,36 @@ def _build_state_messages(
         msgs.append((f"{base}/staged_date/state", local_dt.strftime("%Y-%m-%d"), True))
         msgs.append((f"{base}/staged_time/state", local_dt.strftime("%H:%M:%S"), True))
 
+    return msgs
+
+
+def _reading_messages(
+    asset: EvChargingAsset, state: DeviceState | None
+) -> list[tuple[str, str]]:
+    """Return the live-reading (topic, payload) messages for one asset.
+
+    All retained.  Topics without a value are left out (the broker keeps
+    the last one, hidden behind the matching availability topic).
+    """
+    base = f"{_BASE}/{asset.asset_id}"
+    # Data availability: we could read the chargepoint (have a SoC).  This is
+    # intentionally independent of plug state — an unplugged car still has a
+    # valid last-known SoC.
+    data_ok = state is not None and state.soc_pct is not None
+    msgs: list[tuple[str, str]] = [
+        (f"{base}/available", "online" if data_ok else "offline"),
+    ]
+    if state is not None and state.soc_pct is not None:
+        msgs.append((f"{base}/soc", f"{state.soc_pct:.0f}"))
+
+    range_km = state.extra.get("range_km") if state is not None else None
+    msgs.append((f"{base}/range_available", "online" if range_km is not None else "offline"))
+    if range_km is not None:
+        msgs.append((f"{base}/range", f"{range_km:.0f}"))
+
+    plugged = state.extra.get("plugged") if state is not None else None
+    if plugged is not None:
+        msgs.append((f"{base}/plugged", "ON" if plugged else "OFF"))
     return msgs
 
 
