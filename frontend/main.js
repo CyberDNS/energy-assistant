@@ -4,6 +4,7 @@ import App from './App.js'
 import LiveView from './views/LiveView.js'
 import PlanView from './views/PlanView.js'
 import LearningView from './views/LearningView.js'
+import SavingsView from './views/SavingsView.js'
 import { applyInitialRoute, embedFromSearch, isOn, rememberTab } from './deeplink.js'
 
 applyInitialRoute()
@@ -15,6 +16,7 @@ const router = createRouter({
     { path: '/plan', component: PlanView },
     { path: '/plan/:vehicle', component: PlanView },
     { path: '/learning', component: LearningView },
+    { path: '/savings', component: SavingsView },
   ],
 })
 

@@ -292,3 +292,14 @@ th.num, td.num { text-align:right; font-variant-numeric:tabular-nums; }
 .learn-formula { font-size:.95rem; line-height:1.35; }
 .learn-scroll { max-height:260px; overflow-y:auto; }
 @media (max-width: 700px) { .learn-wide { grid-column: span 1; } }
+
+/* ── savings view ── */
+.savings-kpis { grid-template-columns:repeat(auto-fill,minmax(170px,1fr)); }
+.savings-kpis .v { font-variant-numeric:tabular-nums; }
+.savings-sub { color:var(--muted); font-size:.75rem; margin-top:2px; }
+.savings-note { color:var(--muted); font-size:.78rem; line-height:1.4; max-width:80ch; }
+.savings-empty p { color:var(--muted); font-size:.88rem; line-height:1.45; max-width:70ch; }
+@media (max-width: 600px) {
+  /* six tiles read better wrapped than in the scrolling KPI row */
+  .kpis.savings-kpis { display:grid; grid-template-columns:1fr 1fr; overflow:visible; }
+}
