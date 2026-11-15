@@ -84,6 +84,8 @@ from ..core.models import (
     StorageConstraints,
     TariffPoint,
     ThresholdConstraints,
+    ev_current_mode,
+    ev_step_mode,
     intent_display_mode,
 )
 from ..core.optimizer import OptimizationContext, SecondaryTariffLoad
@@ -109,7 +111,7 @@ from ..loader.device_loader import (
 )
 from ..plugins import registry as plugin_registry
 from ..plugins.milp_highs import MilpHigsOptimizer
-from ..plugins.mqtt_publisher import EvMqttPublisher
+from ..plugins.mqtt_publisher import EvMqttPublisher, charging_mode_from_setpoint
 from ..storage.sqlite import SqliteStorageBackend
 
 _log = logging.getLogger(__name__)
@@ -1296,7 +1298,39 @@ class Application:
                 # container update) must not kill the task: asyncio.gather in
                 # run_forever would propagate it and terminate the process.
                 _log.warning("Control tick failed, will retry: %s", exc)
+            try:
+                await self._publish_ev_live_states()
+            except Exception as exc:  # noqa: BLE001 — reporting must never block control
+                _log.warning("Could not publish EV live states: %s", exc)
             await asyncio.sleep(self._control_interval_s)
+
+    async def _publish_ev_live_states(self) -> None:
+        """Push each EV's charging state (UI mode) and commanded openWB mode
+        to MQTT.  Runs every control tick; the publisher dedups."""
+        if self._mqtt_publisher is None:
+            return
+        now = datetime.now(timezone.utc)
+        plan = self._display_plan or self._control_loop._active_plan
+        setpoints = self._control_loop.last_setpoints
+        states: dict[str, tuple[str | None, str | None]] = {}
+        for asset in self._ev_assets:
+            goal = next((g for g in self._last_ev_goals if g.asset_id == asset.asset_id), None)
+            charging_state = ev_current_mode(
+                plan, asset.device_id, goal.phase2_start_time if goal else None, now,
+                force_charge=asset.asset_id in self._ev_force_charge,
+                disabled=asset.asset_id in self._disabled_chargepoints,
+            )
+            # No tick has computed setpoints yet (no plan) → leave mode as is.
+            charging_mode = (
+                charging_mode_from_setpoint(
+                    setpoints[asset.device_id],
+                    disabled=asset.asset_id in self._disabled_chargepoints,
+                )
+                if asset.device_id in setpoints
+                else None
+            )
+            states[asset.asset_id] = (charging_state, charging_mode)
+        await self._mqtt_publisher.publish_live_states(states)
 
     async def _check_force_charge_reset(
         self, device_states: dict[str, Any], now: datetime | None = None,
@@ -2304,12 +2338,7 @@ class Application:
                 steps = []
                 for ts in all_plan_ts:
                     intent = intent_by_ts.get(ts)
-                    if intent is None:
-                        mode = "idle"
-                    elif phase2_start is not None and ts >= phase2_start:
-                        mode = "charge_phase2"
-                    else:
-                        mode = intent_display_mode(intent)
+                    mode = ev_step_mode(intent, ts, phase2_start)
                     planned_kw = intent.power_kw if intent else 0.0
                     if planned_kw > 0:
                         energy_kwh = min(cap_limit, energy_kwh + planned_kw * step_h)
@@ -2320,10 +2349,12 @@ class Application:
                         "soc_pct": round(energy_kwh / asset.capacity_kwh * 100, 1),
                     })
 
-                active, from_active = _split_active(steps)
-                current_mode = (
-                    active["mode"] if active
-                    else (from_active[0]["mode"] if from_active else "idle")
+                _active, from_active = _split_active(steps)
+                # Same helper as the HA ``charging_state`` sensor.
+                current_mode = ev_current_mode(
+                    plan, asset.device_id, phase2_start, now,
+                    force_charge=asset.asset_id in self._ev_force_charge,
+                    disabled=asset.asset_id in self._disabled_chargepoints,
                 )
 
                 devices.append({

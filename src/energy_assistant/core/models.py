@@ -250,6 +250,61 @@ def intent_display_mode(intent: ControlIntent, is_threshold: bool = False) -> st
     return "idle"
 
 
+# Every value ``ev_step_mode`` / ``ev_current_mode`` can return.
+EV_DISPLAY_MODES = (
+    "charge_from_pv", "charge_from_grid", "charge_phase2", "idle",
+    "force_charging", "disabled",
+)
+
+
+def ev_step_mode(
+    intent: ControlIntent | None, timestep: datetime, phase2_start: datetime | None
+) -> str:
+    """Display mode of one EV plan slot (EV intents are sparse: no intent = idle)."""
+    if intent is None:
+        return "idle"
+    if phase2_start is not None and timestep >= phase2_start:
+        return "charge_phase2"
+    return intent_display_mode(intent)
+
+
+def ev_current_mode(
+    plan: EnergyPlan | None,
+    device_id: str,
+    phase2_start: datetime | None,
+    now: datetime,
+    *,
+    force_charge: bool = False,
+    disabled: bool = False,
+) -> str:
+    """Display mode of the EV's currently active plan slot — what the UI shows.
+
+    The active slot is the plan timestep with the greatest timestamp ≤ *now*
+    (falling back to the first one when the plan starts in the future).
+
+    Disabled and force-charged chargepoints are excluded from planning, so
+    their plan slots say nothing: they report ``disabled`` / ``force_charging``
+    instead (disabled wins — the contributor is hands-off even when a force
+    charge is set, see ``EvChargerContributor.desired_setpoint_w``).
+    """
+    if disabled:
+        return "disabled"
+    if force_charge:
+        return "force_charging"
+    if plan is None:
+        return "idle"
+    timesteps = sorted({i.timestep for i in plan.intents})
+    if not timesteps:
+        return "idle"
+    past = [ts for ts in timesteps if ts <= now]
+    active_ts = past[-1] if past else timesteps[0]
+    intent = next(
+        (i for i in plan.intents if i.device_id == device_id and i.timestep == active_ts),
+        None,
+    )
+    return ev_step_mode(intent, active_ts, phase2_start)
+
+
 class PlanFlow(BaseModel):
     """Solved site-level energy flows for one plan timestep.
 

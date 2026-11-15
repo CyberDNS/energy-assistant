@@ -426,6 +426,9 @@ class ControlLoop:
         self._contributors: list[ControlContributor] = list(contributors or [])
         self._active_plan: EnergyPlan | None = None
         self._last_storage_setpoints_w: dict[str, float] = {}
+        # Setpoint per device from the most recent tick() / describe_setpoints()
+        # (None = no command).  Empty until the first tick with a plan.
+        self.last_setpoints: dict[str, float | None] = {}
 
     # ------------------------------------------------------------------
     # Plan management
@@ -523,6 +526,7 @@ class ControlLoop:
             device_id: (setpoint_w, intent)
             for device_id, setpoint_w, _mode, intent in self._compute_setpoints(live)
         }
+        self.last_setpoints = {did: sp for did, (sp, _i) in setpoints.items()}
 
         for contributor in self._contributors:
             setpoint_w, intent = setpoints[contributor.device_id]
@@ -592,10 +596,12 @@ class ControlLoop:
         registered contributor.  Discharge setpoints are capped to the
         current grid import demand (same logic as ``tick()``).
         """
-        return [
+        rows = [
             (device_id, setpoint_w, mode)
             for device_id, setpoint_w, mode, _intent in self._compute_setpoints(live)
         ]
+        self.last_setpoints = {did: sp for did, sp, _m in rows}
+        return rows
 
     # ------------------------------------------------------------------
     # Helpers
