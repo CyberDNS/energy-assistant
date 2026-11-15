@@ -86,12 +86,17 @@ from ..core.models import (
     ThresholdConstraints,
     intent_display_mode,
 )
-from ..core.optimizer import OptimizationContext
+from ..core.optimizer import OptimizationContext, SecondaryTariffLoad
 from ..core.plugin_registry import BuildContext
 from ..core.registry import DeviceRegistry
 from ..core.tariff import TariffModel
 from ..core.topology import TopologyNode
-from ..loader.device_loader import build, build_all_forecasts, make_build_context
+from ..loader.device_loader import (
+    build,
+    build_device_forecast_map,
+    build_top_level_forecasts,
+    make_build_context,
+)
 from ..plugins import registry as plugin_registry
 from ..plugins.milp_highs import MilpHigsOptimizer
 from ..plugins.mqtt_publisher import EvMqttPublisher
@@ -571,7 +576,12 @@ class Application:
         _log.info("Loaded %d devices, %d tariffs", len(self._registry), len(self._tariffs))
 
         # 3 — Forecast providers (top-level + per-device, same ctx)
-        self._forecast_providers = build_all_forecasts(self._cfg, ctx=ctx)
+        # Per-device providers are kept by device id as well, so other code
+        # paths reuse the same (possibly stateful) instance.
+        self._device_forecast_providers = build_device_forecast_map(self._cfg, ctx=ctx)
+        self._forecast_providers = build_top_level_forecasts(self._cfg, ctx=ctx) + list(
+            self._device_forecast_providers.values()
+        )
         _log.info("Loaded %d forecast providers", len(self._forecast_providers))
 
         # 4 — Persistent storage
@@ -1027,12 +1037,16 @@ class Application:
 
         forecasts = await _collect_forecasts(self._forecast_providers, self._horizon)
 
-        # Build a tariff-weighted import-price curve from per-consumer load
-        # forecasts. This keeps MILP discharge economics aligned with mixed
-        # household/heatpump demand instead of a single tariff price.
-        weighted_prices, price_estimated_by_ts = await self._build_tariff_weighted_price_forecast()
-        if weighted_prices:
-            forecasts[ForecastQuantity.PRICE] = weighted_prices
+        # Price the plan per metering zone: the default tariff's price is what
+        # every flexible device pays, and consumers on another tariff (e.g. a
+        # heat pump) are handed to the optimizer as separately billed loads.
+        (
+            primary_prices,
+            price_estimated_by_ts,
+            secondary_loads,
+        ) = await self._build_tariff_zone_inputs()
+        if primary_prices:
+            forecasts[ForecastQuantity.PRICE] = primary_prices
         self._last_price_estimated_by_ts = price_estimated_by_ts
 
         # UI chart series: keep a dedicated variable-only import price curve
@@ -1159,6 +1173,7 @@ class Application:
             horizon=effective_horizon,
             battery_cost_basis=self._ledger.all_cost_bases(),
             ev_charging_goals=ev_goals,
+            secondary_loads=secondary_loads,
             producer_device_ids={
                 d.device_id for d in self._registry.all()
                 if d.role == DeviceRole.PRODUCER
@@ -2831,25 +2846,44 @@ class Application:
         self._tariff_price_cache = (time.monotonic(), prices)
         return prices
 
-    async def _build_tariff_weighted_price_forecast(self) -> tuple[list[ForecastPoint], dict[datetime, bool]]:
-        """Return hourly import-price points weighted by per-tariff load share.
+    async def _build_tariff_zone_inputs(
+        self,
+    ) -> tuple[list[ForecastPoint], dict[datetime, bool], list[SecondaryTariffLoad]]:
+        """Return the optimizer's price inputs, split by metering zone.
 
-        The current MILP is single-node (one import variable), so we cannot yet
-        optimise true multi-zone power flows. This helper provides a pragmatic
-        approximation: blend tariff prices by forecast consumption per tariff.
+        * the default tariff's import price (with its estimated-source flags),
+          which is what every flexible device — batteries, EV chargers — pays
+          for an extra kWh, and
+        * one ``SecondaryTariffLoad`` per other tariff that has consumers with
+          a forecast (e.g. a heat pump on a flat heat-pump tariff).
 
-        Example: if a timestep has 25% household load (Tibber) and 75% heatpump
-        load (flat rate), the optimizer sees
+        Earlier versions blended all tariffs into a single price weighted by
+        forecast load.  That made cheap flat-rate load drag the price down in
+        exactly the hours it was largest, so flexible devices were scheduled
+        against a price they never pay.
 
-            p_eff = 0.25 * p_household + 0.75 * p_heatpump
-
-        which prevents over-valuing battery discharge during heatpump-dominated
-        periods.
+        Returns ``([], {}, [])`` when the default tariff has no usable price
+        schedule; the caller then falls back to any tariff with prices.
         """
-        # Aggregate consumption forecasts by effective tariff.
-        load_by_tariff: dict[str, dict[datetime, float]] = defaultdict(dict)
-        all_timestamps: set[datetime] = set()
+        primary_id = self._cfg.default_tariff_id
+        primary = self._tariffs.get(primary_id) if primary_id else None
+        if primary is None:
+            return [], {}, []
+        try:
+            sched = await primary.price_schedule(self._horizon)
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("Default tariff %r has no price schedule: %s", primary_id, exc)
+            return [], {}, []
+        if not sched or not any(tp.price_eur_per_kwh > 0.001 for tp in sched):
+            return [], {}, []
+        ext, est_ts = _extend_tariff_schedule_with_daily_repeat(sched, self._horizon)
+        primary_prices = [
+            ForecastPoint(timestamp=tp.timestamp, value=tp.price_eur_per_kwh) for tp in ext
+        ]
+        estimated_by_ts = {tp.timestamp: (tp.timestamp in est_ts) for tp in ext}
 
+        # Forecast load of consumers billed on any other tariff, per tariff.
+        load_by_tariff: dict[str, dict[datetime, float]] = defaultdict(dict)
         for device_id, cfg in self._cfg.devices.items():
             device = self._registry.get(device_id)
             if device is None or device.role != DeviceRole.CONSUMER:
@@ -2857,17 +2891,18 @@ class Application:
             fc_cfg = cfg.get("forecast")
             if not isinstance(fc_cfg, dict):
                 continue
-
-            tariff_id = cfg.get("tariff") or self._cfg.default_tariff_id
-            if not tariff_id or tariff_id not in self._tariffs:
+            tariff_id = cfg.get("tariff") or primary_id
+            if tariff_id == primary_id or tariff_id not in self._tariffs:
                 continue
 
             try:
-                provider = plugin_registry.build_forecast(
-                    f"{device_id}_weighted_price_forecast",
-                    fc_cfg,
-                    self._build_ctx,
-                )
+                # Reuse the provider planning already uses; building a fresh
+                # one per plan would refit stateful (learned) forecasts.
+                provider = getattr(self, "_device_forecast_providers", {}).get(device_id)
+                if provider is None:
+                    provider = plugin_registry.build_forecast(
+                        f"{device_id}_forecast", fc_cfg, self._build_ctx
+                    )
                 if provider is None or provider.quantity != ForecastQuantity.CONSUMPTION:
                     continue
                 pts = await provider.get_forecast(self._horizon)
@@ -2877,81 +2912,35 @@ class Application:
 
             bucket = load_by_tariff[tariff_id]
             for pt in pts:
-                ts = pt.timestamp
-                bucket[ts] = bucket.get(ts, 0.0) + float(pt.value)
-                all_timestamps.add(ts)
+                bucket[pt.timestamp] = bucket.get(pt.timestamp, 0.0) + float(pt.value)
 
-        if not all_timestamps:
-            return [], {}
-
-        # Load each tariff's schedule once — this is the authoritative source of
-        # both prices AND the real data horizon.  ``price_at()`` returns 0.0 for
-        # hours where the tariff has no data (e.g. Tibber tomorrow-prices not yet
-        # published), which would create misleadingly low blended prices.  Loading
-        # the schedule directly lets us (a) do a single API call per tariff and (b)
-        # know exactly where real data ends so we can clip the timestamps.
-        tariff_schedules: dict[str, list[TariffPoint]] = {}
-        tariff_estimated_ts: dict[str, set[datetime]] = {}
-        for tariff_id in load_by_tariff:
-            tariff = self._tariffs.get(tariff_id)
-            if tariff is None:
+        secondary: list[SecondaryTariffLoad] = []
+        for tariff_id, loads in load_by_tariff.items():
+            if not loads:
                 continue
             try:
-                sched = await tariff.price_schedule(self._horizon)
-                if sched:
-                    ext, est_ts = _extend_tariff_schedule_with_daily_repeat(sched, self._horizon)
-                    tariff_schedules[tariff_id] = sorted(ext, key=lambda p: p.timestamp)
-                    tariff_estimated_ts[tariff_id] = est_ts
+                t_sched = await self._tariffs[tariff_id].price_schedule(self._horizon)
             except Exception:  # noqa: BLE001
-                pass
-
-        if not tariff_schedules:
-            return [], {}
-
-        timestamps = sorted(all_timestamps)
-        if not timestamps:
-            return [], {}
-
-        def _schedule_price_and_flag(
-            sched: list[TariffPoint],
-            estimated_ts: set[datetime],
-            ts: datetime,
-        ) -> tuple[float, bool]:
-            """Nearest-neighbour price lookup + estimated-source flag."""
-            best = min(sched, key=lambda p: abs((p.timestamp - ts).total_seconds()))
-            return float(best.price_eur_per_kwh), (best.timestamp in estimated_ts)
-
-        price_and_flag_by_tariff: dict[str, dict[datetime, tuple[float, bool]]] = {}
-        for tariff_id, sched in tariff_schedules.items():
-            est_set = tariff_estimated_ts.get(tariff_id, set())
-            per_ts: dict[datetime, tuple[float, bool]] = {}
-            for ts in timestamps:
-                per_ts[ts] = _schedule_price_and_flag(sched, est_set, ts)
-            price_and_flag_by_tariff[tariff_id] = per_ts
-
-        weighted: list[ForecastPoint] = []
-        weighted_estimated_by_ts: dict[datetime, bool] = {}
-        for ts in timestamps:
-            total_kw = 0.0
-            weighted_sum = 0.0
-            has_estimated_component = False
-            for tariff_id, loads in load_by_tariff.items():
-                load_kw = float(loads.get(ts, 0.0))
-                if load_kw <= 0.0:
-                    continue
-                price, from_estimated = price_and_flag_by_tariff.get(tariff_id, {}).get(
-                    ts, (0.0, False)
+                t_sched = None
+            if not t_sched:
+                # No price for this tariff: its load stays in the total
+                # consumption and is billed at the default price.
+                continue
+            t_ext, _ = _extend_tariff_schedule_with_daily_repeat(t_sched, self._horizon)
+            secondary.append(
+                SecondaryTariffLoad(
+                    tariff_id=tariff_id,
+                    load=[
+                        ForecastPoint(timestamp=ts, value=kw)
+                        for ts, kw in sorted(loads.items())
+                    ],
+                    prices=[
+                        ForecastPoint(timestamp=tp.timestamp, value=tp.price_eur_per_kwh)
+                        for tp in t_ext
+                    ],
                 )
-                total_kw += load_kw
-                weighted_sum += load_kw * price
-                if from_estimated:
-                    has_estimated_component = True
-
-            if total_kw > 0.0:
-                weighted.append(ForecastPoint(timestamp=ts, value=weighted_sum / total_kw))
-                weighted_estimated_by_ts[ts] = has_estimated_component
-
-        return weighted, weighted_estimated_by_ts
+            )
+        return primary_prices, estimated_by_ts, secondary
 
     def _pick_ui_variable_tariff_id(self) -> str | None:
         """Select a tariff ID suitable for variable-price charting.

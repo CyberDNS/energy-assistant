@@ -15,6 +15,29 @@ if TYPE_CHECKING:
 
 
 @dataclass
+class SecondaryTariffLoad:
+    """An inflexible load that is metered and billed separately.
+
+    Typical case: a heat pump on its own tariff behind a cascaded meter
+    (German "Messkonzept 8").  Everything the optimizer can move — batteries,
+    EV chargers, threshold devices — sits on the *primary* metering point and
+    pays the primary import price for every extra kWh.  This load pays its
+    own price instead, and it is supplied by the primary side's surplus (PV,
+    battery discharge) before that surplus is exported to the grid.
+
+    load:
+        Forecast power in kW.  It must also be contained in the context's
+        ``ForecastQuantity.CONSUMPTION`` series, which is the site total.
+    prices:
+        Import price of this load's tariff in €/kWh.
+    """
+
+    tariff_id: str
+    load: list[ForecastPoint]
+    prices: list[ForecastPoint]
+
+
+@dataclass
 class OptimizationContext:
     """Everything the Optimizer needs to produce an EnergyPlan.
 
@@ -56,6 +79,13 @@ class OptimizationContext:
     horizon: timedelta = field(default_factory=lambda: timedelta(hours=24))
     battery_cost_basis: dict[str, float] = field(default_factory=dict)
     ev_charging_goals: list["EvChargingGoal"] = field(default_factory=list)
+    secondary_loads: list[SecondaryTariffLoad] = field(default_factory=list)
+    """Separately billed inflexible loads — see ``SecondaryTariffLoad``.
+
+    When present, ``ForecastQuantity.PRICE`` is the *primary* tariff's price
+    and each entry here is carved out of the total consumption and priced at
+    its own tariff.  Empty (the default) means one price for the whole site.
+    """
     producer_device_ids: set[str] = field(default_factory=set)
     """Device IDs with role=producer (PV panels).
 
