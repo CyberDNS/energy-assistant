@@ -17,7 +17,7 @@ from energy_assistant.plugins.learned.forecast import (
     parse_exclude,
     parse_exclude_when,
 )
-from tests.helpers.fake_ha_client import FakeHAClient
+from helpers.fake_ha_client import FakeHAClient
 
 POWER = "sensor.heatpump_power"
 TEMP = "sensor.outdoor_temperature"
