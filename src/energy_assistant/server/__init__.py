@@ -1300,6 +1300,12 @@ class Application:
                 _log.warning("Control tick failed, will retry: %s", exc)
             try:
                 await self._publish_ev_live_states()
+                if self._mqtt_publisher is not None:
+                    await self._mqtt_publisher.publish_readings({
+                        device.device_id: state
+                        for device in self._registry.all()
+                        if (state := self._registry.latest_state(device.device_id)) is not None
+                    })
             except Exception as exc:  # noqa: BLE001 — reporting must never block control
                 _log.warning("Could not publish EV live states: %s", exc)
             await asyncio.sleep(self._control_interval_s)
@@ -2245,6 +2251,7 @@ class Application:
                     "label":          asset.label,
                     "connected":      state.available if state else False,
                     "soc_pct":        state.soc_pct if state else None,
+                    "range_km":       state.extra.get("range_km") if state else None,
                     "charge_limit_soc_pct": asset.charge_limit_soc_pct,
                     "max_charge_kw":  asset.max_charge_kw,
                     "goal": {

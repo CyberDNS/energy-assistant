@@ -18,6 +18,7 @@ from energy_assistant.plugins.mqtt_publisher import (
     _build_state_messages,
     _discovery_configs,
     _parse_weekly_command,
+    _reading_messages,
     _weekly_discovery_configs,
     _weekly_state_messages,
 )
@@ -31,7 +32,7 @@ def _asset() -> EvChargingAsset:
 
 
 def _msgs(state: DeviceState | None) -> dict[str, str]:
-    return {t: p for t, p, _ in _build_state_messages(_asset(), None, state, None, False)}
+    return dict(_reading_messages(_asset(), state))
 
 
 def test_unplugged_car_with_soc_stays_available() -> None:
@@ -42,8 +43,18 @@ def test_unplugged_car_with_soc_stays_available() -> None:
     assert msgs["energy_assistant/ev/schlumpf/available"] == "online"
     assert msgs["energy_assistant/ev/schlumpf/soc"] == "62"
     assert msgs["energy_assistant/ev/schlumpf/plugged"] == "OFF"
-    # Charging state/mode are published per control tick, not with the plan.
     assert "energy_assistant/ev/schlumpf/charging_mode" not in msgs
+
+
+def test_plan_messages_exclude_live_readings() -> None:
+    state = DeviceState(
+        device_id="cp1", soc_pct=62.0, available=True,
+        extra={"plugged": True, "range_km": 300.0},
+    )
+    topics = {t for t, _, _ in _build_state_messages(_asset(), None, state, None, False)}
+    for key in ("available", "soc", "range", "range_available", "plugged"):
+        assert f"energy_assistant/ev/schlumpf/{key}" not in topics
+    assert "energy_assistant/ev/schlumpf/override_active" in topics
 
 
 def test_plugged_car_reports_plugged_on() -> None:
@@ -53,6 +64,39 @@ def test_plugged_car_reports_plugged_on() -> None:
     msgs = _msgs(state)
     assert msgs["energy_assistant/ev/schlumpf/available"] == "online"
     assert msgs["energy_assistant/ev/schlumpf/plugged"] == "ON"
+
+
+def test_range_published_when_reported() -> None:
+    state = DeviceState(
+        device_id="cp1", soc_pct=70.0, available=True,
+        extra={"plugged": True, "range_km": 341.6},
+    )
+    msgs = _msgs(state)
+    assert msgs["energy_assistant/ev/schlumpf/range_available"] == "online"
+    assert msgs["energy_assistant/ev/schlumpf/range"] == "342"
+
+
+def test_missing_range_marks_sensor_unavailable() -> None:
+    state = DeviceState(
+        device_id="cp1", soc_pct=70.0, available=True,
+        extra={"plugged": True, "range_km": None},
+    )
+    msgs = _msgs(state)
+    assert msgs["energy_assistant/ev/schlumpf/range_available"] == "offline"
+    assert "energy_assistant/ev/schlumpf/range" not in msgs
+    assert _msgs(None)["energy_assistant/ev/schlumpf/range_available"] == "offline"
+
+
+def test_range_discovery_is_distance_sensor() -> None:
+    configs = {cfg["unique_id"]: cfg for _, cfg in _discovery_configs(_asset(), {})}
+    cfg = configs["ea_ev_schlumpf_range"]
+    assert cfg["state_topic"] == "energy_assistant/ev/schlumpf/range"
+    assert cfg["device_class"] == "distance"
+    assert cfg["unit_of_measurement"] == "km"
+    assert [a["topic"] for a in cfg["availability"]] == [
+        _STATUS_TOPIC, "energy_assistant/ev/schlumpf/range_available",
+    ]
+    assert cfg["availability_mode"] == "all"
 
 
 def test_unreadable_device_goes_offline() -> None:
@@ -199,3 +243,35 @@ async def test_live_states_are_deduped_and_replayed_on_reconnect() -> None:
         "energy_assistant/ev/schlumpf/charging_state": "idle",
         "energy_assistant/ev/schlumpf/charging_mode": "instant_charging",
     }
+
+
+async def test_readings_are_published_only_on_change() -> None:
+    async def noop(*_a):
+        pass
+
+    pub = EvMqttPublisher(None, [_asset()], noop, noop, noop)
+
+    def state(soc: float, range_km: float | None) -> dict[str, DeviceState]:
+        return {"cp1": DeviceState(
+            device_id="cp1", soc_pct=soc, available=True,
+            extra={"plugged": True, "range_km": range_km},
+        )}
+
+    await pub.publish_readings(state(70.0, 342.0))
+    await pub.publish_readings(state(70.2, 342.4))  # same rounded values
+    await pub.publish_readings(state(71.0, 340.0))
+    await pub.publish_readings(state(71.0, None))   # range lost
+    queued = []
+    while not pub._queue.empty():
+        queued.append(pub._queue.get_nowait()[:2])
+    base = "energy_assistant/ev/schlumpf"
+    assert queued == [
+        (f"{base}/available", "online"),
+        (f"{base}/soc", "70"),
+        (f"{base}/range_available", "online"),
+        (f"{base}/range", "342"),
+        (f"{base}/plugged", "ON"),
+        (f"{base}/soc", "71"),
+        (f"{base}/range", "340"),
+        (f"{base}/range_available", "offline"),
+    ]

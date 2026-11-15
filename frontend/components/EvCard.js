@@ -182,6 +182,9 @@ export default defineComponent({
             :style="{ width: Math.min(ev.soc_pct, 100) + '%', background: socColor }">
           </div>
         </div>
+        <span v-if="ev.range_km != null" class="ev-soc-range" title="Range reported by the vehicle">
+          {{ fmt(ev.range_km) }} km
+        </span>
         <span class="ev-soc-limit">limit {{ fmt(ev.charge_limit_soc_pct) }}%</span>
       </div>
 
