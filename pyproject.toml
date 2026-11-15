@@ -21,6 +21,7 @@ dependencies = [
     "pandas>=3.0.1",
     "plotly>=6.6.0",
     "aiomqtt>=2.0",
+    "websockets>=13",
 ]
 
 [project.scripts]
