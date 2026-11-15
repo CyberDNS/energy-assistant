@@ -35,6 +35,7 @@ import aiosqlite
 
 from ..assets.ev import EvDayOverride, EvWeeklyTarget
 from ..core.models import Measurement
+from ..core.savings import ActualSlot, PredictedSlot
 
 _log = logging.getLogger(__name__)
 
@@ -177,6 +178,63 @@ _DELETE_EV_FORCE_CHARGE = "DELETE FROM ev_force_charge WHERE asset_id = ?"
 
 _LOAD_ALL_EV_FORCE_CHARGE = "SELECT asset_id, target_soc_pct FROM ev_force_charge"
 
+# Savings accounting (core/savings.py).  One row per accounting slot; these
+# tables are tiny (96 rows a day) and are never purged — the KPI totals are
+# sums over them.
+_CREATE_SAVINGS_ACTUAL_TABLE = """
+CREATE TABLE IF NOT EXISTS savings_actual (
+    slot_start      TEXT PRIMARY KEY,
+    hours           REAL NOT NULL,
+    baseline_cost   REAL NOT NULL,
+    actual_cost     REAL NOT NULL,
+    inventory_delta REAL NOT NULL
+)
+"""
+
+# kind = 'day_ahead' (frozen once, never overwritten) or 'latest' (the last
+# plan made before the slot began).
+_CREATE_SAVINGS_PREDICTED_TABLE = """
+CREATE TABLE IF NOT EXISTS savings_predicted (
+    slot_start      TEXT NOT NULL,
+    kind            TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    hours           REAL NOT NULL,
+    baseline_cost   REAL NOT NULL,
+    plan_cost       REAL NOT NULL,
+    inventory_delta REAL NOT NULL,
+    PRIMARY KEY (slot_start, kind)
+)
+"""
+
+_CREATE_SAVINGS_STATE_TABLE = """
+CREATE TABLE IF NOT EXISTS savings_state (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    updated_at TEXT NOT NULL,
+    state      TEXT NOT NULL
+)
+"""
+
+# Only slots that have both a measurement and a day-ahead prediction are
+# compared, so the three KPIs always add up (deviation = real − predicted).
+# A prediction covers a whole slot; it is scaled to the part of the slot
+# that was actually measured.
+_QUERY_SAVINGS = """
+SELECT a.slot_start,
+       a.hours,
+       a.baseline_cost,
+       a.actual_cost,
+       a.baseline_cost - a.actual_cost + a.inventory_delta,
+       (d.baseline_cost - d.plan_cost + d.inventory_delta) * a.hours / d.hours,
+       (l.baseline_cost - l.plan_cost + l.inventory_delta) * a.hours / l.hours
+FROM savings_actual a
+JOIN savings_predicted d
+  ON d.slot_start = a.slot_start AND d.kind = 'day_ahead' AND d.hours > 0
+LEFT JOIN savings_predicted l
+  ON l.slot_start = a.slot_start AND l.kind = 'latest' AND l.hours > 0
+WHERE a.slot_start >= ? AND a.slot_start < ?
+ORDER BY a.slot_start
+"""
+
 _CREATE_EV_DISABLED_TABLE = """
 CREATE TABLE IF NOT EXISTS ev_disabled (
     asset_id   TEXT PRIMARY KEY,
@@ -258,6 +316,9 @@ class SqliteStorageBackend:
         await self._db.execute(_CREATE_EV_DAY_OVERRIDES_TABLE)
         await self._db.execute(_CREATE_EV_FORCE_CHARGE_TABLE)
         await self._db.execute(_CREATE_EV_DISABLED_TABLE)
+        await self._db.execute(_CREATE_SAVINGS_ACTUAL_TABLE)
+        await self._db.execute(_CREATE_SAVINGS_PREDICTED_TABLE)
+        await self._db.execute(_CREATE_SAVINGS_STATE_TABLE)
         # Superseded by ev_weekly_plan + ev_day_overrides
         await self._db.execute("DROP TABLE IF EXISTS ev_targets")
         await self._db.execute(_CREATE_LEDGER_HISTORY_INDEX)
@@ -561,3 +622,94 @@ class SqliteStorageBackend:
         async with self._db.execute(_LOAD_ALL_EV_DISABLED) as cursor:
             rows = await cursor.fetchall()
         return {row[0] for row in rows}
+
+    # ------------------------------------------------------------------
+    # Savings accounting
+    # ------------------------------------------------------------------
+
+    async def save_savings_actual(self, slot: ActualSlot) -> None:
+        """Persist the measured result of one accounting slot."""
+        assert self._db is not None, "Call start() before save_savings_actual()"
+        await self._db.execute(
+            "INSERT OR REPLACE INTO savings_actual VALUES (?, ?, ?, ?, ?)",
+            (
+                _utc_iso(slot.start), slot.hours,
+                slot.baseline_cost, slot.actual_cost, slot.inventory_delta,
+            ),
+        )
+        await self._db.commit()
+
+    async def save_savings_predictions(
+        self,
+        kind: str,
+        slots: "list[PredictedSlot]",
+        created_at: datetime,
+        overwrite: bool,
+    ) -> None:
+        """Persist predicted slots of *kind*.
+
+        With ``overwrite=False`` a slot that already has a prediction of this
+        kind keeps it — that is what freezes a day-ahead prediction.
+        """
+        assert self._db is not None, "Call start() before save_savings_predictions()"
+        verb = "INSERT OR REPLACE" if overwrite else "INSERT OR IGNORE"
+        await self._db.executemany(
+            f"{verb} INTO savings_predicted VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    _utc_iso(s.start), kind, _utc_iso(created_at), s.hours,
+                    s.baseline_cost, s.plan_cost, s.inventory_delta,
+                )
+                for s in slots
+            ],
+        )
+        await self._db.commit()
+
+    async def query_savings(self, start: datetime, end: datetime) -> list[dict]:
+        """Compared slots in ``[start, end)``, oldest first.
+
+        ``predicted`` is the day-ahead prediction, ``predicted_latest`` the
+        one from the last plan before the slot (``None`` if there was none).
+        """
+        assert self._db is not None, "Call start() before query_savings()"
+        async with self._db.execute(
+            _QUERY_SAVINGS, (_utc_iso(start), _utc_iso(end))
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [
+            {
+                "slot_start": datetime.fromisoformat(row[0]),
+                "hours": row[1],
+                "baseline_cost": row[2],
+                "actual_cost": row[3],
+                "real": row[4],
+                "predicted": row[5],
+                "predicted_latest": row[6],
+            }
+            for row in rows
+        ]
+
+    async def save_savings_state(self, state: dict) -> None:
+        """Persist the shadow-site state (single row)."""
+        assert self._db is not None, "Call start() before save_savings_state()"
+        await self._db.execute(
+            "INSERT OR REPLACE INTO savings_state VALUES (1, ?, ?)",
+            (_utc_iso(datetime.now(timezone.utc)), json.dumps(state)),
+        )
+        await self._db.commit()
+
+    async def load_savings_state(self) -> tuple[datetime, dict] | None:
+        """Return ``(saved_at, state)``, or ``None`` if nothing was saved."""
+        assert self._db is not None, "Call start() before load_savings_state()"
+        async with self._db.execute(
+            "SELECT updated_at, state FROM savings_state WHERE id = 1"
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return datetime.fromisoformat(row[0]), json.loads(row[1])
+
+
+def _utc_iso(ts: datetime) -> str:
+    """ISO string in UTC — one fixed format, so text comparison orders by time."""
+    return ts.astimezone(timezone.utc).isoformat(timespec="seconds")
