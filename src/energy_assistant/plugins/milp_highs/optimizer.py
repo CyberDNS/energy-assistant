@@ -42,6 +42,21 @@ the solver will never simultaneously import and export in the same step
 The export price is resolved from the tariff in ``context.tariffs`` that
 has a non-zero ``export_price_schedule`` — typically the ``grid`` tariff.
 
+Separately billed loads (``context.secondary_loads``)
+-----------------------------------------------------
+A load on its own tariff behind a cascaded meter (e.g. a heat pump) is not
+part of ``net_load``.  The site is then modelled as two zones:
+
+    primary    g_imp[t] − x[t]          = net_load[t] + Σ_b c − Σ_b d + …
+    secondary  Σ_k s_imp[k,t] + x[t]    = Σ_k load[k,t] + g_exp[t]
+
+``x[t] ≥ 0`` is the primary zone's surplus; it feeds the secondary loads
+first and only the remainder ``g_exp`` is exported.  ``g_imp`` is priced at
+the primary tariff, ``s_imp[k]`` at load *k*'s own tariff.  This is what
+makes the economics right: every extra kWh a battery or car draws costs the
+primary price no matter how large the heat pump load is, while surplus used
+by the heat pump only saves the (usually lower) heat pump price.
+
 Inputs from OptimizationContext
  --------------------------------
 * ``storage_constraints`` — physical limits of every storage device.
@@ -211,9 +226,25 @@ class MilpHigsOptimizer:
                     blended.append(live_pv_kw * (1.0 - frac) + fc_end * frac)
             pv_kw = blended
 
+        # ── Separately billed loads (e.g. heat pump on its own tariff) ──
+        # CONSUMPTION is the site total; carve these loads out of it so the
+        # primary zone only carries what is billed at the primary price.
+        secondary_kw = [
+            _interpolate_kw(sl.load, timestamps) for sl in context.secondary_loads
+        ]
+        secondary_prices = [
+            _interpolate_kw(sl.prices, timestamps) for sl in context.secondary_loads
+        ]
+        if secondary_kw:
+            consumption_kw = [
+                max(0.0, c - sum(kw[t] for kw in secondary_kw))
+                for t, c in enumerate(consumption_kw)
+            ]
+        secondary_load = [
+            [kw[t] * dur_h[t] for t in range(n_steps)] for kw in secondary_kw
+        ]
+
         net_load = [(c - p) * d for c, p, d in zip(consumption_kw, pv_kw, dur_h)]
-        # Keep a copy of the baseline net_load for EV mode classification later.
-        baseline_net_load = list(net_load)
 
         # ── EV phase-2 top-off: add mandatory instant-charge load ─────
         # Phase 2 (charge_limit → target_soc) is scheduled just before the
@@ -322,6 +353,7 @@ class MilpHigsOptimizer:
             initial_threshold_values=initial_threshold_values,
             initial_threshold_running=initial_threshold_running,
             dur_h=dur_h, slot_starts=slot_starts,
+            secondary_load=secondary_load, secondary_prices=secondary_prices,
         )
         t0 = time.monotonic()
         # Solve in a worker thread: prob.solve() blocks for up to the full
@@ -428,11 +460,19 @@ class MilpHigsOptimizer:
         # consistent with the plan instead of re-deriving from raw forecasts.
         g_imp_v = variables["g_imp"]
         g_exp_v = variables["g_exp"]
+        s_imp_v = variables["s_imp"]
+
+        def _site_import_wh(t: int) -> float:
+            # Site import = primary zone + every separately billed load.
+            return (pulp.value(g_imp_v[t]) or 0.0) + sum(
+                pulp.value(v) or 0.0 for (_, tt), v in s_imp_v.items() if tt == t
+            )
+
         flows = [
             PlanFlow(
                 timestep=ts,
                 pv_kw=round(pv_kw[t], 4),
-                grid_import_kw=round((pulp.value(g_imp_v[t]) or 0.0) / _WH / dur_h[t], 4),
+                grid_import_kw=round(_site_import_wh(t) / _WH / dur_h[t], 4),
                 grid_export_kw=round((pulp.value(g_exp_v[t]) or 0.0) / _WH / dur_h[t], 4),
             )
             for t, ts in enumerate(timestamps)
@@ -467,11 +507,17 @@ class MilpHigsOptimizer:
         initial_threshold_running: dict[str, bool] | None = None,
         dur_h: list[float] | None = None,
         slot_starts: list[datetime] | None = None,
+        secondary_load: list[list[float]] | None = None,
+        secondary_prices: list[list[float]] | None = None,
     ) -> tuple[pulp.LpProblem, dict]:
         """Construct the PuLP problem and return (problem, variables dict).
 
         Parameters
         ----------
+        secondary_load / secondary_prices:
+            Per separately billed load: energy per step (kWh) and its import
+            price (€/kWh).  ``net_load`` must NOT include these loads.  See
+            the module docstring for the two-zone formulation.
         battery_cost_basis:
             Cost basis (€/kWh) for energy *already stored* — used as the
             discharge threshold (the optimizer won't discharge below this).
@@ -491,6 +537,16 @@ class MilpHigsOptimizer:
         net_load_wh = [nl * _WH for nl in net_load]
         p_imp = [p / _WH for p in prices]          # €/kWh → €/Wh
         p_exp = [p / _WH for p in export_prices]   # €/kWh → €/Wh
+
+        # Separately billed loads (zone k): Wh per step and €/Wh.
+        sec_wh = [[v * _WH for v in load] for load in (secondary_load or [])]
+        sec_p = [[v / _WH for v in pr] for pr in (secondary_prices or [])]
+        K = range(len(sec_wh))
+        sec_total_wh = [sum(sec_wh[k][t] for k in K) for t in T]
+        # Net load at the grid connection point.  Surplus rules that mirror
+        # what devices measure at the grid point (PV-mode EV charging, PV-only
+        # batteries) use this, not the primary zone's net load.
+        site_net_load_wh = [net_load_wh[t] + sec_total_wh[t] for t in T]
 
         active_ev_goals = [g for g in (ev_goals or []) if g.connected]
         active_threshold_devices = list(threshold_devices or [])
@@ -592,11 +648,29 @@ class MilpHigsOptimizer:
         g_imp = {t: pulp.LpVariable(f"g_imp__{t}", lowBound=0) for t in T}
         g_exp = {t: pulp.LpVariable(f"g_exp__{t}", lowBound=0) for t in T}
 
+        # Two-zone variables (only with separately billed loads):
+        #   s_imp[k, t] — grid energy bought for load k at its own tariff
+        #   x[t]        — primary-zone surplus flowing on to those loads
+        #                 (and, beyond them, to the grid as g_exp)
+        s_imp: dict[tuple[int, int], pulp.LpVariable] = {}
+        x: dict[int, pulp.LpVariable] = {}
+        for t in T:
+            for k in K:
+                s_imp[(k, t)] = pulp.LpVariable(
+                    f"s_imp__{k}__{t}", lowBound=0, upBound=sec_wh[k][t]
+                )
+            if sec_wh:
+                x[t] = pulp.LpVariable(f"x__{t}", lowBound=0)
+        # Import at the grid connection point, all tariffs together.
+        site_imp = {
+            t: g_imp[t] + pulp.lpSum(s_imp[(k, t)] for k in K) for t in T
+        }
+
         # ── Objective ─────────────────────────────────────────────────
         # Grid cost: p_imp/p_exp are €/Wh, g_imp/g_exp are Wh → product is €.
         grid_cost = pulp.lpSum(
             p_imp[t] * g_imp[t] - p_exp[t] * g_exp[t] for t in T
-        )
+        ) + pulp.lpSum(sec_p[k][t] * s_imp[(k, t)] for k in K for t in T)
         # Terminal value: energy remaining at end of horizon is worth
         # tv_basis €/kWh — subtract it (it reduces net cost).
         # tv_basis is SEPARATE from battery_cost_basis (the discharge threshold):
@@ -652,7 +726,7 @@ class MilpHigsOptimizer:
                 pulp.lpSum(c[(b, t)] for b in flexible_ids)
                 - pulp.lpSum(c[(b, t)] for b in no_grid_ids)
                 for t in T
-                if net_load_wh[t] < 0.0
+                if site_net_load_wh[t] < 0.0
             )
         else:
             pv_priority_tiebreak = 0
@@ -686,9 +760,11 @@ class MilpHigsOptimizer:
 
         # ── Constraints ───────────────────────────────────────────────
         for t in T:
-            # Grid energy balance: import − export = net demand (all Wh)
+            # Grid energy balance: import − export = net demand (all Wh).
+            # With separately billed loads the primary zone hands its surplus
+            # x[t] to them instead of exporting it directly.
             prob += (
-                g_imp[t] - g_exp[t]
+                g_imp[t] - (x[t] if sec_wh else g_exp[t])
                 == net_load_wh[t]
                 + pulp.lpSum(c[(sc.device_id, t)] for sc in batteries)
                 - pulp.lpSum(d[(sc.device_id, t)] for sc in batteries)
@@ -699,6 +775,13 @@ class MilpHigsOptimizer:
                 ),
                 f"grid_balance__{t}",
             )
+            if sec_wh:
+                # Secondary zone: own import + primary surplus = loads + export
+                prob += (
+                    pulp.lpSum(s_imp[(k, t)] for k in K) + x[t]
+                    == sec_total_wh[t] + g_exp[t],
+                    f"secondary_balance__{t}",
+                )
 
         # ── EV semi-continuous constraints (min current) ───────────────
         # ev is either 0 or ≥ ev_min_w × slot duration (no sub-minimum charging).
@@ -725,7 +808,7 @@ class MilpHigsOptimizer:
                 if key not in ev_grid:
                     continue
                 max_wh = ev_max_w[goal.asset_id] * dur[t]
-                pv_surplus_wh = max(0.0, -net_load_wh[t])
+                pv_surplus_wh = max(0.0, -site_net_load_wh[t])
                 prob += (
                     ev[key] <= pv_surplus_wh + max_wh * ev_grid[key],
                     f"ev_pv_surplus__{goal.asset_id}__{t}",
@@ -784,10 +867,32 @@ class MilpHigsOptimizer:
         # Used for the no_grid_charge constraints below.
         big_m = [
             max(0.0, net_load_wh[t])
+            + sec_total_wh[t]
             + sum(bat_max_charge_w[s.device_id] * dur[t] for s in batteries)
             + sum(ev_max_w[g.asset_id] * dur[t] for g in active_ev_goals)
             for t in T
         ]
+
+        # ── Two-zone: no import and surplus at the same time ───────────
+        # The primary metering point carries one net flow.  When the primary
+        # price is at least the secondary price, importing while passing
+        # surplus on only costs money, so the LP never does it.  In steps
+        # where the primary price is *lower* (a cheap spot hour vs. a flat
+        # heat pump tariff) it would otherwise "buy" primary energy for the
+        # secondary load — a path that does not exist — so those steps get a
+        # binary that picks one direction.
+        if sec_wh:
+            x_max = [
+                max(0.0, -net_load_wh[t])
+                + sum(bat_max_discharge_w[s.device_id] * dur[t] for s in batteries)
+                for t in T
+            ]
+            for t in T:
+                if p_imp[t] >= max(sec_p[k][t] for k in K):
+                    continue
+                z = pulp.LpVariable(f"zone_dir__{t}", cat="Binary")
+                prob += g_imp[t] <= big_m[t] * z, f"zone_import__{t}"
+                prob += x[t] <= x_max[t] * (1 - z), f"zone_surplus__{t}"
 
         for sc in batteries:
             b = sc.device_id
@@ -808,7 +913,7 @@ class MilpHigsOptimizer:
                 # At night (u=0 because no economic incentive) the constraint is inactive,
                 # so other batteries may still charge from the grid freely.
                 if sc.no_grid_charge:
-                    prob += g_imp[t] <= big_m[t] * (1 - u[(b, t)]), f"no_grid_charge__{b}__{t}"
+                    prob += site_imp[t] <= big_m[t] * (1 - u[(b, t)]), f"no_grid_charge__{b}__{t}"
 
                 # SoC dynamics (all in Wh; efficiency η is dimensionless — unchanged)
                 e_prev = e_init_wh if t == 0 else e[(b, t - 1)]
@@ -835,10 +940,10 @@ class MilpHigsOptimizer:
                 key = (goal.asset_id, t)
                 if key not in ev_on:
                     continue
-                if max(0.0, -net_load_wh[t]) < ev_min_w[goal.asset_id] * dur[t]:
+                if max(0.0, -site_net_load_wh[t]) < ev_min_w[goal.asset_id] * dur[t]:
                     continue
                 prob += (
-                    g_imp[t] <= big_m[t] * (1 - ev_on[key] + ev_grid[key]),
+                    site_imp[t] <= big_m[t] * (1 - ev_on[key] + ev_grid[key]),
                     f"no_grid_charge_ev__{goal.asset_id}__{t}",
                 )
 
@@ -908,7 +1013,7 @@ class MilpHigsOptimizer:
                         f"min_offtime__{td_id}__{t}__{k}",
                     )
 
-        variables = {"c": c, "d": d, "u": u, "e": e, "g_imp": g_imp, "g_exp": g_exp, "ev": ev, "ev_on": ev_on, "ev_grid": ev_grid, "run": run, "val": val}
+        variables = {"c": c, "d": d, "u": u, "e": e, "g_imp": g_imp, "g_exp": g_exp, "s_imp": s_imp, "x": x, "ev": ev, "ev_on": ev_on, "ev_grid": ev_grid, "run": run, "val": val}
         return prob, variables
 
     # ------------------------------------------------------------------
