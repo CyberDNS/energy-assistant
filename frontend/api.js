@@ -20,6 +20,7 @@ export const fetchEv           = ()           => call('/api/ev')
 export const fetchControllable = ()           => call('/api/controllable')
 export const fetchConfig   = ()           => call('/api/config')
 export const fetchLearned  = ()           => call('/api/learned')
+export const fetchSavings  = (days)       => call(`/api/savings?days=${days}`)
 export const refitLearned  = (id)         => call(`/api/learned/${encodeURIComponent(id)}/refit`, { method: 'POST' })
 
 const _json = (method, body) => ({
