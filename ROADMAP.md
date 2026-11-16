@@ -90,7 +90,7 @@ Move from static assumptions to live market data.
 
 - [ ] Tibber integration: live spot price + power readings via GraphQL subscription
 - [ ] aWATTar integration: day-ahead EPEX spot prices
-- [ ] PV generation forecast: integration with forecast.solar or Solcast
+- [x] PV generation forecast: integration with forecast.solar (`forecast_solar` plugin)
 - [ ] Consumption forecast: simple rolling-average model
 
 ---
