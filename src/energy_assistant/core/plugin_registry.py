@@ -12,6 +12,7 @@ needed to construct a device or tariff:
     ctx.backends        — parsed BackendsConfig (host, port, tokens)
     ctx.iobroker_pool   — shared IoBrokerConnectionPool (or None)
     ctx.ha_client       — HAClient (or None)
+    ctx.modbus_pool     — shared ModbusConnectionPool, created on first use
     ctx.device_registry — populated DeviceRegistry (set in second pass,
                           available only for deferred factory types)
     ctx.data_dir        — writable directory for persistent plugin state
@@ -48,6 +49,7 @@ class BuildContext:
     backends: BackendsConfig
     iobroker_pool: Any = None    # IoBrokerConnectionPool | None
     ha_client: Any = None        # HAClient | None
+    modbus_pool: Any = None      # ModbusConnectionPool | None (created lazily)
     device_registry: Any = None  # DeviceRegistry | None  (deferred pass only)
     data_dir: Path | None = None  # writable directory for plugin state (or None)
 

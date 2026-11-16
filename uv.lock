@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.14"
 resolution-markers = [
     "sys_platform == 'win32'",
@@ -348,6 +348,7 @@ dependencies = [
     { name = "plotly" },
     { name = "pulp" },
     { name = "pydantic" },
+    { name = "pymodbus" },
     { name = "pyyaml" },
     { name = "uvicorn" },
     { name = "websockets" },
@@ -377,6 +378,7 @@ requires-dist = [
     { name = "plotly", specifier = ">=6.6.0" },
     { name = "pulp", specifier = ">=3.0,<4.0" },
     { name = "pydantic", specifier = ">=2.0" },
+    { name = "pymodbus", specifier = ">=3.8" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24" },
     { name = "pyyaml", specifier = ">=6.0" },
@@ -1313,6 +1315,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/b0/77/a5b8c569bf593b0140bde72ea885a803b82086995367bf2037de0159d924/pygments-2.19.2.tar.gz", hash = "sha256:636cb2477cec7f8952536970bc533bc43743542f70392ae026374600add5b887", size = 4968631, upload-time = "2025-06-21T13:39:12.283Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c7/21/705964c7812476f378728bdf590ca4b771ec72385c533964653c68e86bdc/pygments-2.19.2-py3-none-any.whl", hash = "sha256:86540386c03d588bb81d44bc3928634ff26449851e99741617ecb9037ee5ec0b", size = 1225217, upload-time = "2025-06-21T13:39:07.939Z" },
+]
+
+[[package]]
+name = "pymodbus"
+version = "3.16.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/44/e8/910c866f041769d323df554835965571b054b10e1a3265427d246c4d2ccb/pymodbus-3.16.2.tar.gz", hash = "sha256:64057981fac117ed4b75ea8ef6035369f6ae803247700a5efdf75d76a2be8aef", size = 170282, upload-time = "2026-11-03T12:04:07.347Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/51/d4/ac60401cb41999f375887c8dee0902db0bf9d0f43dc6f8b0695483b7016c/pymodbus-3.16.2-py3-none-any.whl", hash = "sha256:385ad145955a7af15020ee55c266f7a2c6d9af2180d45c3755a56db9a5014078", size = 168896, upload-time = "2026-11-03T12:04:05.255Z" },
 ]
 
 [[package]]
