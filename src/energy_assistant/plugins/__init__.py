@@ -30,6 +30,7 @@ from . import (  # noqa: E402
     generic_homeassistant,
     generic_iobroker,
     learned,
+    modbus,
     openwb_homeassistant,
     openwb_mqtt,
     pvforecast_iobroker,
@@ -48,6 +49,7 @@ generic_consumer.register(registry)
 generic_homeassistant.register(registry)
 generic_iobroker.register(registry)
 learned.register(registry)
+modbus.register(registry)
 openwb_homeassistant.register(registry)
 openwb_mqtt.register(registry)
 pvforecast_iobroker.register(registry)

@@ -1,0 +1,68 @@
+# SMA Sunny Boy Storage (SBS 2.5 / 3.7 / 5.0 / 6.0) — Modbus TCP profile.
+#
+# Prerequisite: the Modbus TCP server must be switched on in the inverter
+# (Sunny Explorer / web UI: "External communication → Modbus → TCP server").
+#
+# Addresses, types and sentinels follow SMA's Modbus register list for the
+# Sunny Boy Storage.  Verify them against the list for your firmware with
+#   python scripts/probe_modbus.py --host <inverter-ip>
+# before relying on the values.
+
+name: "SMA Sunny Boy Storage"
+
+defaults:
+  port: 502
+  unit_id: 3          # SMA factory default
+  word_order: big
+
+# SMA marks "value not available" with a fixed raw pattern per data type.
+nan:
+  s16: 0x8000
+  u16: 0xFFFF
+  s32: 0x80000000
+  u32: 0xFFFFFFFF
+
+registers:
+  # Active power at the AC connection.  SMA sign: positive = feeding out
+  # (battery discharging), negative = drawing (battery charging).
+  power_ac:
+    table: input
+    address: 30775
+    type: s32
+  # Battery state of charge, %.
+  soc:
+    table: input
+    address: 30845
+    type: u32
+  # Maximum charge / discharge power currently allowed by the inverter, W.
+  max_charge:
+    table: holding
+    address: 40189
+    type: u32
+  max_discharge:
+    table: holding
+    address: 40191
+    type: u32
+  # Active power limit, % of rated power — written to cap discharge (see
+  # control below).  It is write-only: reading it returns the "no value"
+  # marker (0x8000), so it is not polled.
+  active_power_limit:
+    table: holding
+    address: 40016
+    type: s16
+
+state:
+  # Platform sign: positive = consuming (charging), so SMA's value is negated.
+  power_w: {register: power_ac, scale: -1}
+  soc_pct: soc
+  extra:
+    max_cha_w: max_charge
+    max_dsch_w: max_discharge
+
+# Whether the inverter obeys the limit depends on its operating mode for
+# active power limitation (register 40210), a one-time inverter setting that
+# is not written here.  The installation this profile was verified on reads
+# 1079 there.
+control:
+  strategy: discharge_limit_pct
+  register: active_power_limit

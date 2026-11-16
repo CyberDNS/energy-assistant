@@ -49,6 +49,8 @@ src/
       tibber/            # tibber_iobroker tariff
       zendure/           # Zendure battery (MILP participant)
       sma/               # SMA inverter / Energy Manager
+      _modbus/           # shared Modbus TCP transport + register codec
+      modbus/            # profile-driven Modbus device (profiles/*.yaml per vendor model)
       ...
     server/            # HTTP API, WebSocket, startup lifecycle
 tests/
