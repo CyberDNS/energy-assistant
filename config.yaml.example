@@ -36,6 +36,20 @@ pvforecast_iobroker:
   plant_id: "pv"
   timezone: "Europe/Berlin"
 
+zendure:
+  # Native Zendure plugin — no ioBroker. Talks MQTT to the Zendure cloud
+  # (connection: cloud, default) or to backends.mqtt (connection: local).
+  # cloud_key = the Zendure app's authorization cloud key (HA integration key).
+  # List product/device keys: python scripts/probe_zendure.py
+  cloud_key: !secret zendure_cloud_key
+  product_key: "<product-key>"
+  device_key: "<device-key>"
+  capacity_kwh: 8.0
+  max_charge_kw: 1.2
+  max_discharge_kw: 1.2
+  maintenance_charge_w: 300
+  # smart_mode: true   # keep limit writes in RAM instead of flash
+
 zendure_iobroker:
   # Find hub_id and device_serial: python scripts/probe_iobroker.py zendure
   hub_id: "<hub-id>"
