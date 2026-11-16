@@ -25,6 +25,7 @@ registry = PluginRegistry()
 from . import (  # noqa: E402
     differential,
     flat_rate,
+    forecast_solar,
     generic_consumer,
     generic_homeassistant,
     generic_iobroker,
@@ -42,6 +43,7 @@ from . import (  # noqa: E402
 
 differential.register(registry)
 flat_rate.register(registry)
+forecast_solar.register(registry)
 generic_consumer.register(registry)
 generic_homeassistant.register(registry)
 generic_iobroker.register(registry)
