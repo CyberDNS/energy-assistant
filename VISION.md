@@ -183,6 +183,7 @@ code:
 | `generic_ha`       | Reads sensors and controls entities via the Home Assistant REST API |
 | `generic_iobroker` | Reads and writes datapoints via the ioBroker simple-api |
 | `differential`     | Derives power as `minuend − subtrahend` from two named devices |
+| `modbus`           | Reads a device directly over Modbus TCP; the vendor register mapping comes from a profile file (e.g. `sma_sunny_boy_storage`) |
 
 Any sensor or switch reachable through these backends can be integrated
 without writing any code.
