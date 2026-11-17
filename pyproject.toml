@@ -24,6 +24,7 @@ dependencies = [
     "websockets>=13",
     "pymodbus>=3.8",
     "mcp>=1.10",
+    "smllib>=1.7",
 ]
 
 [project.scripts]

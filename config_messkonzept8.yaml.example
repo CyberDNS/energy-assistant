@@ -84,6 +84,11 @@ devices:
     # (replaces the source block; import/export also land in extra[...]):
     # type: tibber
     # token: !secret tibber_token
+    # Or read the Tibber Pulse Bridge on the LAN (no cloud needed; optional
+    # token adds the cloud stream as fallback):
+    # type: tibber_local
+    # host: 192.168.1.50                       # the bridge's IP or hostname
+    # password: !secret tibber_pulse_password  # code printed on the bridge
     tariff: export_tariff
 
   # Z2 — Household sub-circuit meter.
