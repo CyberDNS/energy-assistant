@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -601,3 +601,101 @@ async def test_tick_before_first_plan_sends_no_commands() -> None:
     await loop.tick(live, registry)
 
     assert dev.commands == []
+
+
+# ── Plan fidelity: idle holds, discharge stays within the plan ────────────────
+
+
+def _single_intent_loop(now: datetime, power_kw: float) -> ControlLoop:
+    loop = ControlLoop(ledger=BatteryCostLedger())
+    loop.register_contributor(StorageControlContributor(_constraints("bat")))
+    loop.update_plan(
+        EnergyPlan(intents=[ControlIntent(device_id="bat", timestep=now, power_kw=power_kw)])
+    )
+    return loop
+
+
+@pytest.mark.parametrize("price", [0.30, 0.46, 0.53])
+@pytest.mark.parametrize("current_w", [0.0, -600.0])
+def test_idle_holds_at_high_import_price(price: float, current_w: float) -> None:
+    """Idle means "keep the energy for later", even when import is expensive
+    and the battery was discharging a moment ago (e.g. a new plan arrived)."""
+    now = datetime.now(timezone.utc)
+    loop = _single_intent_loop(now, 0.0)
+    live = LiveSituation(
+        timestamp=now,
+        grid_power_w=700.0 + current_w,  # 700 W house load, battery covers |current_w|
+        dt_hours=5.0 / 3600.0,
+        device_states={"bat": DeviceState(device_id="bat", power_w=current_w, soc_pct=50.0)},
+        current_price_eur_per_kwh=price,
+        pv_opportunity_price_eur_per_kwh=0.08,
+    )
+    (_did, setpoint_w, mode), = loop.describe_setpoints(live)
+    assert mode == "idle"
+    assert setpoint_w == 0.0
+
+
+def test_no_plan_slot_holds_at_high_import_price() -> None:
+    now = datetime.now(timezone.utc)
+    loop = _single_intent_loop(now - timedelta(hours=1), -1.0)  # intent long expired
+    live = LiveSituation(
+        timestamp=now,
+        grid_power_w=700.0,
+        dt_hours=5.0 / 3600.0,
+        device_states={"bat": DeviceState(device_id="bat", power_w=0.0, soc_pct=50.0)},
+        current_price_eur_per_kwh=0.50,
+        pv_opportunity_price_eur_per_kwh=0.08,
+    )
+    (_did, setpoint_w, _mode), = loop.describe_setpoints(live)
+    assert setpoint_w == 0.0
+
+
+def test_small_planned_discharge_is_not_turned_into_full_load_following() -> None:
+    now = datetime.now(timezone.utc)
+    loop = _single_intent_loop(now, -0.2)
+    live = LiveSituation(
+        timestamp=now,
+        grid_power_w=700.0,
+        dt_hours=5.0 / 3600.0,
+        device_states={"bat": DeviceState(device_id="bat", power_w=0.0, soc_pct=50.0)},
+        current_price_eur_per_kwh=0.50,
+        pv_opportunity_price_eur_per_kwh=0.08,
+    )
+    (_did, setpoint_w, _mode), = loop.describe_setpoints(live)
+    assert setpoint_w is not None
+    assert -250.0 - 1e-6 <= setpoint_w < -150.0
+
+
+def test_planned_discharge_still_follows_lower_load() -> None:
+    now = datetime.now(timezone.utc)
+    loop = _single_intent_loop(now, -1.0)
+    live = LiveSituation(
+        timestamp=now,
+        grid_power_w=400.0,
+        dt_hours=5.0 / 3600.0,
+        device_states={"bat": DeviceState(device_id="bat", power_w=0.0, soc_pct=50.0)},
+        current_price_eur_per_kwh=0.50,
+        pv_opportunity_price_eur_per_kwh=0.08,
+    )
+    (_did, setpoint_w, _mode), = loop.describe_setpoints(live)
+    assert setpoint_w is not None
+    assert -520.0 <= setpoint_w <= -300.0  # ≈ load (+ small import buffer), no export
+
+
+def test_pv_only_charge_without_surplus_does_not_discharge() -> None:
+    now = datetime.now(timezone.utc)
+    loop = ControlLoop(ledger=BatteryCostLedger())
+    loop.register_contributor(StorageControlContributor(_constraints("bat")))
+    loop.update_plan(EnergyPlan(intents=[
+        ControlIntent(device_id="bat", timestep=now, power_kw=1.0, grid_allowed=False)
+    ]))
+    live = LiveSituation(
+        timestamp=now,
+        grid_power_w=700.0,
+        dt_hours=5.0 / 3600.0,
+        device_states={"bat": DeviceState(device_id="bat", power_w=0.0, soc_pct=50.0)},
+        current_price_eur_per_kwh=0.50,
+        pv_opportunity_price_eur_per_kwh=0.08,
+    )
+    (_did, setpoint_w, _mode), = loop.describe_setpoints(live)
+    assert setpoint_w == 0.0

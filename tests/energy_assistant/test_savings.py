@@ -156,6 +156,39 @@ class TestSavingsTracker:
         # are neither a loss nor a saving.
         assert slots[0].inventory_delta == pytest.approx(1 / 60 * 0.20)
 
+    def test_soc_jump_is_booked_as_correction_not_hidden(self) -> None:
+        """A BMS re-calibration (10 % of capacity in 5 min while idle) is
+        reported as ``soc_correction``; the slot total is unchanged."""
+        tracker = SavingsTracker([BAT], step_minutes=60)
+        steady = [_sample(m, 0.0, stored=5.0) for m in range(0, 30)]
+        jump = [_sample(30 + m, 0.0, stored=5.0 - 0.2 * m) for m in range(1, 6)]
+        after = [_sample(35 + m, 0.0, stored=4.0) for m in range(1, 27)]
+        (slot,) = self._run(tracker, steady + jump + after)
+        # 1 kWh minus the 0.2 kWh band minus a few minutes of tolerated drift.
+        assert slot.soc_correction_kwh["bat"] == pytest.approx(-0.775, abs=0.01)
+        assert slot.soc_correction == pytest.approx(slot.soc_correction_kwh["bat"] * 0.20)
+        assert slot.inventory_delta + slot.soc_correction == pytest.approx(-1.0 * 0.20)
+        assert slot.saving == pytest.approx(-1.0 * 0.20)
+
+    def test_slow_soc_drift_is_not_a_jump(self) -> None:
+        tracker = SavingsTracker([BAT], step_minutes=60)
+        # 0.4 kWh in an hour without measured power: within drift + band.
+        samples = [_sample(m, 0.0, stored=5.0 - 0.4 * m / 60) for m in range(0, 62)]
+        slot = self._run(tracker, samples)[0]
+        assert slot.soc_correction == 0.0
+        assert slot.soc_correction_kwh == {}
+        assert slot.inventory_delta == pytest.approx(-0.4 * 0.20, abs=1e-3)
+
+    def test_quantized_soc_while_discharging_is_not_a_jump(self) -> None:
+        tracker = SavingsTracker([BAT], step_minutes=60)
+        # 1 kW discharge, SoC reported in whole percent (0.1 kWh steps).
+        samples = [
+            _sample(m, 0.0, storage_kw=-1.0, stored=round((5.0 - m / 60) * 10) / 10)
+            for m in range(0, 62)
+        ]
+        slot = self._run(tracker, samples)[0]
+        assert slot.soc_correction == 0.0
+
     def test_deferred_ev_charge_is_valued_until_it_catches_up(self) -> None:
         tracker = SavingsTracker([], step_minutes=60)
         tracker.tick(_sample(0, 0.0, ev=EvLive(True, 0.0, 6.0)))
@@ -287,6 +320,39 @@ class TestSavingsStorage:
             # Prediction scaled to the measured half of the slot.
             assert rows[1]["predicted"] == pytest.approx(0.20)
             assert rows[1]["predicted_latest"] is None
+        finally:
+            await db.stop()
+
+    async def test_soc_correction_counts_and_old_db_is_migrated(self, tmp_path: Path) -> None:
+        import sqlite3
+
+        path = tmp_path / "h.db"
+        with sqlite3.connect(path) as con:  # schema before soc_correction existed
+            con.execute(
+                "CREATE TABLE savings_actual (slot_start TEXT PRIMARY KEY, hours REAL NOT NULL,"
+                " baseline_cost REAL NOT NULL, actual_cost REAL NOT NULL,"
+                " inventory_delta REAL NOT NULL)"
+            )
+            con.execute(
+                "INSERT INTO savings_actual VALUES (?, 0.25, 0.40, 0.15, 0.01)",
+                (T0.isoformat(timespec="seconds"),),
+            )
+        db = SqliteStorageBackend(path)
+        await db.start()
+        try:
+            s1 = T0 + timedelta(minutes=15)
+            pred = PredictedSlot(T0, 0.25, 0.30, 0.10, 0.0)
+            await db.save_savings_predictions(
+                "day_ahead", [pred, PredictedSlot(s1, 0.25, 0.30, 0.10, 0.0)], T0, overwrite=False
+            )
+            await db.save_savings_actual(
+                ActualSlot(s1, 0.25, 0.40, 0.15, 0.01, soc_correction=-0.18)
+            )
+            old, new = await db.query_savings(T0, T0 + timedelta(hours=1))
+            assert old["soc_correction"] == 0.0
+            assert old["real"] == pytest.approx(0.26)
+            assert new["soc_correction"] == pytest.approx(-0.18)
+            assert new["real"] == pytest.approx(0.26 - 0.18)
         finally:
             await db.stop()
 
