@@ -110,7 +110,13 @@ controller:
   # How often the control setpoint is sent to devices (seconds).
   control_interval_s: 15
   # How often the MILP plan is re-solved (seconds). 900 = every 15 minutes.
+  # Runs are aligned to the optimizer's slot grid; the value is snapped to a
+  # whole number of slots (or a divisor of the slot length if shorter).
   plan_interval_s: 900
+  # Start each planning run this many seconds before the slot boundary, so the
+  # new plan is published by the time the slot starts. Should exceed the
+  # optimizer's runtime.
+  plan_lead_s: 30
   # Set to true to compute setpoints without sending commands (safe for testing).
   dry_run: false
   # Safety buffer for EV missed-deadline detection: a deadline is only
