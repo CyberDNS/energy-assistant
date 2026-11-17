@@ -47,6 +47,7 @@ src/
       generic_iobroker/  # generic_iobroker source
       generic_ha/        # generic_ha source + ha_switch control
       tibber/            # tibber_iobroker tariff
+      tibber_local/      # Tibber Pulse Bridge read on the LAN (SML telegrams)
       zendure/           # Zendure battery (MILP participant)
       sma/               # SMA inverter / Energy Manager
       _modbus/           # shared Modbus TCP transport + register codec
