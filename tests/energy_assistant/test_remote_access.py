@@ -131,7 +131,8 @@ class TestMcpEndpoint:
                     "clientInfo": {"name": "test", "version": "0"},
                 })
                 tools = {t["name"]: t for t in (await rpc("tools/list", {}))["tools"]}
-                assert {"get_status", "get_plan", "get_savings_slots", "get_history"} <= set(tools)
+                assert {"get_status", "get_plan", "get_savings_slots", "get_history",
+                        "get_execution", "list_plan_snapshots", "get_plan_snapshot"} <= set(tools)
                 assert all(t["annotations"]["readOnlyHint"] for t in tools.values())
 
                 result = await rpc("tools/call", {

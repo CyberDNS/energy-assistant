@@ -309,6 +309,10 @@ class StorageControlContributor:
         ``min(|surplus|, max_charge_kw × 1000)`` W.
         Otherwise hold at 0 W (no charge, no discharge).
 
+    The realtime slice optimizer (``realtime_slice_optimizer``) applies the
+    same rules: ``idle`` never discharges, and a planned discharge follows
+    the live load only up to ``DISCHARGE_FOLLOW_HEADROOM`` × the plan.
+
     The actual setpoint sent to the device respects physical limits
     declared in ``StorageConstraints`` (``max_charge_kw``).
     """
@@ -429,6 +433,10 @@ class ControlLoop:
         # Setpoint per device from the most recent tick() / describe_setpoints()
         # (None = no command).  Empty until the first tick with a plan.
         self.last_setpoints: dict[str, float | None] = {}
+        # Display mode and active intent per device from the same tick
+        # (used by the execution log, see core/execution_log.py).
+        self.last_modes: dict[str, str] = {}
+        self.last_intents: dict[str, ControlIntent | None] = {}
 
     # ------------------------------------------------------------------
     # Plan management
@@ -522,11 +530,12 @@ class ControlLoop:
             # to ``min_offtime_h`` even after the real plan says to run.
             # Hold every device in its current state instead.
             return
+        rows = self._compute_setpoints(live)
         setpoints = {
             device_id: (setpoint_w, intent)
-            for device_id, setpoint_w, _mode, intent in self._compute_setpoints(live)
+            for device_id, setpoint_w, _mode, intent in rows
         }
-        self.last_setpoints = {did: sp for did, (sp, _i) in setpoints.items()}
+        self._remember(rows)
 
         for contributor in self._contributors:
             setpoint_w, intent = setpoints[contributor.device_id]
@@ -596,12 +605,16 @@ class ControlLoop:
         registered contributor.  Discharge setpoints are capped to the
         current grid import demand (same logic as ``tick()``).
         """
-        rows = [
-            (device_id, setpoint_w, mode)
-            for device_id, setpoint_w, mode, _intent in self._compute_setpoints(live)
-        ]
-        self.last_setpoints = {did: sp for did, sp, _m in rows}
-        return rows
+        full = self._compute_setpoints(live)
+        self._remember(full)
+        return [(device_id, setpoint_w, mode) for device_id, setpoint_w, mode, _intent in full]
+
+    def _remember(
+        self, rows: list[tuple[str, float | None, str, ControlIntent | None]]
+    ) -> None:
+        self.last_setpoints = {did: sp for did, sp, _m, _i in rows}
+        self.last_modes = {did: mode for did, _sp, mode, _i in rows}
+        self.last_intents = {did: intent for did, _sp, _m, intent in rows}
 
     # ------------------------------------------------------------------
     # Helpers

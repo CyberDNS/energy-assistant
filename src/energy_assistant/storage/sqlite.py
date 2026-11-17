@@ -28,13 +28,15 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import zlib
 from datetime import date, datetime, timezone
 from pathlib import Path
 
 import aiosqlite
 
 from ..assets.ev import EvDayOverride, EvWeeklyTarget
-from ..core.models import Measurement
+from ..core.execution_log import ExecutionSlot
+from ..core.models import EnergyPlan, Measurement
 from ..core.savings import ActualSlot, PredictedSlot
 
 _log = logging.getLogger(__name__)
@@ -187,9 +189,15 @@ CREATE TABLE IF NOT EXISTS savings_actual (
     hours           REAL NOT NULL,
     baseline_cost   REAL NOT NULL,
     actual_cost     REAL NOT NULL,
-    inventory_delta REAL NOT NULL
+    inventory_delta REAL NOT NULL,
+    soc_correction  REAL NOT NULL DEFAULT 0
 )
 """
+
+# Columns added after the first release, created on older DBs by start().
+_SAVINGS_ACTUAL_ADDED_COLUMNS = {
+    "soc_correction": "REAL NOT NULL DEFAULT 0",
+}
 
 # kind = 'day_ahead' (frozen once, never overwritten) or 'latest' (the last
 # plan made before the slot began).
@@ -223,12 +231,13 @@ SELECT a.slot_start,
        a.hours,
        a.baseline_cost,
        a.actual_cost,
-       a.baseline_cost - a.actual_cost + a.inventory_delta,
+       a.baseline_cost - a.actual_cost + a.inventory_delta + a.soc_correction,
        (d.baseline_cost - d.plan_cost + d.inventory_delta) * a.hours / d.hours,
        (l.baseline_cost - l.plan_cost + l.inventory_delta) * a.hours / l.hours,
        a.inventory_delta,
        d.created_at, d.hours, d.baseline_cost, d.plan_cost, d.inventory_delta,
-       l.created_at, l.hours, l.baseline_cost, l.plan_cost, l.inventory_delta
+       l.created_at, l.hours, l.baseline_cost, l.plan_cost, l.inventory_delta,
+       a.soc_correction
 FROM savings_actual a
 JOIN savings_predicted d
   ON d.slot_start = a.slot_start AND d.kind = 'day_ahead' AND d.hours > 0
@@ -237,6 +246,38 @@ LEFT JOIN savings_predicted l
 WHERE a.slot_start >= ? AND a.slot_start < ?
 ORDER BY a.slot_start
 """
+
+# Plan fidelity diagnostics, purged with the history (see purge_before).
+# Every published plan, zlib-compressed JSON (~6 kB); day_ahead = 1 marks the
+# plan that froze a day's savings prediction.
+_CREATE_PLAN_SNAPSHOTS_TABLE = """
+CREATE TABLE IF NOT EXISTS plan_snapshots (
+    created_at TEXT PRIMARY KEY,
+    day_ahead  INTEGER NOT NULL DEFAULT 0,
+    plan       BLOB NOT NULL
+)
+"""
+
+# What the control loop did with the plan: one row per slot and device
+# (see core/execution_log.py).
+_CREATE_CONTROL_EXECUTION_TABLE = """
+CREATE TABLE IF NOT EXISTS control_execution (
+    slot_start      TEXT NOT NULL,
+    device_id       TEXT NOT NULL,
+    seconds         REAL NOT NULL,
+    mode            TEXT NOT NULL,
+    planned_w       REAL,
+    setpoint_w      REAL,
+    measured_w      REAL,
+    plan_created_at TEXT,
+    PRIMARY KEY (slot_start, device_id)
+)
+"""
+
+_PURGE_DIAGNOSTICS_SQL = (
+    "DELETE FROM plan_snapshots WHERE created_at < ?",
+    "DELETE FROM control_execution WHERE slot_start < ?",
+)
 
 _CREATE_EV_DISABLED_TABLE = """
 CREATE TABLE IF NOT EXISTS ev_disabled (
@@ -322,10 +363,22 @@ class SqliteStorageBackend:
         await self._db.execute(_CREATE_SAVINGS_ACTUAL_TABLE)
         await self._db.execute(_CREATE_SAVINGS_PREDICTED_TABLE)
         await self._db.execute(_CREATE_SAVINGS_STATE_TABLE)
+        await self._add_missing_columns("savings_actual", _SAVINGS_ACTUAL_ADDED_COLUMNS)
+        await self._db.execute(_CREATE_PLAN_SNAPSHOTS_TABLE)
+        await self._db.execute(_CREATE_CONTROL_EXECUTION_TABLE)
         # Superseded by ev_weekly_plan + ev_day_overrides
         await self._db.execute("DROP TABLE IF EXISTS ev_targets")
         await self._db.execute(_CREATE_LEDGER_HISTORY_INDEX)
         await self._db.commit()
+
+    async def _add_missing_columns(self, table: str, columns: dict[str, str]) -> None:
+        """``ALTER TABLE … ADD COLUMN`` for every column *table* still lacks."""
+        assert self._db is not None
+        async with self._db.execute(f"PRAGMA table_info({table})") as cursor:
+            existing = {row[1] for row in await cursor.fetchall()}
+        for name, decl in columns.items():
+            if name not in existing:
+                await self._db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
     async def stop(self) -> None:
         """Close the database connection."""
@@ -356,7 +409,8 @@ class SqliteStorageBackend:
         cutoff: datetime,
         batch_size: int = _PURGE_BATCH_SIZE,
     ) -> int:
-        """Delete measurements and ledger history older than *cutoff*.
+        """Delete measurements, ledger history, plan snapshots and the
+        control execution log older than *cutoff*.
 
         Deletes in committed batches of *batch_size* rows (see
         ``_PURGE_BATCH_SQL``).  Freed pages are returned to the filesystem via
@@ -378,6 +432,11 @@ class SqliteStorageBackend:
                     next_log += 1_000_000
                 if n < batch_size:
                     break
+        # Small tables (≈100 rows a day each): one statement is enough.
+        for sql in _PURGE_DIAGNOSTICS_SQL:
+            async with self._db.execute(sql, (_utc_iso(cutoff),)) as cursor:
+                deleted += max(cursor.rowcount, 0)
+            await self._db.commit()
         # incremental_vacuum frees one page per step — the result rows must
         # be consumed or only the first page is released.
         async with self._db.execute("PRAGMA incremental_vacuum") as cursor:
@@ -634,10 +693,13 @@ class SqliteStorageBackend:
         """Persist the measured result of one accounting slot."""
         assert self._db is not None, "Call start() before save_savings_actual()"
         await self._db.execute(
-            "INSERT OR REPLACE INTO savings_actual VALUES (?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO savings_actual"
+            " (slot_start, hours, baseline_cost, actual_cost, inventory_delta, soc_correction)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
             (
                 _utc_iso(slot.start), slot.hours,
                 slot.baseline_cost, slot.actual_cost, slot.inventory_delta,
+                slot.soc_correction,
             ),
         )
         await self._db.commit()
@@ -648,14 +710,15 @@ class SqliteStorageBackend:
         slots: "list[PredictedSlot]",
         created_at: datetime,
         overwrite: bool,
-    ) -> None:
-        """Persist predicted slots of *kind*.
+    ) -> int:
+        """Persist predicted slots of *kind*; return how many rows were written.
 
         With ``overwrite=False`` a slot that already has a prediction of this
         kind keeps it — that is what freezes a day-ahead prediction.
         """
         assert self._db is not None, "Call start() before save_savings_predictions()"
         verb = "INSERT OR REPLACE" if overwrite else "INSERT OR IGNORE"
+        before = self._db.total_changes
         await self._db.executemany(
             f"{verb} INTO savings_predicted VALUES (?, ?, ?, ?, ?, ?, ?)",
             [
@@ -667,6 +730,7 @@ class SqliteStorageBackend:
             ],
         )
         await self._db.commit()
+        return self._db.total_changes - before
 
     async def query_savings(self, start: datetime, end: datetime) -> list[dict]:
         """Compared slots in ``[start, end)``, oldest first.
@@ -689,6 +753,7 @@ class SqliteStorageBackend:
                 "predicted": row[5],
                 "predicted_latest": row[6],
                 "inventory_delta": row[7],
+                "soc_correction": row[18],
                 "day_ahead": _prediction(row[8:13]),
                 "latest": _prediction(row[13:18]),
             }
@@ -714,6 +779,87 @@ class SqliteStorageBackend:
         if row is None:
             return None
         return datetime.fromisoformat(row[0]), json.loads(row[1])
+
+
+    # ------------------------------------------------------------------
+    # Plan snapshots and control execution log
+    # ------------------------------------------------------------------
+
+    async def save_plan_snapshot(self, plan: EnergyPlan, day_ahead: bool = False) -> None:
+        """Persist *plan*; ``day_ahead=True`` marks it as a day-ahead plan."""
+        assert self._db is not None, "Call start() before save_plan_snapshot()"
+        blob = zlib.compress(plan.model_dump_json().encode(), 6)
+        await self._db.execute(
+            "INSERT INTO plan_snapshots (created_at, day_ahead, plan) VALUES (?, ?, ?)"
+            " ON CONFLICT(created_at) DO UPDATE SET"
+            " day_ahead = MAX(day_ahead, excluded.day_ahead), plan = excluded.plan",
+            (_utc_iso(plan.created_at), int(day_ahead), blob),
+        )
+        await self._db.commit()
+
+    async def list_plan_snapshots(self, start: datetime, end: datetime) -> list[dict]:
+        """``{created_at, day_ahead}`` of the plans made in ``[start, end)``."""
+        assert self._db is not None, "Call start() before list_plan_snapshots()"
+        async with self._db.execute(
+            "SELECT created_at, day_ahead FROM plan_snapshots"
+            " WHERE created_at >= ? AND created_at < ? ORDER BY created_at",
+            (_utc_iso(start), _utc_iso(end)),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [{"created_at": r[0], "day_ahead": bool(r[1])} for r in rows]
+
+    async def load_plan_snapshot(
+        self, at: datetime, day_ahead_only: bool = False
+    ) -> EnergyPlan | None:
+        """The last plan made at or before *at* (optionally: day-ahead only)."""
+        assert self._db is not None, "Call start() before load_plan_snapshot()"
+        sql = "SELECT plan FROM plan_snapshots WHERE created_at <= ?"
+        if day_ahead_only:
+            sql += " AND day_ahead = 1"
+        async with self._db.execute(
+            sql + " ORDER BY created_at DESC LIMIT 1", (_utc_iso(at),)
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return EnergyPlan.model_validate_json(zlib.decompress(row[0]))
+
+    async def save_execution_slots(self, slots: "list[ExecutionSlot]") -> None:
+        assert self._db is not None, "Call start() before save_execution_slots()"
+        await self._db.executemany(
+            "INSERT OR REPLACE INTO control_execution VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    _utc_iso(s.start), s.device_id, s.seconds, s.mode,
+                    s.planned_w, s.setpoint_w, s.measured_w,
+                    _utc_iso(s.plan_created_at) if s.plan_created_at else None,
+                )
+                for s in slots
+            ],
+        )
+        await self._db.commit()
+
+    async def query_execution(
+        self, start: datetime, end: datetime, device_ids: "list[str] | None" = None
+    ) -> list[dict]:
+        """Execution rows with ``slot_start`` in ``[start, end)``, oldest first."""
+        assert self._db is not None, "Call start() before query_execution()"
+        sql = (
+            "SELECT slot_start, device_id, seconds, mode, planned_w, setpoint_w,"
+            " measured_w, plan_created_at FROM control_execution"
+            " WHERE slot_start >= ? AND slot_start < ?"
+        )
+        params: list = [_utc_iso(start), _utc_iso(end)]
+        if device_ids:
+            sql += f" AND device_id IN ({', '.join('?' * len(device_ids))})"
+            params += device_ids
+        async with self._db.execute(sql + " ORDER BY slot_start, device_id", params) as cursor:
+            rows = await cursor.fetchall()
+        keys = (
+            "slot_start", "device_id", "seconds", "mode", "planned_w",
+            "setpoint_w", "measured_w", "plan_created_at",
+        )
+        return [dict(zip(keys, row)) for row in rows]
 
 
 def _prediction(cols: tuple) -> dict | None:

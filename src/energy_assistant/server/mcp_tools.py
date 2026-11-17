@@ -32,8 +32,13 @@ Good starting points:
 - get_savings / get_savings_slots: predicted (day-ahead plan) vs. real savings,
   per day or per accounting slot with all cost components.
 - get_history: measured power/SoC and battery-ledger history (kept ~8 days).
+- get_execution: per slot and device, the plan's intent vs. the setpoint sent
+  vs. the measured power — did the control loop follow the plan?
+- list_plan_snapshots / get_plan_snapshot: every past plan (kept ~8 days),
+  including the frozen day-ahead plan of each day.
 Savings KPIs: saving = unplanned baseline cost - actual cost + inventory delta
-(value change of energy held beyond the unplanned "shadow" site).
++ soc_correction (value change of energy held beyond the unplanned "shadow"
+site; soc_correction = implausible battery SoC jumps, e.g. BMS recalibration).
 """
 
 
@@ -96,6 +101,37 @@ def build_mcp_server(api: FastAPI) -> MCPServer:
         otherwise the last *hours*. device_ids: comma-separated; default is
         storage, meters and PV. At most 7 days per call."""
         return await get("/api/history", start=start, end=end, hours=hours, device_ids=device_ids)
+
+    @mcp.tool(annotations=_READ_ONLY)
+    async def get_execution(
+        start: str, end: str | None = None, device_ids: str = ""
+    ) -> dict[str, Any]:
+        """Control execution log in [start, end) (max 8 days): per accounting
+        slot and device the dominant intent mode, time-averaged planned power,
+        setpoint sent and measured power (W, + = charge/consume).
+        device_ids: comma-separated; default all controlled devices."""
+        return await get("/api/execution", start=start, end=end, device_ids=device_ids)
+
+    @mcp.tool(annotations=_READ_ONLY)
+    async def list_plan_snapshots(start: str, end: str | None = None) -> dict[str, Any]:
+        """Stored plans made in [start, end): creation time and whether the
+        plan froze a day-ahead savings prediction."""
+        return await get("/api/plan/snapshots", start=start, end=end)
+
+    @mcp.tool(annotations=_READ_ONLY)
+    async def get_plan_snapshot(
+        at: str | None = None,
+        day_ahead_date: str | None = None,
+        start: str | None = None,
+        end: str | None = None,
+    ) -> dict[str, Any]:
+        """A stored plan in the get_plan format: the last plan made at or
+        before *at*, or the day-ahead plan of local day *day_ahead_date*
+        (YYYY-MM-DD). Give exactly one of them. start/end limit the flows and
+        intents returned (a whole plan is large)."""
+        return await get(
+            "/api/plan/snapshot", at=at, day_ahead_date=day_ahead_date, start=start, end=end
+        )
 
     @mcp.tool(annotations=_READ_ONLY)
     async def get_ledger() -> dict[str, Any]:

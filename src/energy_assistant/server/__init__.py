@@ -77,6 +77,7 @@ from ..core.change_gate import ChangeGate
 from ..core.config import AppConfig
 from ..core.control import ControlLoop, LiveSituation, StorageControlContributor
 from ..core.event import DeviceStateEvent, EventBus, PlanUpdatedEvent
+from ..core.execution_log import DeviceTick, ExecutionLog
 from ..core.forecast import ForecastProvider
 from ..core.ledger import BatteryCostLedger
 from ..core.models import (
@@ -146,6 +147,7 @@ def _savings_totals(rows: list[dict]) -> dict[str, float]:
         "predicted_latest": sum(r["predicted_latest"] or 0.0 for r in rows),
         "baseline_cost": sum(r["baseline_cost"] for r in rows),
         "actual_cost": sum(r["actual_cost"] for r in rows),
+        "soc_correction": sum(r.get("soc_correction") or 0.0 for r in rows),
         "hours": sum(r["hours"] for r in rows),
     }
 
@@ -535,6 +537,7 @@ class Application:
         self._poll_interval_s: float
         self._control_interval_s: float
         self._history_retention: timedelta
+        self._execution_log: ExecutionLog | None = None
         self._dry_run: bool
         self._dry_run_log_gate = ChangeGate()
         self._first_poll_done: asyncio.Event
@@ -685,6 +688,8 @@ class Application:
             step_minutes=self._optimizer._step_min,
             state=await self._load_savings_state(),
         )
+        # Plan fidelity: what the control loop did with each slot's intent.
+        self._execution_log = ExecutionLog(step_minutes=self._optimizer._step_min)
 
         # 7c — Threshold assets + contributors
         self._threshold_constraints = parse_threshold_assets(self._cfg.assets, self._cfg.devices)
@@ -1270,10 +1275,15 @@ class Application:
         await self._bus.publish(PlanUpdatedEvent(plan=plan))
         await self._bus.flush()
 
+        froze_day_ahead = False
         try:
-            await self._record_savings_predictions(plan)
+            froze_day_ahead = await self._record_savings_predictions(plan)
         except Exception as exc:  # noqa: BLE001 — reporting must never block planning
             _log.warning("Could not record savings predictions: %s", exc)
+        try:
+            await self._storage.save_plan_snapshot(plan, day_ahead=froze_day_ahead)
+        except Exception as exc:  # noqa: BLE001 — reporting must never block planning
+            _log.warning("Could not save plan snapshot: %s", exc)
 
         if self._mqtt_publisher is not None:
             # override_active per asset = the staged deadline's local date has
@@ -1503,6 +1513,7 @@ class Application:
                 )
                 for row, level in changed_rows:
                     _log.log(level, row)
+            await self._record_execution(now, device_states)
             # Persist the current ledger state even in dry_run so the
             # spot-price basis survives the next restart.
             for _sc in self._storage_constraints:
@@ -1523,6 +1534,7 @@ class Application:
             return
 
         await self._control_loop.tick(live, self._registry)
+        await self._record_execution(now, device_states)
 
         # Persist updated ledger state so it survives restarts.
         for sc in self._storage_constraints:
@@ -1540,6 +1552,33 @@ class Application:
                     stored_energy_kwh=stored,
                     timestamp=now,
                 )
+
+    async def _record_execution(self, now: datetime, device_states: dict[str, Any]) -> None:
+        """Book this tick's intents, setpoints and measured power into the
+        execution log (core/execution_log.py); persist finished slots."""
+        if self._execution_log is None:
+            return
+        try:
+            loop = self._control_loop
+            ticks = {}
+            for device_id, mode in loop.last_modes.items():
+                intent = loop.last_intents.get(device_id)
+                state = device_states.get(device_id)
+                ticks[device_id] = DeviceTick(
+                    mode=mode,
+                    planned_w=intent.power_kw * 1000.0 if intent is not None else None,
+                    setpoint_w=loop.last_setpoints.get(device_id),
+                    measured_w=state.power_w if state is not None else None,
+                )
+            plan = loop._active_plan
+            finished = self._execution_log.record(
+                now, ticks, plan.created_at if plan is not None else None
+            )
+            if finished:
+                await self._storage.save_execution_slots(finished)
+        except Exception as exc:  # noqa: BLE001 — reporting must never block control
+            if self._dry_run_log_gate.changed("execution_error", repr(exc)):
+                _log.warning("Execution log failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Savings accounting
@@ -1650,6 +1689,13 @@ class Application:
             slot.start.astimezone().strftime("%H:%M"), slot.saving,
             slot.baseline_cost, slot.actual_cost, slot.inventory_delta,
         )
+        if slot.soc_correction_kwh:
+            _log.warning(
+                "Savings %s: implausible SoC jump %s — booked %+.3f € as SoC correction",
+                slot.start.astimezone().strftime("%H:%M"),
+                ", ".join(f"{d} {kwh:+.2f} kWh" for d, kwh in slot.soc_correction_kwh.items()),
+                slot.soc_correction,
+            )
         await self._publish_savings()
 
     async def _publish_price_curve(self) -> None:
@@ -1714,13 +1760,13 @@ class Application:
             )
             set_ev_need(self._savings.state, asset.device_id, remaining)
 
-    async def _record_savings_predictions(self, plan: EnergyPlan) -> None:
+    async def _record_savings_predictions(self, plan: EnergyPlan) -> bool:
         """Store what *plan* expects to save, per future slot.
 
         Two predictions are kept per slot: ``latest`` is overwritten by every
         plan until the slot begins; ``day_ahead`` is written once, shortly
         before the slot's local day starts, and is the one the KPIs compare
-        against reality.
+        against reality.  Returns True when *plan* froze day-ahead slots.
         """
         now = datetime.now(timezone.utc)
         stored = {
@@ -1743,14 +1789,15 @@ class Application:
             if s.start > now and s.hours >= step.total_seconds() / 3600.0 - 1e-6
         ]
         if not slots:
-            return
+            return False
         await self._storage.save_savings_predictions("latest", slots, now, overwrite=True)
         window_end = day_ahead_window_end(
             now, timedelta(seconds=self._plan_interval_s) + step
         )
-        await self._storage.save_savings_predictions(
+        frozen = await self._storage.save_savings_predictions(
             "day_ahead", [s for s in slots if s.start < window_end], now, overwrite=False
         )
+        return frozen > 0
 
     # ------------------------------------------------------------------
     # REST API
@@ -1933,9 +1980,22 @@ class Application:
             plan = self._display_plan or self._control_loop._active_plan
             if plan is None:
                 return {"created_at": None, "step_minutes": self._optimizer._step_min, "intents": []}
+            return _plan_payload(plan, detail)
+
+        def _plan_payload(
+            plan: EnergyPlan,
+            detail: bool,
+            start: datetime | None = None,
+            end: datetime | None = None,
+        ) -> dict:
+            """JSON view of *plan*; flows/intents limited to ``[start, end)``."""
+            def keep(ts: datetime) -> bool:
+                ts = _as_utc(ts)
+                return (start is None or ts >= start) and (end is None or ts < end)
+
             return {
                 "created_at": plan.created_at.isoformat(),
-                "step_minutes": self._optimizer._step_min,
+                "step_minutes": plan.step_minutes,
                 # Solved site flows (effective PV incl. live floor, grid
                 # import/export) — the UI should use these instead of
                 # re-deriving import from the raw forecast series.
@@ -1947,6 +2007,7 @@ class Application:
                         "grid_export_kw": f.grid_export_kw,
                     }
                     for f in plan.flows
+                    if keep(f.timestep)
                 ],
                 "intents": [
                     {
@@ -1960,7 +2021,63 @@ class Application:
                         "stored_energy_kwh": i.stored_energy_kwh,
                     }
                     for i in plan.intents
+                    if keep(i.timestep)
                 ],
+            }
+
+        @api.get("/api/plan/snapshots")
+        async def list_plan_snapshots(start: datetime, end: datetime | None = None) -> dict:
+            """Stored plans made in ``[start, end)`` (creation time and whether
+            each one froze a day-ahead savings prediction).  Kept as long as
+            the measurement history.  Naive times are read as UTC."""
+            start = _as_utc(start)
+            end = _as_utc(end) if end is not None else datetime.now(timezone.utc)
+            return {"snapshots": await self._storage.list_plan_snapshots(start, end)}
+
+        @api.get("/api/plan/snapshot")
+        async def get_plan_snapshot(
+            at: datetime | None = None,
+            day_ahead_date: date | None = None,
+            start: datetime | None = None,
+            end: datetime | None = None,
+            detail: bool = True,
+        ) -> dict:
+            """A stored plan in the ``/api/plan`` format: the last plan made at
+            or before *at*, or the day-ahead plan of the local day
+            *day_ahead_date*.  *start*/*end* limit the flows and intents."""
+            if (at is None) == (day_ahead_date is None):
+                raise HTTPException(status_code=400, detail="give exactly one of at, day_ahead_date")
+            if day_ahead_date is not None:
+                midnight = datetime(
+                    day_ahead_date.year, day_ahead_date.month, day_ahead_date.day
+                ).astimezone(timezone.utc)
+                plan = await self._storage.load_plan_snapshot(midnight, day_ahead_only=True)
+            else:
+                plan = await self._storage.load_plan_snapshot(_as_utc(at))
+            if plan is None:
+                raise HTTPException(status_code=404, detail="no stored plan")
+            return _plan_payload(
+                plan, detail,
+                _as_utc(start) if start is not None else None,
+                _as_utc(end) if end is not None else None,
+            )
+
+        @api.get("/api/execution")
+        async def get_execution(
+            start: datetime, end: datetime | None = None, device_ids: str = ""
+        ) -> dict:
+            """Control execution log in ``[start, end)``: per slot and device
+            the dominant intent mode, time-averaged planned power, setpoint
+            sent and measured power (W, + = charge/consume)."""
+            start = _as_utc(start)
+            end = _as_utc(end) if end is not None else datetime.now(timezone.utc)
+            if end - start > timedelta(days=8):
+                raise HTTPException(status_code=400, detail="window is limited to 8 days")
+            ids = [d.strip() for d in device_ids.split(",") if d.strip()]
+            return {
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+                "slots": await self._storage.query_execution(start, end, ids or None),
             }
 
         @api.get("/api/savings")
