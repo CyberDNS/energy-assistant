@@ -39,6 +39,7 @@ from . import (  # noqa: E402
     threshold_homeassistant,
     tibber,
     tibber_iobroker,
+    tibber_local,
     zendure,
     zendure_iobroker,
 )
@@ -59,5 +60,6 @@ static_profile.register(registry)
 threshold_homeassistant.register(registry)
 tibber.register(registry)
 tibber_iobroker.register(registry)
+tibber_local.register(registry)
 zendure.register(registry)
 zendure_iobroker.register(registry)
