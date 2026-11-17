@@ -128,6 +128,14 @@ server:
   # Days of measurement / battery-ledger history kept in the SQLite DB.
   # Older rows are purged hourly. The history API serves at most 7 days.
   history_retention_days: 8
+  # Optional: token for read-only access from outside Home Assistant ingress
+  # (REST GET requests and the MCP endpoint at /mcp). Without it the API has
+  # no authentication — fine as long as only ingress can reach it. See README
+  # "Remote read-only access". Generate one with: openssl rand -hex 32
+  # api_token: !secret energy_assistant_api_token
+  # Addresses that keep full access without a token (default: the HA ingress
+  # proxy 172.30.32.2 and localhost).
+  # trusted_hosts: ["172.30.32.2", "127.0.0.1", "::1"]
 
 # ---------------------------------------------------------------------------
 # Integrations
