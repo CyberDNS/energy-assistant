@@ -37,6 +37,7 @@ import asyncio
 import dataclasses
 import json
 from collections import defaultdict
+import contextlib
 import logging
 import os
 import time
@@ -50,6 +51,9 @@ from fastapi.staticfiles import StaticFiles
 import uvicorn
 
 from pydantic import BaseModel
+
+from .mcp_tools import mount_mcp_server
+from .remote_access import DEFAULT_TRUSTED_HOSTS, ApiAccessMiddleware
 
 from ..assets.ev import (
     _FEASIBILITY_MARGIN,
@@ -124,6 +128,11 @@ _RETENTION_INTERVAL_S = 3600.0
 # unplanned site then restarts level with the real one instead of carrying a
 # battery level from before the downtime.
 _SAVINGS_STATE_MAX_AGE = timedelta(hours=1)
+
+
+def _as_utc(ts: datetime) -> datetime:
+    """Aware UTC datetime; a naive one is read as UTC."""
+    return ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts.astimezone(timezone.utc)
 
 
 def _savings_totals(rows: list[dict]) -> dict[str, float]:
@@ -581,6 +590,8 @@ class Application:
         # the app itself is turned down to DEBUG.
         if log_level != "DEBUG":
             logging.getLogger("httpx").setLevel(logging.WARNING)
+            # Same for the MCP endpoint: one line per stateless tool call.
+            logging.getLogger("mcp").setLevel(logging.WARNING)
         opt = self._cfg.optimizer
         ctl = self._cfg.controller
         self._plan_interval_s = float(ctl.get("plan_interval_s", 900))
@@ -1747,7 +1758,17 @@ class Application:
 
     def _build_api(self) -> FastAPI:
         """Build the FastAPI application exposing live server state."""
-        api = FastAPI(title="Energy Assistant", version="0.1")
+        mcp_holder: list = []
+
+        @contextlib.asynccontextmanager
+        async def lifespan(_app: FastAPI):
+            # The MCP endpoint's session manager must run for the app's lifetime.
+            async with contextlib.AsyncExitStack() as stack:
+                for mcp in mcp_holder:
+                    await stack.enter_async_context(mcp.session_manager.run())
+                yield
+
+        api = FastAPI(title="Energy Assistant", version="0.1", lifespan=lifespan)
 
         @api.get("/health")
         async def health() -> dict:
@@ -1902,8 +1923,13 @@ class Application:
             )
 
         @api.get("/api/plan")
-        async def get_plan() -> dict:
-            """Active EnergyPlan: all intents with planned power and mode."""
+        async def get_plan(detail: bool = False) -> dict:
+            """Active EnergyPlan: all intents with planned power and mode.
+
+            ``detail=true`` returns every field of each flow (load, storage
+            and EV power, stored energy per battery, prices — the plan's
+            economics) instead of the slim set the UI needs.
+            """
             plan = self._display_plan or self._control_loop._active_plan
             if plan is None:
                 return {"created_at": None, "step_minutes": self._optimizer._step_min, "intents": []}
@@ -1914,7 +1940,7 @@ class Application:
                 # import/export) — the UI should use these instead of
                 # re-deriving import from the raw forecast series.
                 "flows": [
-                    {
+                    f.model_dump(mode="json") if detail else {
                         "timestep": f.timestep.isoformat(),
                         "pv_kw": f.pv_kw,
                         "grid_import_kw": f.grid_import_kw,
@@ -1956,6 +1982,25 @@ class Application:
                 "days": [
                     {"date": day.isoformat(), **_savings_totals(day_rows)}
                     for day, day_rows in sorted(by_day.items())
+                ],
+            }
+
+        @api.get("/api/savings/slots")
+        async def get_savings_slots(start: datetime, end: datetime | None = None) -> dict:
+            """Every compared savings slot in ``[start, end)`` with all cost
+            components of the measurement and of both predictions (€).
+            Naive times are read as UTC; *end* defaults to now."""
+            start = _as_utc(start)
+            end = _as_utc(end) if end is not None else datetime.now(timezone.utc)
+            if end - start > timedelta(days=31):
+                raise HTTPException(status_code=400, detail="window is limited to 31 days")
+            rows = await self._storage.query_savings(start, end)
+            return {
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+                "totals": _savings_totals(rows),
+                "slots": [
+                    {**row, "slot_start": row["slot_start"].isoformat()} for row in rows
                 ],
             }
 
@@ -2078,7 +2123,12 @@ class Application:
             return {"ok": True, "fitted_at": model.fitted_at}
 
         @api.get("/api/history")
-        async def get_history(hours: float = 24.0, device_ids: str = "") -> dict:
+        async def get_history(
+            hours: float = 24.0,
+            device_ids: str = "",
+            start: datetime | None = None,
+            end: datetime | None = None,
+        ) -> dict:
             """Historical measurements from SQLite.
 
             Query parameters
@@ -2086,9 +2136,14 @@ class Application:
             hours:       look-back window (default 24).
             device_ids:  comma-separated device IDs.  Defaults to all storage
                          devices + the topology root meter + PV producers.
+            start, end:  explicit window instead of *hours* (naive = UTC; *end*
+                         defaults to now).  At most 7 days either way.
             """
-            now = datetime.now(timezone.utc)
-            start = now - timedelta(hours=min(hours, 168.0))  # max 7 days
+            now = _as_utc(end) if end is not None else datetime.now(timezone.utc)
+            if start is not None:
+                start = max(_as_utc(start), now - timedelta(hours=168.0))
+            else:
+                start = now - timedelta(hours=min(hours, 168.0))  # max 7 days
 
             if device_ids.strip():
                 ids = [d.strip() for d in device_ids.split(",") if d.strip()]
@@ -2607,6 +2662,19 @@ class Application:
             @api.get("/", response_class=HTMLResponse)
             async def serve_ui_missing() -> str:
                 return "<h1>UI not found. Place <code>frontend/index.html</code> at the repo root.</h1>"
+
+        # Read-only MCP endpoint (POST /mcp) for debugging tools.
+        mcp_holder.append(mount_mcp_server(api))
+
+        # Outermost: guards everything not coming through HA ingress.
+        token = os.environ.get("ENERGY_ASSISTANT_API_TOKEN") or self._cfg.server.get("api_token")
+        api.add_middleware(
+            ApiAccessMiddleware,
+            token=str(token) if token else None,
+            trusted_hosts=self._cfg.server.get("trusted_hosts") or DEFAULT_TRUSTED_HOSTS,
+        )
+        if token:
+            _log.info("API: remote access needs the bearer token (read-only)")
 
         return api
 

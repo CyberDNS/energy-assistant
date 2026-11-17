@@ -225,7 +225,10 @@ SELECT a.slot_start,
        a.actual_cost,
        a.baseline_cost - a.actual_cost + a.inventory_delta,
        (d.baseline_cost - d.plan_cost + d.inventory_delta) * a.hours / d.hours,
-       (l.baseline_cost - l.plan_cost + l.inventory_delta) * a.hours / l.hours
+       (l.baseline_cost - l.plan_cost + l.inventory_delta) * a.hours / l.hours,
+       a.inventory_delta,
+       d.created_at, d.hours, d.baseline_cost, d.plan_cost, d.inventory_delta,
+       l.created_at, l.hours, l.baseline_cost, l.plan_cost, l.inventory_delta
 FROM savings_actual a
 JOIN savings_predicted d
   ON d.slot_start = a.slot_start AND d.kind = 'day_ahead' AND d.hours > 0
@@ -685,6 +688,9 @@ class SqliteStorageBackend:
                 "real": row[4],
                 "predicted": row[5],
                 "predicted_latest": row[6],
+                "inventory_delta": row[7],
+                "day_ahead": _prediction(row[8:13]),
+                "latest": _prediction(row[13:18]),
             }
             for row in rows
         ]
@@ -708,6 +714,25 @@ class SqliteStorageBackend:
         if row is None:
             return None
         return datetime.fromisoformat(row[0]), json.loads(row[1])
+
+
+def _prediction(cols: tuple) -> dict | None:
+    """Raw components of one stored prediction (``None`` if there is none).
+
+    Unlike ``predicted``/``predicted_latest`` these are not scaled to the
+    measured hours of the slot.
+    """
+    created_at, hours, baseline_cost, plan_cost, inventory_delta = cols
+    if created_at is None:
+        return None
+    return {
+        "created_at": created_at,
+        "hours": hours,
+        "baseline_cost": baseline_cost,
+        "plan_cost": plan_cost,
+        "inventory_delta": inventory_delta,
+        "saving": baseline_cost - plan_cost + inventory_delta,
+    }
 
 
 def _utc_iso(ts: datetime) -> str:
