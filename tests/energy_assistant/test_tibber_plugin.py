@@ -170,6 +170,8 @@ def test_parse_live_measurement() -> None:
     assert m is not None
     assert m.power_w == 0 and m.production_w == 850
     assert m.meter_consumption_kwh == 1234.5 and m.meter_production_kwh is None
+    assert m.timestamp == datetime(2026, 11, 15, 13, 51, 11, tzinfo=timezone.utc)
+    assert m.timestamp.utcoffset() == timedelta(0)
     assert _parse_live({"liveMeasurement": {"power": None}}) is None
 
 
