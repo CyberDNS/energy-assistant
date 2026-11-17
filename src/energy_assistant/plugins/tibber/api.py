@@ -139,7 +139,13 @@ def _parse_live(data: dict[str, Any]) -> LiveMeasurement | None:
     m = data.get("liveMeasurement")
     if not m or m.get("power") is None:
         return None
-    ts = datetime.fromisoformat(m["timestamp"]) if m.get("timestamp") else datetime.now(timezone.utc)
+    # Tibber stamps live readings in local time ("+01:00"); keep them in UTC
+    # like every other device timestamp.
+    if m.get("timestamp"):
+        ts = datetime.fromisoformat(m["timestamp"])
+        ts = ts.astimezone(timezone.utc) if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+    else:
+        ts = datetime.now(timezone.utc)
 
     def _f(key: str) -> float | None:
         v = m.get(key)

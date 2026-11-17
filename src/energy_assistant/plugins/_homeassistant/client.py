@@ -20,7 +20,7 @@ def _parse_ts(value: Any) -> datetime | None:
             ts = datetime.fromisoformat(value)
         except ValueError:
             return None
-        return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+        return ts.astimezone(timezone.utc) if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
     if isinstance(value, (int, float)):
         seconds = value / 1000.0 if value > 1e11 else float(value)
         return datetime.fromtimestamp(seconds, tz=timezone.utc)
