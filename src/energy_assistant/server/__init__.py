@@ -8,7 +8,9 @@ Polling loop (``poll_interval_s``, default 30 s)
     After the very first tick it initialises the ``BatteryCostLedger`` from
     live SoC readings.
 
-Planning loop (``plan_interval_s``, default 3600 s)
+Planning loop (``plan_interval_s``, default 900 s)
+    Runs on the slot grid, ``plan_lead_s`` (default 30 s) before a slot
+    boundary, so each slot starts with a fresh plan (core/plan_schedule.py).
     Assembles an ``OptimizationContext`` from current device states, all
     forecast providers, and the tariff schedule, then runs the MILP
     optimizer and publishes a ``PlanUpdatedEvent``.  The ``ControlLoop``
@@ -94,6 +96,7 @@ from ..core.models import (
     intent_display_mode,
 )
 from ..core.optimizer import OptimizationContext, SecondaryTariffLoad
+from ..core.plan_schedule import aligned_plan_period, next_plan_run
 from ..core.price_curve import PriceCurveHistory, build_price_slots
 from ..core.plugin_registry import BuildContext
 from ..core.registry import DeviceRegistry
@@ -535,6 +538,7 @@ class Application:
         self._last_variable_price_estimated_by_ts: dict[datetime, bool] = {}
         self._last_pv_estimated_by_ts: dict[datetime, bool] = {}
         self._plan_interval_s: float
+        self._plan_lead_s: float
         self._poll_interval_s: float
         self._control_interval_s: float
         self._history_retention: timedelta
@@ -599,6 +603,7 @@ class Application:
         opt = self._cfg.optimizer
         ctl = self._cfg.controller
         self._plan_interval_s = float(ctl.get("plan_interval_s", 900))
+        self._plan_lead_s = float(ctl.get("plan_lead_s", 30))
         self._control_interval_s = float(ctl.get("control_interval_s", 30))
         self._poll_interval_s = float(ctl.get("poll_interval_s", self._control_interval_s))
         self._dry_run = bool(ctl.get("dry_run", False)) or os.environ.get("ENERGY_ASSISTANT_DRY_RUN", "") == "1"
@@ -1034,8 +1039,23 @@ class Application:
     # ------------------------------------------------------------------
 
     async def _planning_loop(self) -> None:
-        """Run the MILP optimizer periodically and publish the resulting plan."""
+        """Run the MILP optimizer periodically and publish the resulting plan.
+
+        After an immediate first run, runs are aligned to the slot grid
+        (``plan_lead_s`` before a boundary) instead of sleeping a fixed
+        interval, so the optimizer's runtime never accumulates into drift.
+        Event-triggered replans run outside this schedule and don't move it.
+        """
         await self._first_poll_done.wait()  # ensure registry has live SoC before first run
+        period = aligned_plan_period(self._plan_interval_s, self._optimizer._step_min)
+        if period.total_seconds() != self._plan_interval_s:
+            _log.warning(
+                "plan_interval_s=%g is not aligned with %d-min slots — planning every %d s instead",
+                self._plan_interval_s, self._optimizer._step_min, period.total_seconds(),
+            )
+        # The lead must leave the run inside the period it belongs to.
+        lead = timedelta(seconds=min(max(0.0, self._plan_lead_s), period.total_seconds() / 2))
+        scheduled: datetime | None = None
         while True:
             try:
                 await self._run_plan()
@@ -1043,7 +1063,10 @@ class Application:
                 raise
             except Exception as exc:  # noqa: BLE001
                 _log.warning("Planning run failed, will retry: %s", exc)
-            await asyncio.sleep(self._plan_interval_s)
+            now = datetime.now(timezone.utc)
+            scheduled = next_plan_run(now, period, lead, after=scheduled)
+            _log.debug("Next planning run at %s", scheduled.isoformat())
+            await asyncio.sleep((scheduled - now).total_seconds())
 
     async def _run_plan(self) -> None:
         """Assemble context, optimize, publish plan, refresh price cache."""
@@ -1793,7 +1816,8 @@ class Application:
             return False
         await self._storage.save_savings_predictions("latest", slots, now, overwrite=True)
         window_end = day_ahead_window_end(
-            now, timedelta(seconds=self._plan_interval_s) + step
+            now,
+            aligned_plan_period(self._plan_interval_s, plan.step_minutes) + step,
         )
         frozen = await self._storage.save_savings_predictions(
             "day_ahead", [s for s in slots if s.start < window_end], now, overwrite=False
