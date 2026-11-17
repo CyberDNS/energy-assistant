@@ -95,6 +95,10 @@ class StorageConstraints(BaseModel):
     """Rated full-cycle lifetime of the battery (manufacturer spec, e.g. 3000 cycles at 80% DoD)."""
     no_grid_charge: bool = False
     """When True the battery may only charge from local PV surplus, never from grid import."""
+    standby_w: float = 50.0
+    """Battery power up to this magnitude (W) is the system's own standby
+    draw or sensor noise, not a charge or discharge.  The savings accounting
+    treats it as fixed load in both the real and the unplanned site."""
 
     @property
     def degradation_cost_per_kwh(self) -> float:
