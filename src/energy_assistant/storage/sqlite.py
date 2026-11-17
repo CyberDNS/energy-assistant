@@ -7,6 +7,14 @@ Schema
 A single ``measurements`` table with a composite primary key on
 ``(device_id, timestamp)``.  No external database server is required.
 
+Timestamps
+----------
+Timestamps are stored as ISO-8601 text and compared as text (range queries,
+ordering, purging).  That only orders by time if every value has the same
+offset, so all timestamps are converted to UTC before they are written or
+used as a query bound — whatever offset the source delivered.  Naive
+datetimes are taken to be UTC.
+
 Retention
 ---------
 History tables are not self-limiting: the owner calls ``purge_before()``
@@ -108,6 +116,12 @@ DELETE FROM {table} WHERE rowid IN (
 }
 
 _PURGE_BATCH_SIZE = 10_000
+
+# PRAGMA user_version once the history tables hold only UTC timestamps
+# (see _migrate_utc_timestamps).  Older versions stored the offset the source
+# delivered, e.g. Tibber's local "+01:00".
+_SCHEMA_VERSION_UTC_TIMESTAMPS = 1
+_UTC_TIMESTAMP_TABLES = ("measurements", "ledger_history")
 
 # PRAGMA auto_vacuum value for INCREMENTAL mode.
 _AUTO_VACUUM_INCREMENTAL = 2
@@ -370,6 +384,44 @@ class SqliteStorageBackend:
         await self._db.execute("DROP TABLE IF EXISTS ev_targets")
         await self._db.execute(_CREATE_LEDGER_HISTORY_INDEX)
         await self._db.commit()
+        await self._migrate_utc_timestamps()
+
+    async def _migrate_utc_timestamps(self) -> None:
+        """Rewrite history timestamps stored with a non-UTC offset, once.
+
+        Runs only while ``PRAGMA user_version`` is below
+        ``_SCHEMA_VERSION_UTC_TIMESTAMPS``.  A row whose UTC instant already
+        exists for the same device replaces that row (same instant, same
+        device — they are duplicates).
+        """
+        assert self._db is not None
+        async with self._db.execute("PRAGMA user_version") as cursor:
+            row = await cursor.fetchone()
+        if row is not None and int(row[0]) >= _SCHEMA_VERSION_UTC_TIMESTAMPS:
+            return
+        rewritten = 0
+        for table in _UTC_TIMESTAMP_TABLES:
+            async with self._db.execute(
+                f"SELECT rowid, timestamp FROM {table} WHERE timestamp NOT LIKE '%+00:00'"
+            ) as cursor:
+                rows = await cursor.fetchall()
+            updates = []
+            for rowid, raw in rows:
+                try:
+                    ts = _utc_ts(datetime.fromisoformat(raw))
+                except (TypeError, ValueError):
+                    _log.warning("Unparseable timestamp %r in %s left as is", raw, table)
+                    continue
+                if ts != raw:
+                    updates.append((ts, rowid))
+            await self._db.executemany(
+                f"UPDATE OR REPLACE {table} SET timestamp = ? WHERE rowid = ?", updates
+            )
+            rewritten += len(updates)
+        await self._db.execute(f"PRAGMA user_version = {_SCHEMA_VERSION_UTC_TIMESTAMPS}")
+        await self._db.commit()
+        if rewritten:
+            _log.info("Converted %d history timestamps to UTC", rewritten)
 
     async def _add_missing_columns(self, table: str, columns: dict[str, str]) -> None:
         """``ALTER TABLE … ADD COLUMN`` for every column *table* still lacks."""
@@ -395,7 +447,7 @@ class SqliteStorageBackend:
             _INSERT,
             (
                 measurement.device_id,
-                measurement.timestamp.isoformat(),
+                _utc_ts(measurement.timestamp),
                 measurement.power_w,
                 measurement.energy_kwh,
                 measurement.soc_pct,
@@ -418,7 +470,7 @@ class SqliteStorageBackend:
         has converted the DB).  Returns the number of rows deleted.
         """
         assert self._db is not None, "Call start() before purge_before()"
-        ts = cutoff.isoformat()
+        ts = _utc_ts(cutoff)
         deleted = 0
         next_log = 1_000_000
         for sql in _PURGE_BATCH_SQL.values():
@@ -487,7 +539,7 @@ class SqliteStorageBackend:
         assert self._db is not None, "Call start() before query()"
         async with self._db.execute(
             _QUERY,
-            (device_id, start.isoformat(), end.isoformat()),
+            (device_id, _utc_ts(start), _utc_ts(end)),
         ) as cursor:
             rows = await cursor.fetchall()
 
@@ -514,7 +566,6 @@ class SqliteStorageBackend:
     ) -> None:
         """Persist the current ledger state for *device_id* (upsert)."""
         assert self._db is not None, "Call start() before save_ledger_state()"
-        from datetime import timezone
         now = datetime.now(timezone.utc).isoformat()
         await self._db.execute(
             _UPSERT_LEDGER,
@@ -536,8 +587,7 @@ class SqliteStorageBackend:
         frequently than desired.
         """
         assert self._db is not None, "Call start() before append_ledger_history()"
-        from datetime import timezone
-        ts = (timestamp or datetime.now(timezone.utc)).isoformat()
+        ts = _utc_ts(timestamp or datetime.now(timezone.utc))
         await self._db.execute(
             _INSERT_LEDGER_HISTORY,
             (device_id, ts, cost_basis, stored_energy_kwh),
@@ -554,7 +604,7 @@ class SqliteStorageBackend:
         assert self._db is not None, "Call start() before query_ledger_history()"
         async with self._db.execute(
             _QUERY_LEDGER_HISTORY,
-            (device_id, start.isoformat(), end.isoformat()),
+            (device_id, _utc_ts(start), _utc_ts(end)),
         ) as cursor:
             rows = await cursor.fetchall()
         return [
@@ -881,6 +931,22 @@ def _prediction(cols: tuple) -> dict | None:
     }
 
 
+def _as_utc(ts: datetime) -> datetime:
+    """*ts* in UTC; a naive datetime is taken to be UTC already."""
+    if ts.tzinfo is None:
+        return ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(timezone.utc)
+
+
+def _utc_ts(ts: datetime) -> str:
+    """History timestamp text: ISO in UTC, sub-second precision kept.
+
+    ``isoformat()`` omits a zero microsecond part, but "+" sorts before ".",
+    so ``…:13+00:00`` still orders before ``…:13.5+00:00``.
+    """
+    return _as_utc(ts).isoformat()
+
+
 def _utc_iso(ts: datetime) -> str:
     """ISO string in UTC — one fixed format, so text comparison orders by time."""
-    return ts.astimezone(timezone.utc).isoformat(timespec="seconds")
+    return _as_utc(ts).isoformat(timespec="seconds")
