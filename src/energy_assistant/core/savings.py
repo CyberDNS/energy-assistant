@@ -51,6 +51,27 @@ an expected stored energy and compares it with the reading:
 
 The correction is *not* dropped — the energy really is not there, and it
 was paid for — so totals are unchanged; it is only shown separately.
+
+Device behaviour both sites share
+---------------------------------
+Some battery behaviour has nothing to do with planning, and an unplanned site
+with the same hardware would show it just the same.  ``SavingsTracker``
+therefore lets the shadow site share it instead of booking it against the
+plan:
+
+* **Standby draw**: battery power within ``StorageConstraints.standby_w``
+  (e.g. an SMA SBS reporting a steady +28 W at minimum SoC) is fixed load in
+  both sites, not a charge.
+* **Idle self-discharge**: once a battery has idled for
+  ``IDLE_MIRROR_AFTER_S``, its stored-energy changes are applied to the
+  shadow battery too (the wait keeps a lagging SoC reading after a real
+  discharge from being mirrored away).  Only drift-sized changes are
+  mirrored (a budget of ``SOC_BAND_PCT`` refilled at
+  ``SOC_DRIFT_PCT_PER_H``); a larger jump still counts and is reported as
+  an SoC correction.
+* **Forced recharge**: a battery below its configured minimum SoC that
+  charges (the inverter's own protection) does so in both sites: the power
+  is fixed load and the energy is mirrored.
 """
 
 from __future__ import annotations
@@ -70,6 +91,10 @@ _MAX_GAP_S = 120.0
 SOC_BAND_PCT = 2.0
 """Deviation (% of capacity) between SoC reading and integrated power that is
 tolerated as quantization/noise before it counts as an SoC jump."""
+
+IDLE_MIRROR_AFTER_S = 600.0
+"""Idle time (s) after which a battery's stored-energy changes are mirrored
+onto the shadow battery (see "Device behaviour both sites share")."""
 
 SOC_DRIFT_PCT_PER_H = 3.0
 """Rate (% of capacity per hour) at which the expected stored energy follows
@@ -370,6 +395,11 @@ class SavingsTracker:
         # Expected stored energy per battery, integrated from measured power
         # (see "SoC corrections").
         self._expected_kwh: dict[str, float] = {}
+        # Real stored energy at the previous sample, and how long each
+        # battery has been idle (see "Device behaviour both sites share").
+        self._last_stored: dict[str, float] = {}
+        self._idle_s: dict[str, float] = {}
+        self._mirror_budget: dict[str, float] = {}
 
     def tick(self, sample: LiveSample) -> list[ActualSlot]:
         """Book the time since the previous sample; return finished slots.
@@ -389,6 +419,8 @@ class SavingsTracker:
             # happened unobserved is not booked as a saving or a loss.
             self._last_value = inventory_value(sample.stored_kwh, self.state, sample.cost_basis)
             self._expected_kwh = dict(sample.stored_kwh)
+            self._last_stored = dict(sample.stored_kwh)
+            self._idle_s = {}
             return self._roll(sample.timestamp)
 
         if self._slot is None:
@@ -405,9 +437,10 @@ class SavingsTracker:
             for device_id, ev in sample.ev.items()
         }
         site_kwh = sample.site_net_kw * hours
-        flexible_kwh = sum(sample.storage_kw.values()) * hours + sum(
-            step.real_kwh for step in ev_steps.values()
-        )
+        shared = self._shared_batteries(sample, gap_s)
+        flexible_kwh = sum(
+            kw for device_id, kw in sample.storage_kw.items() if device_id not in shared
+        ) * hours + sum(step.real_kwh for step in ev_steps.values())
 
         slot = self._slot
         slot.hours += hours
@@ -424,17 +457,80 @@ class SavingsTracker:
             export_price=sample.export_price,
             hours=hours,
         )
+        mirrored = self._mirror_shared(sample, shared, hours)
         value = inventory_value(sample.stored_kwh, self.state, sample.cost_basis)
         correction = 0.0
-        for device_id, kwh in self._soc_jumps(sample, hours).items():
+        for device_id, kwh in self._soc_jumps(sample, hours, shared, mirrored).items():
             correction += kwh * sample.cost_basis.get(device_id, 0.0)
             slot.soc_correction_kwh[device_id] = slot.soc_correction_kwh.get(device_id, 0.0) + kwh
         slot.soc_correction += correction
         slot.inventory_delta += value - self._last_value - correction
         self._last_value = value
+        self._last_stored = dict(sample.stored_kwh)
         return self._roll(sample.timestamp)
 
-    def _soc_jumps(self, sample: LiveSample, hours: float) -> dict[str, float]:
+    def _shared_batteries(self, sample: LiveSample, gap_s: float) -> dict[str, str]:
+        """Batteries whose power this interval is device behaviour shared by
+        both sites: ``{device_id: "standby" | "forced"}``.  Also tracks how
+        long each battery has been idle."""
+        shared: dict[str, str] = {}
+        for sc in self._batteries:
+            kw = sample.storage_kw.get(sc.device_id)
+            stored = sample.stored_kwh.get(sc.device_id)
+            if kw is None or stored is None:
+                self._idle_s.pop(sc.device_id, None)
+                continue
+            min_kwh = sc.capacity_kwh * sc.min_soc_pct / 100.0
+            if abs(kw) * 1000.0 <= sc.standby_w:
+                shared[sc.device_id] = "standby"
+                self._idle_s[sc.device_id] = self._idle_s.get(sc.device_id, 0.0) + gap_s
+            else:
+                self._idle_s[sc.device_id] = 0.0
+                if kw > 0 and stored < min_kwh - 1e-6:
+                    shared[sc.device_id] = "forced"
+        return shared
+
+    def _mirror_shared(
+        self, sample: LiveSample, shared: Mapping[str, str], hours: float
+    ) -> dict[str, float]:
+        """Apply the real stored-energy change of shared batteries to the
+        shadow site; return the mirrored kWh per battery."""
+        mirrored: dict[str, float] = {}
+        for sc in self._batteries:
+            band = sc.capacity_kwh * SOC_BAND_PCT / 100.0
+            budget = min(
+                band,
+                self._mirror_budget.get(sc.device_id, band)
+                + sc.capacity_kwh * SOC_DRIFT_PCT_PER_H / 100.0 * hours,
+            )
+            self._mirror_budget[sc.device_id] = budget
+            reason = shared.get(sc.device_id)
+            if reason is None:
+                continue
+            if reason == "standby" and self._idle_s.get(sc.device_id, 0.0) < IDLE_MIRROR_AFTER_S:
+                continue
+            now = sample.stored_kwh.get(sc.device_id)
+            before = self._last_stored.get(sc.device_id)
+            shadow = self.state.stored_kwh.get(sc.device_id)
+            if now is None or before is None or shadow is None:
+                continue
+            delta = now - before
+            if reason == "standby":
+                delta = max(-budget, min(budget, delta))
+                self._mirror_budget[sc.device_id] = budget - abs(delta)
+            self.state.stored_kwh[sc.device_id] = min(
+                max(shadow + delta, 0.0), sc.capacity_kwh
+            )
+            mirrored[sc.device_id] = delta
+        return mirrored
+
+    def _soc_jumps(
+        self,
+        sample: LiveSample,
+        hours: float,
+        shared: Mapping[str, str],
+        mirrored: Mapping[str, float],
+    ) -> dict[str, float]:
         """Stored-energy change (kWh) per battery that measured power cannot
         explain (see "SoC corrections" in the module docstring)."""
         jumps: dict[str, float] = {}
@@ -444,10 +540,13 @@ class SavingsTracker:
                 self._expected_kwh.pop(sc.device_id, None)
                 continue
             expected = self._expected_kwh.get(sc.device_id)
-            if expected is None:
+            if expected is None or shared.get(sc.device_id) == "forced":
+                # A forced recharge is mirrored in full: nothing to explain.
                 self._expected_kwh[sc.device_id] = reported
                 continue
-            kw = sample.storage_kw.get(sc.device_id, 0.0)
+            # Mirrored (shared) changes are explained by definition.
+            expected += mirrored.get(sc.device_id, 0.0)
+            kw = 0.0 if shared.get(sc.device_id) == "standby" else sample.storage_kw.get(sc.device_id, 0.0)
             expected += kw * hours * sc.charge_efficiency if kw > 0 else kw * hours / sc.discharge_efficiency
             expected = min(max(expected, 0.0), sc.capacity_kwh)
             drift = sc.capacity_kwh * SOC_DRIFT_PCT_PER_H / 100.0 * hours

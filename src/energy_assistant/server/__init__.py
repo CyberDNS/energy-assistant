@@ -198,6 +198,7 @@ def _storage_constraints_from_config(cfg: AppConfig) -> list[StorageConstraints]
                     purchase_price_eur=float(purchase_price) if purchase_price is not None else None,
                     cycle_life=int(cycle_life) if cycle_life is not None else None,
                     no_grid_charge=bool(dcfg.get("no_grid_charge", False)),
+                    standby_w=float(dcfg.get("standby_w", 50.0)),
                 )
             )
         except Exception as exc:  # noqa: BLE001
