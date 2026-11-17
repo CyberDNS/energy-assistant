@@ -35,11 +35,28 @@ Known simplifications
 * Battery degradation is not real money and is left out.
 * The shadow battery uses the configured efficiencies; a real battery that
   performs worse than configured shows up as a (small) negative saving.
+
+SoC corrections
+---------------
+Stored energy comes from the batteries' SoC readings.  Some BMSs re-calibrate
+abruptly (e.g. 15 % → 5 % within minutes at a few hundred watts), which books
+the energy that was over-reported over hours as a loss in a single slot.
+``SavingsTracker`` therefore integrates each battery's measured AC power into
+an expected stored energy and compares it with the reading:
+
+* slow drift (SoC estimation, real efficiency below the configured one) is
+  absorbed at up to ``SOC_DRIFT_PCT_PER_H`` and stays in ``inventory_delta``,
+* a deviation beyond ``SOC_BAND_PCT`` (quantization and noise) is a jump: its
+  value is booked as ``soc_correction`` instead.
+
+The correction is *not* dropped — the energy really is not there, and it
+was paid for — so totals are unchanged; it is only shown separately.
 """
 
 from __future__ import annotations
 
 import copy
+import math
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping, Sequence
@@ -49,6 +66,14 @@ from .models import EnergyPlan, StorageConstraints
 # Live samples further apart than this are not bridged: the time in between
 # is left out of both worlds instead of being priced with a stale reading.
 _MAX_GAP_S = 120.0
+
+SOC_BAND_PCT = 2.0
+"""Deviation (% of capacity) between SoC reading and integrated power that is
+tolerated as quantization/noise before it counts as an SoC jump."""
+
+SOC_DRIFT_PCT_PER_H = 3.0
+"""Rate (% of capacity per hour) at which the expected stored energy follows
+the reading — slow drift is normal battery behaviour, not a jump."""
 
 
 # ---------------------------------------------------------------------------
@@ -301,10 +326,17 @@ class ActualSlot:
     baseline_cost: float = 0.0
     actual_cost: float = 0.0
     inventory_delta: float = 0.0
+    """Value change of the energy held beyond the shadow site, without
+    ``soc_correction``."""
+    soc_correction: float = 0.0
+    """Value (€) of implausible stored-energy jumps (BMS re-calibration),
+    see "SoC corrections" in the module docstring."""
+    soc_correction_kwh: dict[str, float] = field(default_factory=dict)
+    """Stored-energy jumps per battery (kWh) behind ``soc_correction``."""
 
     @property
     def saving(self) -> float:
-        return self.baseline_cost - self.actual_cost + self.inventory_delta
+        return self.baseline_cost - self.actual_cost + self.inventory_delta + self.soc_correction
 
 
 def slot_start(ts: datetime, step_minutes: int) -> datetime:
@@ -335,6 +367,9 @@ class SavingsTracker:
         self._slot: ActualSlot | None = None
         self._last_ts: datetime | None = None
         self._last_value = 0.0
+        # Expected stored energy per battery, integrated from measured power
+        # (see "SoC corrections").
+        self._expected_kwh: dict[str, float] = {}
 
     def tick(self, sample: LiveSample) -> list[ActualSlot]:
         """Book the time since the previous sample; return finished slots.
@@ -353,6 +388,7 @@ class SavingsTracker:
             # Nothing to bridge.  Restart the inventory reference so whatever
             # happened unobserved is not booked as a saving or a loss.
             self._last_value = inventory_value(sample.stored_kwh, self.state, sample.cost_basis)
+            self._expected_kwh = dict(sample.stored_kwh)
             return self._roll(sample.timestamp)
 
         if self._slot is None:
@@ -389,9 +425,41 @@ class SavingsTracker:
             hours=hours,
         )
         value = inventory_value(sample.stored_kwh, self.state, sample.cost_basis)
-        slot.inventory_delta += value - self._last_value
+        correction = 0.0
+        for device_id, kwh in self._soc_jumps(sample, hours).items():
+            correction += kwh * sample.cost_basis.get(device_id, 0.0)
+            slot.soc_correction_kwh[device_id] = slot.soc_correction_kwh.get(device_id, 0.0) + kwh
+        slot.soc_correction += correction
+        slot.inventory_delta += value - self._last_value - correction
         self._last_value = value
         return self._roll(sample.timestamp)
+
+    def _soc_jumps(self, sample: LiveSample, hours: float) -> dict[str, float]:
+        """Stored-energy change (kWh) per battery that measured power cannot
+        explain (see "SoC corrections" in the module docstring)."""
+        jumps: dict[str, float] = {}
+        for sc in self._batteries:
+            reported = sample.stored_kwh.get(sc.device_id)
+            if reported is None:
+                self._expected_kwh.pop(sc.device_id, None)
+                continue
+            expected = self._expected_kwh.get(sc.device_id)
+            if expected is None:
+                self._expected_kwh[sc.device_id] = reported
+                continue
+            kw = sample.storage_kw.get(sc.device_id, 0.0)
+            expected += kw * hours * sc.charge_efficiency if kw > 0 else kw * hours / sc.discharge_efficiency
+            expected = min(max(expected, 0.0), sc.capacity_kwh)
+            drift = sc.capacity_kwh * SOC_DRIFT_PCT_PER_H / 100.0 * hours
+            expected += max(-drift, min(drift, reported - expected))
+            deviation = reported - expected
+            band = sc.capacity_kwh * SOC_BAND_PCT / 100.0
+            if abs(deviation) > band:
+                jump = deviation - math.copysign(band, deviation)
+                expected += jump
+                jumps[sc.device_id] = jump
+            self._expected_kwh[sc.device_id] = expected
+        return jumps
 
     def _roll(self, now: datetime) -> list[ActualSlot]:
         """Close the open slot once *now* has left it."""

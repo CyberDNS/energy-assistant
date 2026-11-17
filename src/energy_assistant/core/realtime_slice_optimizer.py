@@ -8,6 +8,21 @@ only data that already exists at runtime:
 - current plan slice (active ``ControlIntent`` per device)
 
 No extra YAML configuration is required.
+
+Plan fidelity
+-------------
+The realtime layer adapts the plan to live conditions, but it must not
+overrule the plan's *timing* decisions:
+
+- ``idle`` (planned 0 W) means **hold**: the plan keeps this energy for a
+  later, more valuable slot.  The battery may only absorb PV surplus; it
+  never discharges, whatever the current import price.  The same holds for
+  charge intents (e.g. PV-only charging while there is no surplus).  (Earlier versions
+  let any import price above the 0.2 €/kWh tracking penalty turn ``idle``
+  into plain self-consumption, which emptied batteries before the peak.)
+- A discharge intent may follow the live load, but only up to
+  ``DISCHARGE_FOLLOW_HEADROOM`` × the planned power, so a small planned
+  discharge does not become a full load-following discharge.
 """
 
 from __future__ import annotations
@@ -15,6 +30,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import pulp
+
+DISCHARGE_FOLLOW_HEADROOM = 1.25
+"""A discharge intent may deliver up to this multiple of its planned power
+when the live load is higher than forecast (export-allowed intents excepted)."""
 
 
 @dataclass(frozen=True)
@@ -71,6 +90,7 @@ def optimize_storage_slice(
     slew_pos: dict[str, pulp.LpVariable] = {}
     slew_neg: dict[str, pulp.LpVariable] = {}
     idle_absorb_ids: list[str] = []
+    discharge_cap_w: dict[str, float] = {}
 
     for inp in inputs:
         did = inp.device_id
@@ -89,9 +109,23 @@ def optimize_storage_slice(
         if inp.no_grid_charge:
             prob += c[did] <= surplus_w, f"pv_only__{did}"
 
-        # Idle (no planned charge or discharge) → absorb PV surplus opportunistically.
+        # Idle (no planned charge or discharge) → hold the stored energy and
+        # absorb PV surplus opportunistically (see "Plan fidelity" above).
         if abs(inp.planned_w) <= 1.0:
             idle_absorb_ids.append(did)
+
+        # Only a discharge intent may discharge — idle and charge intents
+        # (incl. PV-only charging without surplus) hold the stored energy.
+        if inp.planned_w >= -1.0:
+            discharge_cap_w[did] = 0.0
+        elif inp.export_allowed:
+            discharge_cap_w[did] = max(0.0, inp.max_discharge_w)
+        else:
+            # Follow the live load, but within the plan's discharge budget.
+            discharge_cap_w[did] = min(
+                max(0.0, inp.max_discharge_w), -inp.planned_w * DISCHARGE_FOLLOW_HEADROOM
+            )
+        prob += d[did] <= discharge_cap_w[did], f"discharge_cap__{did}"
 
         # Track current plan power as a soft target.
         # Platform sign convention: charge positive, discharge negative.
@@ -180,7 +214,7 @@ def optimize_storage_slice(
     ]
     unmet_import_w = None
     if meet_load_discharge_ids:
-        total_cap_w = sum(d[inp_id].upBound or 0.0 for inp_id in meet_load_discharge_ids)
+        total_cap_w = sum(discharge_cap_w[inp_id] for inp_id in meet_load_discharge_ids)
         target_discharge_w = min(max(0.0, grid_power_w), total_cap_w)
         unmet_import_w = pulp.LpVariable("unmet_import_w", lowBound=0.0)
         prob += (
