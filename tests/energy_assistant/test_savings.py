@@ -157,27 +157,63 @@ class TestSavingsTracker:
         assert slots[0].inventory_delta == pytest.approx(1 / 60 * 0.20)
 
     def test_soc_jump_is_booked_as_correction_not_hidden(self) -> None:
-        """A BMS re-calibration (10 % of capacity in 5 min while idle) is
-        reported as ``soc_correction``; the slot total is unchanged."""
+        """A BMS re-calibration (10 % of capacity in 5 min, right after a
+        discharge) is reported as ``soc_correction``; the total is unchanged."""
+        tracker = SavingsTracker([BAT], step_minutes=60)
+        steady = [_sample(m, 0.0, storage_kw=-0.5, stored=5.0 - 0.5 * m / 60) for m in range(0, 31)]
+        jump = [_sample(30 + m, 0.0, stored=4.75 - 0.2 * m) for m in range(1, 6)]
+        after = [_sample(35 + m, 0.0, stored=3.75) for m in range(1, 27)]
+        (slot,) = self._run(tracker, steady + jump + after)
+        # 1 kWh minus the 0.2 kWh band minus a few minutes of tolerated drift.
+        assert slot.soc_correction_kwh["bat"] == pytest.approx(-0.775, abs=0.01)
+        assert slot.soc_correction == pytest.approx(slot.soc_correction_kwh["bat"] * 0.20)
+        # The discharge is matched by the shadow battery; the jump is booked.
+        assert slot.inventory_delta + slot.soc_correction == pytest.approx(-1.0 * 0.20)
+
+    def test_large_idle_jump_is_still_booked(self) -> None:
+        """Idle mirroring only covers drift-sized changes: a 1 kWh drop while
+        idle is mostly booked (as an SoC correction)."""
         tracker = SavingsTracker([BAT], step_minutes=60)
         steady = [_sample(m, 0.0, stored=5.0) for m in range(0, 30)]
         jump = [_sample(30 + m, 0.0, stored=5.0 - 0.2 * m) for m in range(1, 6)]
         after = [_sample(35 + m, 0.0, stored=4.0) for m in range(1, 27)]
         (slot,) = self._run(tracker, steady + jump + after)
-        # 1 kWh minus the 0.2 kWh band minus a few minutes of tolerated drift.
-        assert slot.soc_correction_kwh["bat"] == pytest.approx(-0.775, abs=0.01)
-        assert slot.soc_correction == pytest.approx(slot.soc_correction_kwh["bat"] * 0.20)
-        assert slot.inventory_delta + slot.soc_correction == pytest.approx(-1.0 * 0.20)
-        assert slot.saving == pytest.approx(-1.0 * 0.20)
+        assert slot.soc_correction < -0.5 * 0.20
+        # At most the 0.2 kWh budget plus a little refill is shared.
+        assert slot.saving == pytest.approx(-0.78 * 0.20, abs=0.01)
 
-    def test_slow_soc_drift_is_not_a_jump(self) -> None:
+    def test_slow_idle_drift_is_shared_and_not_a_jump(self) -> None:
         tracker = SavingsTracker([BAT], step_minutes=60)
-        # 0.4 kWh in an hour without measured power: within drift + band.
-        samples = [_sample(m, 0.0, stored=5.0 - 0.4 * m / 60) for m in range(0, 62)]
+        # 0.2 kWh lost in an hour while idle: self-discharge, shared with the
+        # shadow battery once the battery has idled for 10 minutes.
+        samples = [_sample(m, 0.0, stored=5.0 - 0.2 * m / 60) for m in range(0, 62)]
         slot = self._run(tracker, samples)[0]
         assert slot.soc_correction == 0.0
-        assert slot.soc_correction_kwh == {}
-        assert slot.inventory_delta == pytest.approx(-0.4 * 0.20, abs=1e-3)
+        assert slot.inventory_delta == pytest.approx(-0.2 * 10 / 60 * 0.20, abs=1e-3)
+
+    def test_standby_draw_is_fixed_load_in_both_sites(self) -> None:
+        """A battery reporting +28 W while idle (e.g. an SMA SBS at min SoC)
+        draws it in both sites, so it costs no saving."""
+        at_min = BAT.model_copy(update={"min_soc_pct": 50.0})
+        tracker = SavingsTracker([at_min], step_minutes=60)
+        samples = [_sample(m, 0.528, storage_kw=0.028, stored=5.0) for m in range(0, 62)]
+        slot = self._run(tracker, samples)[0]
+        assert slot.baseline_cost == pytest.approx(slot.actual_cost)
+        assert slot.saving == pytest.approx(0.0, abs=1e-9)
+
+    def test_forced_recharge_below_min_soc_is_shared(self) -> None:
+        bat = BAT.model_copy(update={"min_soc_pct": 10.0})
+        tracker = SavingsTracker([bat], step_minutes=60)
+        # Battery sagged to 8 % and the inverter recharges it at 0.4 kW.
+        samples = [
+            _sample(m, 0.4, storage_kw=0.4, stored=0.8 + 0.4 * m / 60, price=0.37)
+            for m in range(0, 30)
+        ]
+        slots = self._run(tracker, samples + [_sample(61, 0.0, stored=1.0)])
+        (slot,) = slots
+        assert slot.baseline_cost == pytest.approx(slot.actual_cost, rel=1e-6)
+        assert slot.inventory_delta == pytest.approx(0.0, abs=1e-9)
+        assert slot.soc_correction == 0.0
 
     def test_quantized_soc_while_discharging_is_not_a_jump(self) -> None:
         tracker = SavingsTracker([BAT], step_minutes=60)
