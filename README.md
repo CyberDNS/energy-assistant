@@ -51,6 +51,41 @@ Two runtime use cases are supported by default:
 | Local development (VS Code) | `ENERGY_ASSISTANT_MODE=local` (optional) | `./config.yaml` | `./data/history.db` |
 | Home Assistant add-on | `ENERGY_ASSISTANT_MODE=ha` (optional) or auto-detected via `/data/options.json` | `/config/config.yaml` | `/data/energy-assistant.db` |
 
+### Remote read-only access (REST + MCP)
+
+Through ingress the API needs no login. To read it from elsewhere — scripts,
+or an AI assistant debugging the live installation over MCP — give it a token
+and publish the port:
+
+1. Set a token in `config.yaml` (generate one with `openssl rand -hex 32`):
+
+   ```yaml
+   server:
+     api_token: !secret energy_assistant_api_token
+   ```
+
+   or set `ENERGY_ASSISTANT_API_TOKEN` in the environment.
+2. In the add-on's **Network** settings, map container port `8088/tcp` to a
+   host port (it is unmapped by default), then restart the add-on.
+
+With a token set, every request that does not come through ingress (or from
+localhost) must send `Authorization: Bearer <token>`, and only gets read
+access: `GET` on the REST API and the MCP endpoint. Writes are refused (403);
+the web UI behind ingress keeps full control. `/health` stays open.
+
+The MCP endpoint is `http://<host>:<port>/mcp` (streamable HTTP, stateless).
+Its tools are read-only wrappers around the REST API: `get_status`,
+`get_plan` (full per-slot flows), `get_forecast`, `get_savings`,
+`get_savings_slots` (predicted vs. real per accounting slot, with all cost
+components), `get_history`, `get_ledger`, `get_config`, `get_ev`,
+`get_ev_plan`, `get_controllable`, `get_learned_forecasts`, `get_plan_inputs`.
+For Claude Code:
+
+```bash
+claude mcp add --transport http energy-assistant http://<host>:<port>/mcp \
+  --header "Authorization: Bearer <token>"
+```
+
 ### Embedding the UI in a dashboard
 
 The Plan tab can be deep-linked and embedded (e.g. in an iframe / webpage card):
