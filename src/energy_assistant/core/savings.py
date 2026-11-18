@@ -272,10 +272,25 @@ class SavingsSlot:
     uncontrolled_bill: float = 0.0
     ev_saving: float = 0.0
     """Part of the saving booked for cars."""
+    # What the batteries and cars did (AC kWh; battery + = charge, − = discharge)
+    real_battery_kwh: float = 0.0
+    uncontrolled_battery_kwh: float = 0.0
+    real_ev_kwh: float = 0.0
+    uncontrolled_ev_kwh: float = 0.0
+    real_stored: dict[str, float] = field(default_factory=dict)
+    """Stored energy per battery at the end of the slot (kWh)."""
+    uncontrolled_stored: dict[str, float] = field(default_factory=dict)
+    price_hours: float = 0.0
+    """Σ import price × hours; see ``import_price``."""
 
     @property
     def saving(self) -> float:
         return self.uncontrolled_cost - self.real_cost
+
+    @property
+    def import_price(self) -> float | None:
+        """Time-weighted import price of the slot."""
+        return self.price_hours / self.hours if self.hours > 0 else None
 
 
 @dataclass
@@ -492,9 +507,18 @@ class SavingsTracker:
         slot.real_cost += real.cost + ev_real_booked
         slot.uncontrolled_cost += unc.cost + ev_unc_booked
         slot.ev_saving += ev_unc_booked - ev_real_booked
+        slot.real_battery_kwh += sum(charge.values()) - sum(discharge.values())
+        slot.uncontrolled_battery_kwh += sum(u_charge.values()) - sum(u_discharge.values())
+        slot.real_ev_kwh += sum(real_ev.values())
+        slot.uncontrolled_ev_kwh += sum(u_ev.values())
+        slot.price_hours += sample.import_price * hours
 
         self._sync_real(sample)
-        self._housekeeping(sample.timestamp, active={*u_charge, *u_discharge})
+        self._housekeeping(
+            sample.timestamp, active={*charge, *discharge, *u_charge, *u_discharge}
+        )
+        slot.real_stored = {d: led.stored_kwh for d, led in self.state.real.items()}
+        slot.uncontrolled_stored = {d: led.stored_kwh for d, led in self.state.unc.items()}
         return self._roll(sample.timestamp)
 
     # -- helpers ------------------------------------------------------------
@@ -608,8 +632,9 @@ class SavingsTracker:
         """Set uncontrolled batteries to the real SoC at natural resync points
         (both idle at the same SoC limit) and at least every ``RESYNC_AFTER``.
 
-        *active*: uncontrolled batteries that charged or discharged this tick —
-        one just leaving a limit must not be pulled back to it.
+        *active*: batteries that charged or discharged this tick in either
+        house — one just leaving a limit must not be pulled back to it, and the
+        other house must not be handed energy the real battery is just storing.
         """
         for device_id, sc in self._batteries.items():
             real, unc = self.state.real.get(device_id), self.state.unc.get(device_id)
