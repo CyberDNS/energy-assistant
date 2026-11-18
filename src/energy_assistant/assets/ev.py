@@ -503,6 +503,27 @@ class EvChargerContributor:
             current_soc=current_soc, goal=goal,
         )
 
+    # Grid limit participation (see core/grid_limit.py).
+
+    def expected_draw_w(self, setpoint_w: float, live: "LiveSituation") -> float | None:
+        """Instant charging draws the commanded power, Stop draws nothing;
+        in PV mode the wallbox follows the surplus itself (unknown)."""
+        if setpoint_w > _MODE_THRESHOLD_W:
+            return setpoint_w
+        if setpoint_w <= 0.0:
+            return 0.0
+        return None
+
+    def curtail_setpoint_w(
+        self, setpoint_w: float, reduce_by_w: float, live: "LiveSituation"
+    ) -> float:
+        """Lower instant charging; below the minimum charge power, Stop."""
+        if setpoint_w <= _MODE_THRESHOLD_W:
+            return setpoint_w
+        new_w = setpoint_w - reduce_by_w
+        min_w = max(self._asset.min_charge_kw * 1000.0, _MODE_THRESHOLD_W + 1.0)
+        return new_w if new_w >= min_w else _STOP_W
+
     def charge_price_eur_per_kwh(
         self,
         intent: "ControlIntent | None",

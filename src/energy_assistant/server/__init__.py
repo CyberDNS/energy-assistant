@@ -112,6 +112,7 @@ from ..core.savings import (
 )
 from ..core.tariff import TariffModel
 from ..core.topology import TopologyNode
+from ..core.grid_limit import GridLimit
 from ..loader.device_loader import (
     build,
     build_device_forecast_map,
@@ -661,7 +662,9 @@ class Application:
 
         # 7 — Ledger + control loop
         self._ledger = BatteryCostLedger()
-        self._control_loop = ControlLoop(ledger=self._ledger)
+        self._control_loop = ControlLoop(
+            ledger=self._ledger, grid_limit=self._grid_limit()
+        )
         for sc in self._storage_constraints:
             self._control_loop.register_contributor(StorageControlContributor(sc))
         _log.info("Registered %d storage contributors", len(self._storage_constraints))
@@ -1261,6 +1264,7 @@ class Application:
             battery_cost_basis=self._ledger.all_cost_bases(),
             ev_charging_goals=ev_goals,
             secondary_loads=secondary_loads,
+            max_import_kw=self._topology.max_import_kw if self._topology else None,
             producer_device_ids={
                 d.device_id for d in self._registry.all()
                 if d.role == DeviceRole.PRODUCER
@@ -1438,6 +1442,26 @@ class Application:
                 await self._clear_force_charge(
                     asset.asset_id, f"target {target:.0f}% reached"
                 )
+
+    def _grid_limit(self) -> GridLimit | None:
+        """Grid connection limit from ``max_import_kw`` on the topology root."""
+        root = self._topology
+        if root is None or root.max_import_kw is None:
+            return None
+        limit = GridLimit(
+            max_import_w=root.max_import_kw * 1000.0,
+            curtail_order=tuple(root.curtail_order),
+            hysteresis_w=(
+                root.limit_hysteresis_kw * 1000.0
+                if root.limit_hysteresis_kw is not None else None
+            ),
+        )
+        _log.info(
+            "Grid connection limit %.1f kW (release below %.1f kW), curtail order: %s",
+            root.max_import_kw, limit.release_w / 1000.0,
+            ", ".join(root.curtail_order) or "storage, then EVs",
+        )
+        return limit
 
     async def _do_control_tick(self, dt_hours: float) -> None:
         """Build ``LiveSituation`` and call ``ControlLoop.tick()``."""
