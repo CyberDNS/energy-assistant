@@ -122,6 +122,13 @@ class TestBatteries:
         assert second.real_cost == pytest.approx(0.20)      # 1 kWh at the 0.20 ledger cost
         assert second.uncontrolled_cost == pytest.approx(0.40)
         assert second.saving == pytest.approx(0.20)
+        # What the batteries did, for the per-slot chart.
+        assert first.real_battery_kwh == pytest.approx(4.0)
+        assert first.uncontrolled_battery_kwh == pytest.approx(0.0)
+        assert first.real_stored["bat"] == pytest.approx(5.0)
+        assert first.uncontrolled_stored["bat"] == pytest.approx(MIN)
+        assert first.import_price == pytest.approx(0.20)
+        assert second.real_battery_kwh == pytest.approx(-1.0)
 
     def test_uncontrolled_battery_stores_pv_and_uses_it_later(self) -> None:
         tracker = SavingsTracker([BAT], step_minutes=60)
@@ -291,6 +298,41 @@ class TestSavingsStorage:
         finally:
             await db.stop()
 
+    async def test_slot_detail_round_trips_and_old_table_is_migrated(self, tmp_path: Path) -> None:
+        import sqlite3
+
+        path = tmp_path / "h.db"
+        with sqlite3.connect(path) as con:  # table as first released (#82)
+            con.execute(
+                "CREATE TABLE savings_slots (slot_start TEXT PRIMARY KEY, hours REAL NOT NULL,"
+                " real_cost REAL NOT NULL, uncontrolled_cost REAL NOT NULL,"
+                " real_bill REAL NOT NULL, uncontrolled_bill REAL NOT NULL,"
+                " ev_saving REAL NOT NULL)"
+            )
+            con.execute(
+                "INSERT INTO savings_slots VALUES (?, 0.25, 0.1, 0.2, 0.1, 0.2, 0)",
+                (T0.isoformat(timespec="seconds"),),
+            )
+        db = SqliteStorageBackend(path)
+        await db.start()
+        try:
+            slot = SavingsSlot(
+                T0 + timedelta(minutes=15), 0.25, 0.1, 0.2, 0.1, 0.2, 0.0,
+                real_battery_kwh=-0.2, uncontrolled_battery_kwh=0.3, real_ev_kwh=1.0,
+                real_stored={"bat": 3.0, "b2": 1.0}, uncontrolled_stored={"bat": 2.0},
+                price_hours=0.25 * 0.4,
+            )
+            await db.save_savings_slot(slot)
+            old, new = await db.query_savings_slots(T0, T0 + timedelta(hours=1))
+            assert old["real_stored_kwh"] is None and old["stored_detail"] is None
+            assert new["real_battery_kwh"] == pytest.approx(-0.2)
+            assert new["real_stored_kwh"] == pytest.approx(4.0)
+            assert new["uncontrolled_stored_kwh"] == pytest.approx(2.0)
+            assert new["import_price"] == pytest.approx(0.4)
+            assert new["stored_detail"]["real"]["b2"] == pytest.approx(1.0)
+        finally:
+            await db.stop()
+
     async def test_state_round_trip(self, tmp_path: Path) -> None:
         db = SqliteStorageBackend(tmp_path / "h.db")
         await db.start()
@@ -400,6 +442,7 @@ class TestServerWiring:
             assert week["totals"]["real"] == pytest.approx(0.60)
             assert day["all_time"]["real"] == pytest.approx(0.60)
             assert "real" in day["stored"] and "uncontrolled" in day["stored"]
+            assert len(day["slots"]) == 2 and week["slots"] is None
             assert bad.status_code == 400
         finally:
             await app._storage.stop()
