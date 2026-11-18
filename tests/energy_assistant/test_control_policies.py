@@ -699,3 +699,147 @@ def test_pv_only_charge_without_surplus_does_not_discharge() -> None:
     )
     (_did, setpoint_w, _mode), = loop.describe_setpoints(live)
     assert setpoint_w == 0.0
+
+
+# ── Plan fidelity: planned grid charging, shared PV pool (#75) ────────────────
+
+
+def _two_battery_loop(now: datetime, intents: list[ControlIntent]) -> ControlLoop:
+    """``pv`` can only charge from PV (``no_grid_charge``), ``ac`` may use the grid."""
+    loop = ControlLoop(ledger=BatteryCostLedger())
+    pv = _constraints("pv")
+    pv.no_grid_charge = True
+    loop.register_contributor(StorageControlContributor(pv))
+    loop.register_contributor(StorageControlContributor(_constraints("ac")))
+    loop.update_plan(EnergyPlan(intents=intents))
+    return loop
+
+
+def _live(now: datetime, grid_power_w: float, price: float, *device_ids: str) -> LiveSituation:
+    return LiveSituation(
+        timestamp=now,
+        grid_power_w=grid_power_w,
+        dt_hours=5.0 / 3600.0,
+        device_states={
+            did: DeviceState(device_id=did, power_w=0.0, soc_pct=50.0) for did in device_ids
+        },
+        current_price_eur_per_kwh=price,
+        pv_opportunity_price_eur_per_kwh=0.08,
+    )
+
+
+def _setpoints(loop: ControlLoop, live: LiveSituation) -> dict[str, float | None]:
+    return {did: sp for did, sp, _mode in loop.describe_setpoints(live)}
+
+
+@pytest.mark.parametrize("price", [0.10, 0.30, 0.53])
+def test_grid_charge_delivers_planned_power_at_any_import_price(price: float) -> None:
+    """The planner already priced this slot; the realtime layer must not cut
+    planned grid charging when import is expensive (was: 60 % floor > 0.2 €/kWh)."""
+    now = datetime.now(timezone.utc)
+    loop = ControlLoop(ledger=BatteryCostLedger())
+    loop.register_contributor(StorageControlContributor(_constraints("bat")))
+    loop.update_plan(EnergyPlan(intents=[
+        ControlIntent(device_id="bat", timestep=now, power_kw=1.2, grid_allowed=True)
+    ]))
+    assert _setpoints(loop, _live(now, 700.0, price, "bat"))["bat"] == 1200.0
+
+
+def test_grid_charge_is_limited_by_device_max_and_soc() -> None:
+    now = datetime.now(timezone.utc)
+    loop = ControlLoop(ledger=BatteryCostLedger())
+    loop.register_contributor(StorageControlContributor(_constraints("bat")))
+    loop.update_plan(EnergyPlan(intents=[
+        ControlIntent(device_id="bat", timestep=now, power_kw=5.0, grid_allowed=True)
+    ]))
+    live = _live(now, 700.0, 0.30, "bat")
+    assert _setpoints(loop, live)["bat"] == 3000.0  # max_charge_kw
+
+    live.device_states["bat"] = DeviceState(device_id="bat", power_w=0.0, soc_pct=95.0)
+    assert _setpoints(loop, live)["bat"] == 0.0  # at max SoC
+
+
+def test_scarce_pv_goes_to_the_pv_only_battery_first() -> None:
+    """Surplus below the PV-only plan: the PV-only battery takes all of it,
+    the grid-capable battery meets its plan from the grid."""
+    now = datetime.now(timezone.utc)
+    loop = _two_battery_loop(now, [
+        ControlIntent(device_id="pv", timestep=now, power_kw=1.0, grid_allowed=False),
+        ControlIntent(device_id="ac", timestep=now, power_kw=1.2, grid_allowed=True),
+    ])
+    sp = _setpoints(loop, _live(now, -800.0, 0.30, "pv", "ac"))
+    assert sp == {"pv": 800.0, "ac": 1200.0}
+
+
+def test_pv_left_after_the_pv_only_plan_offsets_grid_charging() -> None:
+    """Surplus above the PV-only plan: both plans are met, the remainder
+    reduces the grid-capable battery's import and nothing is exported."""
+    now = datetime.now(timezone.utc)
+    loop = _two_battery_loop(now, [
+        ControlIntent(device_id="pv", timestep=now, power_kw=1.0, grid_allowed=False),
+        ControlIntent(device_id="ac", timestep=now, power_kw=1.2, grid_allowed=True),
+    ])
+    sp = _setpoints(loop, _live(now, -1500.0, 0.30, "pv", "ac"))
+    assert sp["pv"] >= 1000.0 - 1e-6
+    assert sp["ac"] >= 1200.0 - 1e-6
+    assert sp["pv"] + sp["ac"] == pytest.approx(2200.0)  # 700 W from the grid, no extra
+
+
+def test_surplus_beyond_all_plans_is_absorbed_not_exported() -> None:
+    now = datetime.now(timezone.utc)
+    loop = _two_battery_loop(now, [
+        ControlIntent(device_id="pv", timestep=now, power_kw=1.0, grid_allowed=False),
+        ControlIntent(device_id="ac", timestep=now, power_kw=1.2, grid_allowed=True),
+    ])
+    sp = _setpoints(loop, _live(now, -4000.0, 0.30, "pv", "ac"))
+    assert sp["pv"] >= 1000.0 - 1e-6
+    assert sp["ac"] >= 1200.0 - 1e-6
+    assert sp["pv"] + sp["ac"] == pytest.approx(4000.0)
+
+
+def test_idle_pv_only_battery_absorbs_surplus_the_plan_leaves() -> None:
+    """Grid-capable battery charging from the grid, PV-only battery idle:
+    the surplus first serves the planned charge, the idle battery only gets
+    what is left (it does not make the other battery import more)."""
+    now = datetime.now(timezone.utc)
+    loop = _two_battery_loop(now, [
+        ControlIntent(device_id="pv", timestep=now, power_kw=0.0),
+        ControlIntent(device_id="ac", timestep=now, power_kw=1.2, grid_allowed=True),
+    ])
+    sp = _setpoints(loop, _live(now, -2000.0, 0.30, "pv", "ac"))
+    assert sp["ac"] >= 1200.0 - 1e-6
+    assert sp["pv"] + sp["ac"] == pytest.approx(2000.0)
+
+    sp = _setpoints(loop, _live(now, -800.0, 0.30, "pv", "ac"))
+    assert sp == {"pv": 0.0, "ac": 1200.0}
+
+
+def test_two_pv_only_batteries_share_the_surplus() -> None:
+    """The surplus is one pool: two PV-only plans cannot both take all of it."""
+    now = datetime.now(timezone.utc)
+    loop = ControlLoop(ledger=BatteryCostLedger())
+    for did in ("a", "b"):
+        sc = _constraints(did)
+        sc.no_grid_charge = True
+        loop.register_contributor(StorageControlContributor(sc))
+    loop.update_plan(EnergyPlan(intents=[
+        ControlIntent(device_id="a", timestep=now, power_kw=1.0, grid_allowed=False),
+        ControlIntent(device_id="b", timestep=now, power_kw=1.0, grid_allowed=False),
+    ]))
+    sp = _setpoints(loop, _live(now, -1200.0, 0.30, "a", "b"))
+    assert sp["a"] + sp["b"] == pytest.approx(1200.0)
+
+
+def test_discharge_does_not_feed_another_batterys_grid_charging() -> None:
+    """A planned discharge covers the house load only, not a parallel grid charge."""
+    now = datetime.now(timezone.utc)
+    loop = ControlLoop(ledger=BatteryCostLedger())
+    loop.register_contributor(StorageControlContributor(_constraints("dis")))
+    loop.register_contributor(StorageControlContributor(_constraints("chg")))
+    loop.update_plan(EnergyPlan(intents=[
+        ControlIntent(device_id="dis", timestep=now, power_kw=-2.0),
+        ControlIntent(device_id="chg", timestep=now, power_kw=1.5, grid_allowed=True),
+    ]))
+    sp = _setpoints(loop, _live(now, 500.0, 0.30, "dis", "chg"))
+    assert sp["chg"] == 1500.0
+    assert -500.0 - 1e-6 <= sp["dis"] <= 0.0
