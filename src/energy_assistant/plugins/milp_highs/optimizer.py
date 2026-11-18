@@ -1430,12 +1430,24 @@ def _extract_intents(
     timestamps: list[datetime],
     dur_h: list[float],
 ) -> list[ControlIntent]:
-    """Convert solver values into ``ControlIntent`` objects."""
+    """Convert solver values into ``ControlIntent`` objects.
+
+    A charge intent is ``grid_allowed`` only when the plan imports in that
+    step (primary-zone ``g_imp`` above ~1 W on average).  Without import the
+    planned charge is met from forecast PV surplus: the intent is PV-only, so
+    the control loop charges from live surplus and never buys from the grid
+    what the plan did not (e.g. under a passing cloud).
+    """
     c = variables["c"]
     d = variables["d"]
     e = variables["e"]
+    g_imp = variables["g_imp"]
     g_exp = variables["g_exp"]
     intents: list[ControlIntent] = []
+    # Steps in which the plan draws from the grid (≥ 1 W average).
+    imports = [
+        (pulp.value(g_imp[t]) or 0.0) > 1.0 * dur_h[t] for t in range(len(timestamps))
+    ]
 
     for sc in batteries:
         b = sc.device_id
@@ -1457,7 +1469,7 @@ def _extract_intents(
                         device_id=b,
                         timestep=ts,
                         power_kw=round(c_w / _WH, 4),
-                        grid_allowed=not sc.no_grid_charge,
+                        grid_allowed=not sc.no_grid_charge and imports[t],
                         reserved_kwh=round(c_kwh, 4),
                         stored_energy_kwh=round(e_kwh, 4),
                     )
