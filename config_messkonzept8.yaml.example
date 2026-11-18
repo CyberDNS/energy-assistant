@@ -137,6 +137,15 @@ devices:
 
 topology:
   main_grid_meter:
+    # Optional grid connection limit (e.g. main fuse / connection agreement).
+    # The planner keeps planned import below it; the control loop enforces it
+    # every tick by curtailing flexible loads (battery charging, EV instant
+    # charging) — never by discharging a battery.
+    # max_import_kw: 24
+    # Curtailed first → last; unlisted devices follow (storage before EVs).
+    # curtail_order: [zendure, openwb_chargepoint_5]
+    # Release curtailment only this far below the limit (default 5 %).
+    # limit_hysteresis_kw: 1.0
     children:
       - household_meter
       - heatpump

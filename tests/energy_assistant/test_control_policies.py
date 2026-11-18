@@ -810,6 +810,10 @@ def test_idle_pv_only_battery_absorbs_surplus_the_plan_leaves() -> None:
     assert sp["ac"] >= 1200.0 - 1e-6
     assert sp["pv"] + sp["ac"] == pytest.approx(2000.0)
 
+    loop = _two_battery_loop(now, [
+        ControlIntent(device_id="pv", timestep=now, power_kw=0.0),
+        ControlIntent(device_id="ac", timestep=now, power_kw=1.2, grid_allowed=True),
+    ])
     sp = _setpoints(loop, _live(now, -800.0, 0.30, "pv", "ac"))
     assert sp == {"pv": 0.0, "ac": 1200.0}
 

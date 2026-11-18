@@ -114,6 +114,12 @@ _DEFAULT_PRICE_EUR_KWH = 0.30
 # integer energy coefficients, improving LP numerical conditioning.
 _WH = 1000.0
 
+# Cost of importing beyond the grid connection limit (€/kWh).  A
+# lexicographic priority far above any energy price: flexible loads are
+# always planned below the limit; only a forecast inflexible load above it
+# is allowed through (instead of making the model infeasible).
+_GRID_LIMIT_PENALTY_EUR_PER_KWH = 10.0
+
 
 class MilpHigsOptimizer:
     """Cost-minimising MILP optimizer backed by the HiGHS solver (via PuLP).
@@ -354,6 +360,9 @@ class MilpHigsOptimizer:
             initial_threshold_running=initial_threshold_running,
             dur_h=dur_h, slot_starts=slot_starts,
             secondary_load=secondary_load, secondary_prices=secondary_prices,
+            max_import_w=(
+                context.max_import_kw * _WH if context.max_import_kw is not None else None
+            ),
         )
         t0 = time.monotonic()
         # Solve in a worker thread: prob.solve() blocks for up to the full
@@ -556,6 +565,7 @@ class MilpHigsOptimizer:
         slot_starts: list[datetime] | None = None,
         secondary_load: list[list[float]] | None = None,
         secondary_prices: list[list[float]] | None = None,
+        max_import_w: float | None = None,
     ) -> tuple[pulp.LpProblem, dict]:
         """Construct the PuLP problem and return (problem, variables dict).
 
@@ -574,6 +584,13 @@ class MilpHigsOptimizer:
             PV recharge incentives: charging from PV is worthwhile when
             terminal_value_basis > export_price/η_c + degradation_cost.
             If None, falls back to battery_cost_basis.
+        max_import_w:
+            Grid connection limit (W) on the import at the connection point
+            (all tariffs together).  Soft: exceeding it costs
+            ``_GRID_LIMIT_PENALTY_EUR_PER_KWH``, so a forecast inflexible load
+            above the limit cannot make the model infeasible, while flexible
+            loads (batteries, EVs, threshold devices) are always shifted
+            below it.  None = no limit.
         """
         prob = pulp.LpProblem("energy_cost_optimizer", pulp.LpMinimize)
         T = range(n_steps)
@@ -712,6 +729,19 @@ class MilpHigsOptimizer:
         site_imp = {
             t: g_imp[t] + pulp.lpSum(s_imp[(k, t)] for k in K) for t in T
         }
+        # Grid connection limit (soft, see max_import_w).
+        limit_excess: dict[int, pulp.LpVariable] = {}
+        if max_import_w is not None:
+            for t in T:
+                limit_excess[t] = pulp.LpVariable(f"grid_limit_excess__{t}", lowBound=0)
+                prob += (
+                    site_imp[t] <= max_import_w * dur[t] + limit_excess[t],
+                    f"grid_limit__{t}",
+                )
+        grid_limit_cost = (
+            _GRID_LIMIT_PENALTY_EUR_PER_KWH / _WH * pulp.lpSum(limit_excess.values())
+            if limit_excess else 0
+        )
 
         # ── Objective ─────────────────────────────────────────────────
         # Grid cost: p_imp/p_exp are €/Wh, g_imp/g_exp are Wh → product is €.
@@ -797,6 +827,7 @@ class MilpHigsOptimizer:
 
         prob += (
             grid_cost
+            + grid_limit_cost
             + degradation_cost
             + priority_tiebreak
             + pv_priority_tiebreak
