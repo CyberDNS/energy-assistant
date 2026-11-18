@@ -12,7 +12,9 @@ No extra YAML configuration is required.
 Plan fidelity
 -------------
 The realtime layer adapts the plan to live conditions, but it must not
-overrule the plan's *timing* decisions:
+overrule the plan's decisions.  The planner already priced the current slot
+at the current import price, so the realtime layer does not trade the plan
+against that price again; it only deviates for physical reasons.
 
 - ``idle`` (planned 0 W) means **hold**: the plan keeps this energy for a
   later, more valuable slot.  The battery may only absorb PV surplus; it
@@ -20,9 +22,27 @@ overrule the plan's *timing* decisions:
   charge intents (e.g. PV-only charging while there is no surplus).  (Earlier versions
   let any import price above the 0.2 €/kWh tracking penalty turn ``idle``
   into plain self-consumption, which emptied batteries before the peak.)
+- A grid-charge intent delivers its planned power (within the device's
+  current limits), whatever the live import price.  (Earlier versions priced
+  every charged watt at the import price against a 0.2 €/kWh tracking
+  penalty, so above 0.2 €/kWh planned grid charging fell to a 60 % floor.)
 - A discharge intent may follow the live load, but only up to
   ``DISCHARGE_FOLLOW_HEADROOM`` × the planned power, so a small planned
   discharge does not become a full load-following discharge.
+
+PV surplus is one shared pool
+-----------------------------
+Each battery's charge is split into a PV part and a grid part; the PV parts
+of all batteries together cannot exceed the live surplus.  Only a charge
+intent that allows grid charging, on a device that can charge from the grid,
+has a grid part — idle and discharge intents, PV-only intents and
+``no_grid_charge`` devices charge from surplus only.
+
+When surplus is scarce it goes to the plans that can only be met from PV:
+a grid-capable battery loses at most (import − export price) by taking grid
+energy instead, a PV-only battery loses the energy entirely.  Surplus that is
+left after every plan is served is absorbed by the batteries rather than
+exported (except by export-allowed discharge intents).
 """
 
 from __future__ import annotations
@@ -34,6 +54,15 @@ import pulp
 DISCHARGE_FOLLOW_HEADROOM = 1.25
 """A discharge intent may deliver up to this multiple of its planned power
 when the live load is higher than forecast (export-allowed intents excepted)."""
+
+PLAN_SHORTFALL_EUR_PER_KWH = 10.0
+"""Cost of a charge intent falling short of its planned power.
+
+A lexicographic priority, not a price: it is far above any energy price, so
+delivering the plan always wins over saving import cost or earning export
+revenue in the current slot.  It only binds where the plan cannot be fully
+met (a PV-only intent with too little surplus) and decides who gets the PV.
+"""
 
 
 @dataclass(frozen=True)
@@ -69,66 +98,82 @@ def optimize_storage_slice(
     """Return optimized per-device setpoints in W, or ``None`` on failure.
 
     Positive setpoint means charging, negative means discharging.
+    ``grid_power_w`` is the grid power without the storage devices' own
+    contribution; ``pv_surplus_w`` is the surplus the storage devices may use.
     """
     if not inputs:
         return {}
 
-    # Keep objective in power-space (kW-equivalent) so decisions remain stable
-    # even when callers pass dt_hours ~= 0 (e.g. status/diagnostics previews).
-    dt_h = max(dt_hours, 1e-6)
+    # The objective is in power-space (kW-equivalent), so decisions stay stable
+    # even when callers pass dt_hours ~= 0 (e.g. status/diagnostics previews);
+    # dt_hours is accepted for interface stability but not needed.
+    del dt_hours
     imp_p = max(0.0, import_price_eur_per_kwh)
     exp_p = max(0.0, export_price_eur_per_kwh)
     surplus_w = max(0.0, pv_surplus_w)
 
     prob = pulp.LpProblem("realtime_storage_slice", pulp.LpMinimize)
 
-    c: dict[str, pulp.LpVariable] = {}
+    c: dict[str, pulp.LpAffineExpression] = {}
+    c_pv: dict[str, pulp.LpVariable] = {}
+    c_grid: dict[str, pulp.LpVariable] = {}
     d: dict[str, pulp.LpVariable] = {}
     u: dict[str, pulp.LpVariable] = {}
     dev_pos: dict[str, pulp.LpVariable] = {}
     dev_neg: dict[str, pulp.LpVariable] = {}
     slew_pos: dict[str, pulp.LpVariable] = {}
     slew_neg: dict[str, pulp.LpVariable] = {}
-    idle_absorb_ids: list[str] = []
+    absorb_ids: list[str] = []
     discharge_cap_w: dict[str, float] = {}
 
     for inp in inputs:
         did = inp.device_id
-        c[did] = pulp.LpVariable(f"c__{did}", lowBound=0.0, upBound=max(0.0, inp.max_charge_w))
-        d[did] = pulp.LpVariable(f"d__{did}", lowBound=0.0, upBound=max(0.0, inp.max_discharge_w))
+        max_c = max(0.0, inp.max_charge_w)
+        max_d = max(0.0, inp.max_discharge_w)
+        is_charge = inp.planned_w > 1.0
+        is_discharge = inp.planned_w < -1.0
+        # Grid charging only where the plan asks for it and the device and
+        # intent allow it; everything else charges from surplus only.
+        grid_charge = is_charge and not inp.no_grid_charge
+
+        c_pv[did] = pulp.LpVariable(f"c_pv__{did}", lowBound=0.0, upBound=max_c)
+        c_grid[did] = pulp.LpVariable(
+            f"c_grid__{did}", lowBound=0.0, upBound=max_c if grid_charge else 0.0
+        )
+        c[did] = c_pv[did] + c_grid[did]
+        d[did] = pulp.LpVariable(f"d__{did}", lowBound=0.0, upBound=max_d)
         u[did] = pulp.LpVariable(f"u__{did}", cat="Binary")
         dev_pos[did] = pulp.LpVariable(f"dev_pos__{did}", lowBound=0.0)
         dev_neg[did] = pulp.LpVariable(f"dev_neg__{did}", lowBound=0.0)
         slew_pos[did] = pulp.LpVariable(f"slew_pos__{did}", lowBound=0.0)
         slew_neg[did] = pulp.LpVariable(f"slew_neg__{did}", lowBound=0.0)
 
-        prob += c[did] <= inp.max_charge_w * u[did], f"charge_mode__{did}"
-        prob += d[did] <= inp.max_discharge_w * (1 - u[did]), f"discharge_mode__{did}"
-
-        # Respect strict PV-only charging requests from the current plan slice.
-        if inp.no_grid_charge:
-            prob += c[did] <= surplus_w, f"pv_only__{did}"
-
-        # Idle (no planned charge or discharge) → hold the stored energy and
-        # absorb PV surplus opportunistically (see "Plan fidelity" above).
-        if abs(inp.planned_w) <= 1.0:
-            idle_absorb_ids.append(did)
+        prob += c[did] <= max_c * u[did], f"charge_mode__{did}"
+        prob += d[did] <= max_d * (1 - u[did]), f"discharge_mode__{did}"
 
         # Only a discharge intent may discharge — idle and charge intents
         # (incl. PV-only charging without surplus) hold the stored energy.
-        if inp.planned_w >= -1.0:
+        if not is_discharge:
             discharge_cap_w[did] = 0.0
         elif inp.export_allowed:
-            discharge_cap_w[did] = max(0.0, inp.max_discharge_w)
+            discharge_cap_w[did] = max_d
         else:
             # Follow the live load, but within the plan's discharge budget.
-            discharge_cap_w[did] = min(
-                max(0.0, inp.max_discharge_w), -inp.planned_w * DISCHARGE_FOLLOW_HEADROOM
-            )
+            discharge_cap_w[did] = min(max_d, -inp.planned_w * DISCHARGE_FOLLOW_HEADROOM)
         prob += d[did] <= discharge_cap_w[did], f"discharge_cap__{did}"
 
-        # Track current plan power as a soft target.
-        # Platform sign convention: charge positive, discharge negative.
+        # A grid-charge intent delivers its planned power, within the
+        # device's current limits (see "Plan fidelity" above).
+        if grid_charge:
+            prob += c[did] >= min(max_c, inp.planned_w), f"grid_charge_plan__{did}"
+
+        # Every device except an export-allowed discharge absorbs surplus
+        # that no plan uses, instead of letting it be exported.
+        if not (is_discharge and inp.export_allowed):
+            absorb_ids.append(did)
+
+        # Track current plan power.  Platform sign convention: charge
+        # positive, discharge negative.
         prob += (
             c[did] - d[did] - inp.planned_w == dev_pos[did] - dev_neg[did],
             f"plan_deviation__{did}",
@@ -140,36 +185,18 @@ def optimize_storage_slice(
             f"setpoint_slew__{did}",
         )
 
-        # Make planned grid charging sticky so short control ticks do not keep deferring it.
-        if not inp.no_grid_charge and inp.planned_w > 1.0:
-            min_follow_w = min(inp.max_charge_w, 0.6 * inp.planned_w)
-            prob += c[did] >= min_follow_w, f"grid_fill_anchor__{did}"
+    # PV surplus is one pool shared by all batteries.
+    prob += pulp.lpSum(c_pv.values()) <= surplus_w, "pv_pool"
 
-        # If the long-term plan says discharge but we currently export PV,
-        # absorb that surplus instead of forcing a rigid discharge lock.
-        # For explicit export_allowed mode we keep the export intent.
-        if inp.planned_w < -1.0 and surplus_w > 1.0 and not inp.export_allowed:
-            pv_absorb_w = min(inp.max_charge_w, surplus_w)
-            prob += c[did] >= pv_absorb_w, f"discharge_pv_absorb__{did}"
-
-        # In grid-charging mode with PV surplus, absorb that surplus first
-        # (up to planned_w) before drawing from the grid.
-        # Without this, the optimizer prefers exporting PV (earns exp_p revenue)
-        # while only meeting the 60 % anchor floor, leaving PV on the table.
-        if not inp.no_grid_charge and surplus_w > 1.0 and inp.planned_w > 1.0:
-            pv_absorb_w = min(inp.max_charge_w, surplus_w)
-            prob += c[did] >= pv_absorb_w, f"charge_grid_pv_absorb__{did}"
-
-    # Preserve idle behavior: absorb currently-exported PV surplus.
-    # This keeps idle/auto intuitive at runtime (exporting while battery idles
-    # would otherwise look like a broken mode decision).
-    if idle_absorb_ids and surplus_w > 1.0:
-        total_idle_cap_w = sum((c[did].upBound or 0.0) for did in idle_absorb_ids)
-        if total_idle_cap_w > 0.0:
-            absorb_target_w = min(surplus_w, total_idle_cap_w)
+    # Surplus no plan uses is absorbed rather than exported.  Charge
+    # shortfalls are priced far above export revenue, so the plans are served
+    # from the pool first and this only binds for the remainder.
+    if absorb_ids and surplus_w > 1.0:
+        absorb_cap_w = sum(max(0.0, inp.max_charge_w) for inp in inputs if inp.device_id in absorb_ids)
+        if absorb_cap_w > 0.0:
             prob += (
-                pulp.lpSum(c[did] for did in idle_absorb_ids) >= absorb_target_w,
-                "idle_absorb_surplus",
+                pulp.lpSum(c_pv[did] for did in absorb_ids) >= min(surplus_w, absorb_cap_w),
+                "absorb_surplus",
             )
 
     g_imp = pulp.LpVariable("g_imp", lowBound=0.0)
@@ -177,7 +204,7 @@ def optimize_storage_slice(
 
     prob += (
         g_imp - g_exp
-        == grid_power_w + pulp.lpSum(c[did] for did in c) - pulp.lpSum(d[did] for did in d),
+        == grid_power_w + pulp.lpSum(c.values()) - pulp.lpSum(d.values()),
         "grid_balance",
     )
 
@@ -199,9 +226,10 @@ def optimize_storage_slice(
         all_no_export = all(not inp.export_allowed for inp in inputs)
         near_zero_import = abs(grid_power_w) <= 200.0
         import_buffer_w = 120.0 if (all_no_export and near_zero_import) else 0.0
+        # Discharge covers the house load only: neither export nor feeding
+        # another battery's (grid) charging.
         prob += (
-            pulp.lpSum(d[did] for did in d)
-            <= max(0.0, grid_power_w + import_buffer_w) + pulp.lpSum(c[did] for did in c),
+            pulp.lpSum(d.values()) <= max(0.0, grid_power_w + import_buffer_w),
             "no_export_from_battery",
         )
 
@@ -225,33 +253,23 @@ def optimize_storage_slice(
 
     grid_cost = (imp_p * g_imp - exp_p * g_exp) / 1000.0
 
-    # Keep near the planner schedule while still allowing local adaptation.
+    # Plan tracking.  Charge intents: a shortfall is priced lexicographically
+    # (PLAN_SHORTFALL_EUR_PER_KWH); idle/charge over-delivery (absorbing
+    # surplus) and the slew term are small tie-breakers.
     track_cost = 0.0
-    mode_cost = 0.0
     slew_cost = 0.0
     for inp in inputs:
         did = inp.device_id
-        is_discharge = inp.planned_w < -1.0
-        if is_discharge:
+        if inp.planned_w < -1.0:
             track_cost += 0.05 * (dev_pos[did] + dev_neg[did]) / 1000.0
             slew_cost += 0.015 * (slew_pos[did] + slew_neg[did]) / 1000.0
         else:
-            track_cost += 0.2 * (dev_pos[did] + dev_neg[did]) / 1000.0
+            under_w = PLAN_SHORTFALL_EUR_PER_KWH if inp.planned_w > 1.0 else 0.2
+            track_cost += (0.2 * dev_pos[did] + under_w * dev_neg[did]) / 1000.0
             slew_cost += 0.08 * (slew_pos[did] + slew_neg[did]) / 1000.0
 
-        if is_discharge:
-            # In discharge/feed_in mode, discourage grid charging. If PV surplus
-            # exists, relax this and add a small PV-capture credit.
-            penalty = 0.25 if surplus_w < 1.0 else 0.0
-            mode_cost += penalty * c[did] / 1000.0
-            if surplus_w > 1.0:
-                mode_cost += -0.05 * c[did] / 1000.0
-        elif inp.planned_w > 1.0 and not inp.no_grid_charge:
-            # In grid-charging mode, discourage discharging against plan intent.
-            mode_cost += 0.2 * d[did] / 1000.0
-
     unmet_cost = 0.0 if unmet_import_w is None else 0.6 * unmet_import_w / 1000.0
-    prob += grid_cost + track_cost + mode_cost + slew_cost + unmet_cost, "objective"
+    prob += grid_cost + track_cost + slew_cost + unmet_cost, "objective"
 
     status = prob.solve(_solver())
     if pulp.LpStatus[status] not in ("Optimal", "Feasible"):
