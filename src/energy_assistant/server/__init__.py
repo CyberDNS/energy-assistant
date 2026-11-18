@@ -101,14 +101,12 @@ from ..core.price_curve import PriceCurveHistory, build_price_slots
 from ..core.plugin_registry import BuildContext
 from ..core.registry import DeviceRegistry
 from ..core.savings import (
-    ActualSlot,
     EvLive,
     LiveSample,
+    SavingsSlot,
+    SavingsState,
     SavingsTracker,
-    ShadowState,
     day_ahead_window_end,
-    predict_slots,
-    set_ev_need,
 )
 from ..core.tariff import TariffModel
 from ..core.topology import TopologyNode
@@ -145,19 +143,33 @@ def _as_utc(ts: datetime) -> datetime:
 
 
 def _savings_totals(rows: list[dict]) -> dict[str, float]:
-    """Sum compared savings slots (see ``SqliteStorageBackend.query_savings``)."""
-    real = sum(r["real"] for r in rows)
-    predicted = sum(r["predicted"] for r in rows)
+    """Sum savings slots (see ``SqliteStorageBackend.query_savings_slots``)."""
+    real = sum(r["real_cost"] for r in rows)
+    uncontrolled = sum(r["uncontrolled_cost"] for r in rows)
     return {
-        "real": real,
-        "predicted": predicted,
-        "deviation": real - predicted,
-        "predicted_latest": sum(r["predicted_latest"] or 0.0 for r in rows),
-        "baseline_cost": sum(r["baseline_cost"] for r in rows),
-        "actual_cost": sum(r["actual_cost"] for r in rows),
-        "soc_correction": sum(r.get("soc_correction") or 0.0 for r in rows),
+        "real": uncontrolled - real,
+        "uncontrolled_cost": uncontrolled,
+        "real_cost": real,
+        "uncontrolled_bill": sum(r["uncontrolled_bill"] for r in rows),
+        "real_bill": sum(r["real_bill"] for r in rows),
+        "ev_saving": sum(r["ev_saving"] for r in rows),
         "hours": sum(r["hours"] for r in rows),
     }
+
+
+_BUCKETS = ("hour", "day", "week")
+
+
+def _bucket_start(ts: datetime, bucket: str) -> datetime:
+    """Local start of the hour / day / week (Monday) *ts* falls into."""
+    local = ts.astimezone()
+    if bucket == "hour":
+        return local.replace(minute=0, second=0, microsecond=0)
+    day = local.date()
+    if bucket == "week":
+        day -= timedelta(days=day.weekday())
+    # A naive datetime is read as local time (correct across DST changes).
+    return datetime(day.year, day.month, day.day).astimezone()
 
 
 @dataclasses.dataclass
@@ -548,6 +560,7 @@ class Application:
         self._control_interval_s: float
         self._history_retention: timedelta
         self._execution_log: ExecutionLog | None = None
+        self._day_ahead_flagged: date | None = None
         self._dry_run: bool
         self._dry_run_log_gate = ChangeGate()
         self._first_poll_done: asyncio.Event
@@ -694,8 +707,8 @@ class Application:
             len(self._ev_force_charge), len(self._disabled_chargepoints),
         )
 
-        # 7b' — Savings accounting: the unplanned "shadow" site that real
-        # costs are compared against (core/savings.py).
+        # 7b' — Savings accounting: the real house vs. a simulated
+        # uncontrolled house (core/savings.py).
         self._savings = SavingsTracker(
             self._storage_constraints,
             step_minutes=self._optimizer._step_min,
@@ -951,6 +964,7 @@ class Application:
         """Delete measurements and ledger history older than the retention."""
         cutoff = datetime.now(timezone.utc) - self._history_retention
         deleted = await self._storage.purge_before(cutoff)
+        deleted += await self._storage.purge_savings(datetime.now(timezone.utc))
         if deleted:
             _log.info("Purged %d history rows older than %s", deleted, cutoff.isoformat())
 
@@ -1312,13 +1326,8 @@ class Application:
         await self._bus.publish(PlanUpdatedEvent(plan=plan))
         await self._bus.flush()
 
-        froze_day_ahead = False
         try:
-            froze_day_ahead = await self._record_savings_predictions(plan)
-        except Exception as exc:  # noqa: BLE001 — reporting must never block planning
-            _log.warning("Could not record savings predictions: %s", exc)
-        try:
-            await self._storage.save_plan_snapshot(plan, day_ahead=froze_day_ahead)
+            await self._storage.save_plan_snapshot(plan, day_ahead=self._is_day_ahead_plan(plan))
         except Exception as exc:  # noqa: BLE001 — reporting must never block planning
             _log.warning("Could not save plan snapshot: %s", exc)
 
@@ -1641,16 +1650,19 @@ class Application:
     # Savings accounting
     # ------------------------------------------------------------------
 
-    async def _load_savings_state(self) -> ShadowState | None:
-        """Restore the shadow site, unless it was saved too long ago."""
+    async def _load_savings_state(self) -> SavingsState | None:
+        """Restore the savings state, unless it is stale or of an older format."""
         saved = await self._storage.load_savings_state()
         if saved is None:
             return None
         saved_at, data = saved
         if datetime.now(timezone.utc) - saved_at > _SAVINGS_STATE_MAX_AGE:
-            _log.info("Savings: shadow state from %s is stale — starting fresh", saved_at)
+            _log.info("Savings: state from %s is stale — starting fresh", saved_at)
             return None
-        return ShadowState.from_dict(data)
+        state = SavingsState.from_dict(data)
+        if state is None:
+            _log.info("Savings: saved state has an older format — starting fresh")
+        return state
 
     def _secondary_consumers(self) -> dict[str, list[str]]:
         """Measured consumers billed on a tariff other than the default one,
@@ -1720,11 +1732,11 @@ class Application:
             site_net_kw=site_kw,
             storage_kw=storage_kw,
             stored_kwh=stored_kwh,
-            cost_basis=self._ledger.all_cost_bases(),
             ev=ev,
             secondary=secondary,
             import_price=import_price,
             export_price=self._pv_opportunity_price,
+            cost_basis=self._ledger.all_cost_bases(),
         )
 
     async def _track_savings(
@@ -1738,21 +1750,14 @@ class Application:
         for slot in finished:
             await self._save_savings_slot(slot)
 
-    async def _save_savings_slot(self, slot: ActualSlot) -> None:
-        await self._storage.save_savings_actual(slot)
+    async def _save_savings_slot(self, slot: SavingsSlot) -> None:
+        await self._storage.save_savings_slot(slot)
         await self._storage.save_savings_state(self._savings.state.to_dict())
         _log.info(
-            "Savings %s: %.3f € (unplanned %.3f €, actual %.3f €, stored energy %+.3f €)",
+            "Savings %s: %+.3f € (uncontrolled %.3f €, real %.3f €, of which cars %+.3f €)",
             slot.start.astimezone().strftime("%H:%M"), slot.saving,
-            slot.baseline_cost, slot.actual_cost, slot.inventory_delta,
+            slot.uncontrolled_cost, slot.real_cost, slot.ev_saving,
         )
-        if slot.soc_correction_kwh:
-            _log.warning(
-                "Savings %s: implausible SoC jump %s — booked %+.3f € as SoC correction",
-                slot.start.astimezone().strftime("%H:%M"),
-                ", ".join(f"{d} {kwh:+.2f} kWh" for d, kwh in slot.soc_correction_kwh.items()),
-                slot.soc_correction,
-            )
         await self._publish_savings()
 
     async def _publish_price_curve(self) -> None:
@@ -1789,7 +1794,7 @@ class Application:
         """Push the all-time savings totals to Home Assistant."""
         if self._mqtt_publisher is None:
             return
-        rows = await self._storage.query_savings(
+        rows = await self._storage.query_savings_slots(
             datetime.min.replace(tzinfo=timezone.utc), datetime.max.replace(tzinfo=timezone.utc)
         )
         await self._mqtt_publisher.publish_savings(_savings_totals(rows))
@@ -1797,12 +1802,11 @@ class Application:
     def _update_savings_ev_needs(
         self, ev_goals: list[EvChargingGoal], device_states: dict[str, Any]
     ) -> None:
-        """Tell the shadow site how much each plugged-in car still has to charge.
+        """Give each plugged-in car's charge plan to the uncontrolled car.
 
-        Unplanned, a car charges that energy at full power straight away.  A
-        car without a deadline (PV-only), a disabled chargepoint or a manual
-        force charge has nothing to shift: the shadow car just follows the
-        real one.
+        With a deadline it charges as late as possible to reach the target; a
+        PV-only plan charges from PV only; no plan (disabled chargepoint,
+        force charge, no schedule) charges like the real car.
         """
         goals = {g.device_id: g for g in ev_goals}
         for asset in self._ev_assets:
@@ -1810,52 +1814,29 @@ class Application:
             if st is None or st.extra.get("plugged") is not True:
                 continue
             goal = goals.get(asset.device_id)
-            remaining = (
-                goal.phase1_required_kwh + goal.phase2_required_kwh
-                if goal is not None and goal.connected and not goal.pv_only
-                else 0.0
-            )
-            set_ev_need(self._savings.state, asset.device_id, remaining)
+            if goal is None or not goal.connected:
+                self._savings.set_ev_goal(asset.device_id, None, None)
+            elif goal.pv_only:
+                self._savings.set_ev_goal(asset.device_id, None, None, pv_only=True)
+            else:
+                self._savings.set_ev_goal(
+                    asset.device_id,
+                    goal.phase1_required_kwh + goal.phase2_required_kwh,
+                    goal.target_by,
+                )
 
-    async def _record_savings_predictions(self, plan: EnergyPlan) -> bool:
-        """Store what *plan* expects to save, per future slot.
-
-        Two predictions are kept per slot: ``latest`` is overwritten by every
-        plan until the slot begins; ``day_ahead`` is written once, shortly
-        before the slot's local day starts, and is the one the KPIs compare
-        against reality.  Returns True when *plan* froze day-ahead slots.
-        """
+    def _is_day_ahead_plan(self, plan: EnergyPlan) -> bool:
+        """True for the first plan made shortly before local midnight — the
+        plan the coming day starts with (flagged in the plan snapshots)."""
         now = datetime.now(timezone.utc)
-        stored = {
-            sc.device_id: kwh
-            for sc in self._storage_constraints
-            if (kwh := self._ledger.stored_energy(sc.device_id)) is not None
-        }
-        slots = predict_slots(
-            plan,
-            self._savings.state,
-            self._storage_constraints,
-            stored_kwh=stored,
-            cost_basis=self._ledger.all_cost_bases(),
-            ev_max_kw={a.device_id: a.max_charge_kw for a in self._ev_assets},
+        lead = aligned_plan_period(self._plan_interval_s, plan.step_minutes) + timedelta(
+            minutes=plan.step_minutes
         )
-        step = timedelta(minutes=plan.step_minutes)
-        # Only whole slots that have not begun: the running slot is partial.
-        slots = [
-            s for s in slots
-            if s.start > now and s.hours >= step.total_seconds() / 3600.0 - 1e-6
-        ]
-        if not slots:
+        coming = (day_ahead_window_end(now, lead) - timedelta(hours=12)).astimezone().date()
+        if coming <= now.astimezone().date() or coming == self._day_ahead_flagged:
             return False
-        await self._storage.save_savings_predictions("latest", slots, now, overwrite=True)
-        window_end = day_ahead_window_end(
-            now,
-            aligned_plan_period(self._plan_interval_s, plan.step_minutes) + step,
-        )
-        frozen = await self._storage.save_savings_predictions(
-            "day_ahead", [s for s in slots if s.start < window_end], now, overwrite=False
-        )
-        return frozen > 0
+        self._day_ahead_flagged = coming
+        return True
 
     # ------------------------------------------------------------------
     # REST API
@@ -2086,7 +2067,8 @@ class Application:
         @api.get("/api/plan/snapshots")
         async def list_plan_snapshots(start: datetime, end: datetime | None = None) -> dict:
             """Stored plans made in ``[start, end)`` (creation time and whether
-            each one froze a day-ahead savings prediction).  Kept as long as
+            it is the plan made shortly before local midnight for the coming
+            day).  Kept as long as
             the measurement history.  Naive times are read as UTC."""
             start = _as_utc(start)
             end = _as_utc(end) if end is not None else datetime.now(timezone.utc)
@@ -2139,37 +2121,48 @@ class Application:
             }
 
         @api.get("/api/savings")
-        async def get_savings(days: int = 30) -> dict:
-            """Predicted vs. real savings: all-time totals and one row per
-            local day for the last *days* days.  All values in €."""
-            rows = await self._storage.query_savings(
-                datetime.min.replace(tzinfo=timezone.utc),
-                datetime.max.replace(tzinfo=timezone.utc),
-            )
-            since = (datetime.now().astimezone() - timedelta(days=max(1, days))).date()
-            by_day: dict[date, list[dict]] = defaultdict(list)
+        async def get_savings(hours: float = 24.0 * 30, bucket: str | None = None) -> dict:
+            """Savings against the simulated uncontrolled house over the
+            rolling window of the last *hours*, totalled and per *bucket*
+            (``hour`` / ``day`` / ``week``, local time; default by window
+            length).  Also the energy still stored in both houses and the
+            all-time totals.  All values in €."""
+            if bucket is None:
+                bucket = "hour" if hours <= 72 else "day" if hours <= 24 * 31 else "week"
+            if bucket not in _BUCKETS:
+                raise HTTPException(status_code=400, detail=f"bucket must be one of {_BUCKETS}")
+            end = datetime.now(timezone.utc)
+            start = end - timedelta(hours=max(0.25, hours))
+            rows = await self._storage.query_savings_slots(start, end)
+            by_bucket: dict[datetime, list[dict]] = defaultdict(list)
             for row in rows:
-                day = row["slot_start"].astimezone().date()
-                if day > since:
-                    by_day[day].append(row)
+                by_bucket[_bucket_start(row["slot_start"], bucket)].append(row)
+            all_rows = await self._storage.query_savings_slots(
+                datetime.min.replace(tzinfo=timezone.utc), end
+            )
             return {
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+                "bucket": bucket,
                 "totals": _savings_totals(rows),
-                "days": [
-                    {"date": day.isoformat(), **_savings_totals(day_rows)}
-                    for day, day_rows in sorted(by_day.items())
+                "buckets": [
+                    {"start": b.isoformat(), **_savings_totals(b_rows)}
+                    for b, b_rows in sorted(by_bucket.items())
                 ],
+                "stored": self._savings.stored(),
+                "all_time": _savings_totals(all_rows),
             }
 
         @api.get("/api/savings/slots")
         async def get_savings_slots(start: datetime, end: datetime | None = None) -> dict:
-            """Every compared savings slot in ``[start, end)`` with all cost
-            components of the measurement and of both predictions (€).
-            Naive times are read as UTC; *end* defaults to now."""
+            """Every savings slot in ``[start, end)``: ledger-based cost of the
+            real and the uncontrolled house, both grid bills and the car part
+            (€).  Naive times are read as UTC; *end* defaults to now."""
             start = _as_utc(start)
             end = _as_utc(end) if end is not None else datetime.now(timezone.utc)
             if end - start > timedelta(days=31):
                 raise HTTPException(status_code=400, detail="window is limited to 31 days")
-            rows = await self._storage.query_savings(start, end)
+            rows = await self._storage.query_savings_slots(start, end)
             return {
                 "start": start.isoformat(),
                 "end": end.isoformat(),
@@ -2178,6 +2171,15 @@ class Application:
                     {**row, "slot_start": row["slot_start"].isoformat()} for row in rows
                 ],
             }
+
+        @api.get("/api/savings/legacy")
+        async def get_legacy_savings(start: datetime, end: datetime | None = None) -> dict:
+            """Slots of the previous accounting (before #82), kept a week for
+            debugging."""
+            start = _as_utc(start)
+            end = _as_utc(end) if end is not None else datetime.now(timezone.utc)
+            rows = await self._storage.query_legacy_savings(start, end)
+            return {"slots": [{**r, "slot_start": r["slot_start"].isoformat()} for r in rows]}
 
         @api.post("/api/plan/refresh")
         async def trigger_plan_refresh() -> dict:

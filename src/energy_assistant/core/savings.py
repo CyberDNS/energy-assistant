@@ -1,104 +1,81 @@
-"""Savings accounting — what Energy Assistant saves against an unplanned site.
+"""Savings accounting — Energy Assistant vs. a simulated uncontrolled house.
 
 Concept
 -------
-Two worlds are compared, interval by interval, on identical inflexible load,
-PV and prices:
+Two houses are compared slot by slot on identical measured household load,
+PV and prices (see issue #82):
 
-* the **real** site, where Energy Assistant controls batteries and EVs, and
-* a **shadow** site that runs unplanned: batteries do plain self-consumption
-  (charge from surplus, discharge to cover load, regulated at the grid
-  connection point) and a car charges at full power from the moment it is
-  plugged in.
+* the **real** house, where Energy Assistant controls batteries and EVs, and
+* an **uncontrolled** house, simulated on the same numbers, where
 
-    saving = shadow cost − real cost + Δ inventory value
+  - PV surplus goes into the batteries first, then into a plugged-in car,
+  - the batteries discharge to cover the load of the zone they regulate on
+    (the default-tariff zone: household and cars, not separately billed
+    loads such as a heat pump on its own tariff),
+  - a car with a charge plan charges from the grid **as late as possible**
+    to reach the plan's target by its deadline (PV-only plans: PV only;
+    no plan: charges like the real car).
 
-The inventory term keeps the comparison fair while the two worlds hold
-different amounts of energy.  A battery that was grid-charged an hour ago has
-cost money but not yet earned any; a car whose charge was deferred to the
-cheap night hours has not been paid for yet.  The difference in stored energy
-is therefore valued — batteries at the ledger cost basis, a car's missing
-energy at the price the shadow car paid for it — and only the *change* of
-that value is booked.  Summed over any period the term telescopes to the
-value difference at the two ends, so it never invents or loses money.
+Both houses keep a **ledger** per battery: energy that is charged moves its
+cost into the ledger (grid energy at the import price, PV at the feed-in
+price it would otherwise have earned); energy that is used is costed at the
+ledger's average cost.  So a slot's cost is what its consumption cost:
 
-The same three pure functions price all three numbers the KPIs compare:
+    cost = grid bill − cost moved into ledgers + ledger cost of energy used
 
-* ``SavingsTracker.tick``  — real saving, from live measurements,
-* ``predict_slots``        — predicted saving, from a solved ``EnergyPlan``,
-* ``settle``               — the tariff rules both of them use.
+    saving = uncontrolled cost − real cost
 
-Known simplifications
----------------------
-* Threshold devices (coolers, …) count as fixed load in both worlds, so they
-  contribute no saving.
-* Battery degradation is not real money and is left out.
-* The shadow battery uses the configured efficiencies; a real battery that
-  performs worse than configured shows up as a (small) negative saving.
+Charging slots therefore save nothing; the saving appears when the energy is
+used: (price at that moment − ledger cost) × kWh.  Energy still stored is not
+counted in either house until it is used.
 
-SoC corrections
----------------
-Stored energy comes from the batteries' SoC readings.  Some BMSs re-calibrate
-abruptly (e.g. 15 % → 5 % within minutes at a few hundred watts), which books
-the energy that was over-reported over hours as a loss in a single slot.
-``SavingsTracker`` therefore integrates each battery's measured AC power into
-an expected stored energy and compares it with the reading:
+Cars work the same way with a FIFO ledger per charging session: energy one
+car got earlier than the other is held at its cost, and once both cars have
+charged the same kWh the difference in what they paid for it is booked.
+Energy the real car gets beyond what the uncontrolled car charges (or that is
+still unmatched when the car is unplugged) is neutral.
 
-* slow drift (SoC estimation, real efficiency below the configured one) is
-  absorbed at up to ``SOC_DRIFT_PCT_PER_H`` and stays in ``inventory_delta``,
-* a deviation beyond ``SOC_BAND_PCT`` (quantization and noise) is a jump: its
-  value is booked as ``soc_correction`` instead.
+Device behaviour both houses share
+----------------------------------
+* Battery power within ``StorageConstraints.standby_w`` is household load.
+* A real battery recharging itself below its minimum SoC (inverter
+  protection) is mirrored onto the uncontrolled battery.
+* Real self-discharge and SoC jumps change the real ledger's kWh but not its
+  value, so later uses of that battery's energy cost more — no correction
+  needed.
 
-The correction is *not* dropped — the energy really is not there, and it
-was paid for — so totals are unchanged; it is only shown separately.
-
-Device behaviour both sites share
----------------------------------
-Some battery behaviour has nothing to do with planning, and an unplanned site
-with the same hardware would show it just the same.  ``SavingsTracker``
-therefore lets the shadow site share it instead of booking it against the
-plan:
-
-* **Standby draw**: battery power within ``StorageConstraints.standby_w``
-  (e.g. an SMA SBS reporting a steady +28 W at minimum SoC) is fixed load in
-  both sites, not a charge.
-* **Idle self-discharge**: once a battery has idled for
-  ``IDLE_MIRROR_AFTER_S``, its stored-energy changes are applied to the
-  shadow battery too (the wait keeps a lagging SoC reading after a real
-  discharge from being mirrored away).  Only drift-sized changes are
-  mirrored (a budget of ``SOC_BAND_PCT`` refilled at
-  ``SOC_DRIFT_PCT_PER_H``); a larger jump still counts and is reported as
-  an SoC correction.
-* **Forced recharge**: a battery below its configured minimum SoC that
-  charges (the inverter's own protection) does so in both sites: the power
-  is fixed load and the energy is mirrored.
+Housekeeping
+------------
+The uncontrolled batteries are set to the real SoC (keeping their own average
+cost) whenever both are at the same SoC limit, at least every
+``RESYNC_AFTER``, and after data gaps longer than ``RESET_AFTER_GAP``.  None
+of this is booked.  Car sessions start and end with the real plug state.
 """
 
 from __future__ import annotations
 
-import copy
-import math
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
-from .models import EnergyPlan, StorageConstraints
+from .models import StorageConstraints
+
+STATE_VERSION = 2
 
 # Live samples further apart than this are not bridged: the time in between
-# is left out of both worlds instead of being priced with a stale reading.
+# is left out of both houses instead of being priced with a stale reading.
 _MAX_GAP_S = 120.0
 
-SOC_BAND_PCT = 2.0
-"""Deviation (% of capacity) between SoC reading and integrated power that is
-tolerated as quantization/noise before it counts as an SoC jump."""
+RESET_AFTER_GAP = timedelta(hours=1)
+"""After a data gap this long the uncontrolled house restarts level with
+reality (nothing is booked for the gap)."""
 
-IDLE_MIRROR_AFTER_S = 600.0
-"""Idle time (s) after which a battery's stored-energy changes are mirrored
-onto the shadow battery (see "Device behaviour both sites share")."""
+RESYNC_AFTER = timedelta(days=3)
+"""The uncontrolled batteries are set to the real SoC at least this often."""
 
-SOC_DRIFT_PCT_PER_H = 3.0
-"""Rate (% of capacity per hour) at which the expected stored energy follows
-the reading — slow drift is normal battery behaviour, not a jump."""
+LIMIT_BAND_PCT = 2.0
+"""Two batteries within this many % of capacity of the same SoC limit count
+as "both empty" / "both full" (natural resync point)."""
 
 
 # ---------------------------------------------------------------------------
@@ -133,191 +110,129 @@ def settle(
     return cost - surplus * export_price
 
 
+def slot_start(ts: datetime, step_minutes: int) -> datetime:
+    """Start (UTC) of the accounting slot *ts* falls into."""
+    ts = ts.astimezone(timezone.utc)
+    minutes = ts.hour * 60 + ts.minute
+    floored = minutes - minutes % step_minutes
+    return ts.replace(hour=floored // 60, minute=floored % 60, second=0, microsecond=0)
+
+
 # ---------------------------------------------------------------------------
-# Shadow (unplanned) site state
+# Ledgers
 # ---------------------------------------------------------------------------
 
 
 @dataclass
-class ShadowEv:
-    """One charging session, real car vs. the car that charges immediately."""
+class Ledger:
+    """Stored energy of one battery and what it cost (average cost)."""
 
-    real_kwh: float = 0.0
-    """Wall energy the real car received this session."""
-    shadow_kwh: float = 0.0
-    """Wall energy the unplanned car would have received by now."""
-    need_kwh: float = 0.0
-    """Total wall energy the unplanned car charges this session."""
-    shadow_cost: float = 0.0
-    """Σ shadow energy × import price — values the energy the real car lacks."""
+    stored_kwh: float = 0.0
+    value_eur: float = 0.0
 
     @property
-    def value_eur(self) -> float:
-        """Value of the real car's energy lead (negative: it is behind)."""
-        if self.shadow_kwh <= 0.0:
+    def cost_per_kwh(self) -> float:
+        return self.value_eur / self.stored_kwh if self.stored_kwh > 1e-9 else 0.0
+
+    def add(self, stored_kwh: float, cost_eur: float) -> None:
+        self.stored_kwh += stored_kwh
+        self.value_eur += cost_eur
+
+    def take(self, stored_kwh: float) -> float:
+        """Remove *stored_kwh*; return their cost at the average cost."""
+        if stored_kwh <= 0.0:
             return 0.0
-        return (self.real_kwh - self.shadow_kwh) * self.shadow_cost / self.shadow_kwh
+        cost = self.cost_per_kwh * stored_kwh
+        if self.value_eur > 0:
+            cost = min(cost, self.value_eur)  # SoC readings may lag the flows
+        self.value_eur -= cost
+        self.stored_kwh = max(0.0, self.stored_kwh - stored_kwh)
+        return cost
+
+    def resize(self, stored_kwh: float) -> None:
+        """Set the stored energy, keeping the average cost (housekeeping)."""
+        avg = self.cost_per_kwh
+        self.stored_kwh = max(0.0, stored_kwh)
+        self.value_eur = avg * self.stored_kwh
 
 
 @dataclass
-class ShadowState:
-    """Everything the unplanned site carries from one interval to the next."""
+class EvSession:
+    """One charging session: the real car next to the uncontrolled one."""
 
-    stored_kwh: dict[str, float] = field(default_factory=dict)
-    """Stored energy of each shadow battery, keyed by device id."""
-    evs: dict[str, ShadowEv] = field(default_factory=dict)
-    """Open charging sessions, keyed by chargepoint device id."""
-    closed_ev_value: float = 0.0
-    """Summed ``value_eur`` of finished sessions.  Kept so that unplugging a
-    car never makes the inventory value jump."""
+    mode: str = "follow"
+    """``deadline`` (charge plan: as late as possible), ``pv_only`` or
+    ``follow`` (no plan: charge like the real car)."""
+    need_kwh: float = 0.0
+    """Total wall energy the uncontrolled car charges this session."""
+    deadline: str | None = None
+    """ISO time by which ``need_kwh`` must be in (``deadline`` mode)."""
+    real_kwh: float = 0.0
+    unc_kwh: float = 0.0
+    real_queue: list[list[float]] = field(default_factory=list)
+    """``[kWh, €]`` the real car charged that is not matched yet (FIFO)."""
+    unc_queue: list[list[float]] = field(default_factory=list)
 
-    def copy(self) -> "ShadowState":
-        return copy.deepcopy(self)
+    @property
+    def matched_kwh(self) -> float:
+        return min(self.real_kwh, self.unc_kwh)
+
+    def deadline_dt(self) -> datetime | None:
+        return datetime.fromisoformat(self.deadline) if self.deadline else None
+
+
+def _release(queue: list[list[float]], kwh: float) -> float:
+    """Remove *kwh* from the front of a FIFO ``[kWh, €]`` queue; return €."""
+    cost = 0.0
+    while kwh > 1e-12 and queue:
+        q_kwh, q_cost = queue[0]
+        take = min(kwh, q_kwh)
+        part = q_cost * take / q_kwh if q_kwh > 0 else 0.0
+        cost += part
+        kwh -= take
+        if take >= q_kwh - 1e-12:
+            queue.pop(0)
+        else:
+            queue[0] = [q_kwh - take, q_cost - part]
+    return cost
+
+
+@dataclass
+class SavingsState:
+    """Everything the accounting carries from one tick to the next."""
+
+    real: dict[str, Ledger] = field(default_factory=dict)
+    """Accounting ledger of each real battery (plain average cost)."""
+    unc: dict[str, Ledger] = field(default_factory=dict)
+    """Simulated battery of the uncontrolled house (its state *is* its ledger)."""
+    last_resync: dict[str, str] = field(default_factory=dict)
+    evs: dict[str, EvSession] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {"version": STATE_VERSION, **asdict(self)}
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "ShadowState":
+    def from_dict(cls, data: Mapping[str, Any]) -> "SavingsState | None":
+        """Restore a saved state; ``None`` for an older format."""
+        if data.get("version") != STATE_VERSION:
+            return None
         return cls(
-            stored_kwh={k: float(v) for k, v in (data.get("stored_kwh") or {}).items()},
-            evs={k: ShadowEv(**v) for k, v in (data.get("evs") or {}).items()},
-            closed_ev_value=float(data.get("closed_ev_value") or 0.0),
+            real={k: Ledger(**v) for k, v in (data.get("real") or {}).items()},
+            unc={k: Ledger(**v) for k, v in (data.get("unc") or {}).items()},
+            last_resync=dict(data.get("last_resync") or {}),
+            evs={k: EvSession(**v) for k, v in (data.get("evs") or {}).items()},
         )
 
 
-@dataclass(frozen=True)
-class EvStep:
-    """What one chargepoint did during an interval."""
-
-    plugged: bool | None
-    """``None`` = unknown (e.g. connection lost): the session is left as is."""
-    real_kwh: float = 0.0
-    max_kw: float = 0.0
-
-
-def set_ev_need(state: ShadowState, device_id: str, remaining_kwh: float) -> None:
-    """Tell the shadow car how much wall energy the session still needs.
-
-    Called whenever the charging goal is re-evaluated.  The unplanned car
-    charges the same total energy as the real one — what the real car got so
-    far plus what it is still going to get — just as early as possible.
-    """
-    ev = state.evs.setdefault(device_id, ShadowEv())
-    ev.need_kwh = ev.real_kwh + max(0.0, remaining_kwh)
-
-
-def _ev_step(
-    state: ShadowState, device_id: str, step: EvStep, hours: float, import_price: float
-) -> float:
-    """Advance one chargepoint; return the shadow car's energy this interval."""
-    if step.plugged is None:
-        return 0.0
-    ev = state.evs.get(device_id)
-    if not step.plugged:
-        if ev is not None:
-            state.closed_ev_value += ev.value_eur
-            del state.evs[device_id]
-        return 0.0
-    if ev is None:
-        ev = state.evs[device_id] = ShadowEv()
-    ev.real_kwh += step.real_kwh
-    # Never behind the real car: without a goal the shadow simply follows it.
-    ev.need_kwh = max(ev.need_kwh, ev.real_kwh)
-    charged = min(
-        max(0.0, ev.need_kwh - ev.shadow_kwh),
-        max(step.max_kw * hours, step.real_kwh),
-    )
-    ev.shadow_kwh += charged
-    ev.shadow_cost += charged * import_price
-    return charged
-
-
-def _self_consumption(
-    stored: dict[str, float],
-    batteries: Iterable[StorageConstraints],
-    site_net_kwh: float,
-    hours: float,
-) -> float:
-    """Run the shadow batteries against the site's net load for one interval.
-
-    Returns their net AC energy (positive = charging) and updates *stored*.
-    Batteries are used in configuration order.
-    """
-    net = 0.0
-    remaining = abs(site_net_kwh)
-    for sc in batteries:
-        if remaining <= 1e-9:
-            break
-        energy = stored.get(sc.device_id)
-        if energy is None:
-            continue
-        if site_net_kwh < 0:  # surplus → charge
-            room = max(0.0, sc.capacity_kwh * sc.max_soc_pct / 100.0 - energy)
-            take = min(remaining, sc.max_charge_kw * hours, room / sc.charge_efficiency)
-            stored[sc.device_id] = energy + take * sc.charge_efficiency
-            remaining -= take
-            net += take
-        else:  # deficit → discharge
-            usable = max(0.0, energy - sc.capacity_kwh * sc.min_soc_pct / 100.0)
-            give = min(remaining, sc.max_discharge_kw * hours, usable * sc.discharge_efficiency)
-            stored[sc.device_id] = energy - give / sc.discharge_efficiency
-            remaining -= give
-            net -= give
-    return net
-
-
-def baseline_step(
-    state: ShadowState,
-    batteries: Sequence[StorageConstraints],
-    *,
-    residual_kwh: float,
-    secondary: Sequence[tuple[float, float]],
-    ev: Mapping[str, EvStep],
-    import_price: float,
-    export_price: float,
-    hours: float,
-) -> float:
-    """Advance the unplanned site by one interval and return its cost (€).
-
-    residual_kwh:
-        Site net energy without any battery or EV: all inflexible load
-        (separately billed loads included) minus PV.
-    """
-    ev_kwh = sum(
-        _ev_step(state, device_id, step, hours, import_price)
-        for device_id, step in ev.items()
-    )
-    site = residual_kwh + ev_kwh
-    battery_kwh = _self_consumption(state.stored_kwh, batteries, site, hours)
-    secondary_total = sum(max(0.0, load) for load, _ in secondary)
-    return settle(site + battery_kwh - secondary_total, secondary, import_price, export_price)
-
-
-def inventory_value(
-    stored_kwh: Mapping[str, float],
-    state: ShadowState,
-    cost_basis: Mapping[str, float],
-) -> float:
-    """Value (€) of the energy the compared site holds beyond the shadow site.
-
-    stored_kwh:
-        Stored energy per battery in the compared (real or planned) site.
-    """
-    value = state.closed_ev_value + sum(ev.value_eur for ev in state.evs.values())
-    for device_id, shadow in state.stored_kwh.items():
-        value += (stored_kwh.get(device_id, shadow) - shadow) * cost_basis.get(device_id, 0.0)
-    return value
-
-
 # ---------------------------------------------------------------------------
-# Real saving — from live measurements
+# Live samples and slot results
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class EvLive:
     plugged: bool | None
+    """``None`` = unknown (e.g. connection lost): the session is left as is."""
     power_kw: float
     max_kw: float
 
@@ -332,235 +247,400 @@ class LiveSample:
     storage_kw: Mapping[str, float]
     """AC power per battery: positive = charging."""
     stored_kwh: Mapping[str, float]
-    """Stored energy per battery."""
-    cost_basis: Mapping[str, float]
+    """Stored energy per battery (from its SoC)."""
     ev: Mapping[str, EvLive]
     secondary: Sequence[tuple[float, float]]
     """``(power_kw, price_eur_per_kwh)`` per separately billed load."""
     import_price: float
     export_price: float
+    cost_basis: Mapping[str, float] = field(default_factory=dict)
+    """Only used to start a battery's ledgers (value = stored × basis)."""
 
 
 @dataclass
-class ActualSlot:
-    """Measured result of one accounting slot."""
+class SavingsSlot:
+    """Result of one accounting slot."""
 
     start: datetime
     hours: float = 0.0
     """Time actually covered by valid measurements (≤ slot length)."""
-    baseline_cost: float = 0.0
-    actual_cost: float = 0.0
-    inventory_delta: float = 0.0
-    """Value change of the energy held beyond the shadow site, without
-    ``soc_correction``."""
-    soc_correction: float = 0.0
-    """Value (€) of implausible stored-energy jumps (BMS re-calibration),
-    see "SoC corrections" in the module docstring."""
-    soc_correction_kwh: dict[str, float] = field(default_factory=dict)
-    """Stored-energy jumps per battery (kWh) behind ``soc_correction``."""
+    real_cost: float = 0.0
+    """What the real house's consumption cost (ledger-based)."""
+    uncontrolled_cost: float = 0.0
+    real_bill: float = 0.0
+    """Plain grid bill of the real house (charging included)."""
+    uncontrolled_bill: float = 0.0
+    ev_saving: float = 0.0
+    """Part of the saving booked for cars."""
 
     @property
     def saving(self) -> float:
-        return self.baseline_cost - self.actual_cost + self.inventory_delta + self.soc_correction
+        return self.uncontrolled_cost - self.real_cost
 
 
-def slot_start(ts: datetime, step_minutes: int) -> datetime:
-    """Start (UTC) of the accounting slot *ts* falls into."""
-    ts = ts.astimezone(timezone.utc)
-    minutes = ts.hour * 60 + ts.minute
-    floored = minutes - minutes % step_minutes
-    return ts.replace(hour=floored // 60, minute=floored % 60, second=0, microsecond=0)
+@dataclass
+class _HouseResult:
+    bill: float
+    cost: float
+    ev_cost: dict[str, float]
+    """Cost of each car's charged energy, moved into its session queue."""
+
+
+def _house_costs(
+    household_kwh: float,
+    secondary: Sequence[tuple[float, float]],
+    import_price: float,
+    export_price: float,
+    batteries: Mapping[str, StorageConstraints],
+    ledgers: Mapping[str, Ledger],
+    charge_kwh: Mapping[str, float],
+    discharge_kwh: Mapping[str, float],
+    ev_kwh: Mapping[str, float],
+) -> _HouseResult:
+    """Bill and ledger-based cost of one house for one interval.
+
+    household_kwh:
+        Default-tariff zone energy without batteries and cars (+ deficit,
+        − PV surplus).
+    charge_kwh / discharge_kwh:
+        AC energy per battery (both ≥ 0).  The ledgers are updated.
+    ev_kwh:
+        Energy per car (≥ 0); its cost is returned, not booked.
+
+    Battery energy covers the household first, then the cars.  Charging
+    (batteries, and cars beyond what batteries cover) is priced at its
+    marginal effect on the bill.
+    """
+    charged = sum(charge_kwh.values())
+    discharged = sum(discharge_kwh.values())
+    ev_total = sum(ev_kwh.values())
+    net = household_kwh + charged - discharged + ev_total
+    bill = settle(net, secondary, import_price, export_price)
+
+    used_cost = 0.0
+    for device_id, kwh in discharge_kwh.items():
+        if kwh > 0:
+            sc = batteries[device_id]
+            used_cost += ledgers[device_id].take(kwh / sc.discharge_efficiency)
+
+    to_house = min(discharged, max(0.0, household_kwh))
+    to_ev = min(discharged - to_house, ev_total)
+    ev_battery_cost = used_cost * to_ev / discharged if discharged > 0 else 0.0
+    ev_grid = ev_total - to_ev
+
+    flex = charged + ev_grid
+    marginal = (
+        bill - settle(net - flex, secondary, import_price, export_price) if flex > 1e-12 else 0.0
+    )
+    for device_id, kwh in charge_kwh.items():
+        if kwh > 0:
+            sc = batteries[device_id]
+            ledgers[device_id].add(kwh * sc.charge_efficiency, marginal * kwh / flex)
+    ev_cost = {
+        device_id: (
+            (marginal * ev_grid / flex if flex > 1e-12 else 0.0) + ev_battery_cost
+        ) * kwh / ev_total
+        for device_id, kwh in ev_kwh.items()
+        if ev_total > 0
+    }
+    cost = bill - marginal + (used_cost - ev_battery_cost)
+    return _HouseResult(bill=bill, cost=cost, ev_cost=ev_cost)
+
+
+# ---------------------------------------------------------------------------
+# Tracker
+# ---------------------------------------------------------------------------
 
 
 class SavingsTracker:
-    """Integrates the real and the shadow site over fixed accounting slots.
+    """Runs both houses over fixed accounting slots.
 
     Feed it one ``LiveSample`` per control tick; whenever a slot is complete
     ``tick`` returns it.  Ticks without a usable sample are simply not fed —
-    that time is then missing from both worlds alike.
+    that time is then missing from both houses alike.
     """
 
     def __init__(
         self,
         batteries: Sequence[StorageConstraints],
         step_minutes: int,
-        state: ShadowState | None = None,
+        state: SavingsState | None = None,
     ) -> None:
-        self._batteries = list(batteries)
+        self._batteries = {sc.device_id: sc for sc in batteries}
         self._step_minutes = step_minutes
-        self.state = state or ShadowState()
-        self._slot: ActualSlot | None = None
+        self.state = state or SavingsState()
+        self._slot: SavingsSlot | None = None
         self._last_ts: datetime | None = None
-        self._last_value = 0.0
-        # Expected stored energy per battery, integrated from measured power
-        # (see "SoC corrections").
-        self._expected_kwh: dict[str, float] = {}
-        # Real stored energy at the previous sample, and how long each
-        # battery has been idle (see "Device behaviour both sites share").
-        self._last_stored: dict[str, float] = {}
-        self._idle_s: dict[str, float] = {}
-        self._mirror_budget: dict[str, float] = {}
 
-    def tick(self, sample: LiveSample) -> list[ActualSlot]:
+    # -- charge plans -------------------------------------------------------
+
+    def set_ev_goal(
+        self,
+        device_id: str,
+        remaining_kwh: float | None,
+        deadline: datetime | None,
+        pv_only: bool = False,
+    ) -> None:
+        """Tell the uncontrolled car what the real car's charge plan asks for.
+
+        Called whenever the charging goal is re-evaluated, for plugged-in cars
+        only.  ``remaining_kwh=None`` (no plan) lets the uncontrolled car
+        charge like the real one.
+        """
+        ev = self.state.evs.setdefault(device_id, EvSession())
+        if pv_only:
+            ev.mode, ev.deadline = "pv_only", None
+        elif remaining_kwh is None or deadline is None:
+            ev.mode, ev.deadline = "follow", None
+        else:
+            ev.mode = "deadline"
+            ev.deadline = deadline.astimezone(timezone.utc).isoformat()
+            ev.need_kwh = ev.real_kwh + max(0.0, remaining_kwh)
+
+    # -- live data ----------------------------------------------------------
+
+    def stored(self) -> dict[str, dict[str, dict[str, float]]]:
+        """Energy still stored per house and battery (kWh and ledger value)."""
+        return {
+            house: {
+                device_id: {"kwh": led.stored_kwh, "value_eur": led.value_eur}
+                for device_id, led in ledgers.items()
+            }
+            for house, ledgers in (("real", self.state.real), ("uncontrolled", self.state.unc))
+        }
+
+    def tick(self, sample: LiveSample) -> list[SavingsSlot]:
         """Book the time since the previous sample; return finished slots.
 
         An interval belongs to the slot it starts in and is priced with the
         readings of the sample that ends it.
         """
-        # A battery the shadow site has not seen yet starts level with reality.
-        for sc in self._batteries:
-            if sc.device_id not in self.state.stored_kwh and sc.device_id in sample.stored_kwh:
-                self.state.stored_kwh[sc.device_id] = sample.stored_kwh[sc.device_id]
-
+        self._init_batteries(sample)
         previous, self._last_ts = self._last_ts, sample.timestamp
         gap_s = (sample.timestamp - previous).total_seconds() if previous else None
         if previous is None or gap_s <= 0 or gap_s > _MAX_GAP_S:
-            # Nothing to bridge.  Restart the inventory reference so whatever
-            # happened unobserved is not booked as a saving or a loss.
-            self._last_value = inventory_value(sample.stored_kwh, self.state, sample.cost_basis)
-            self._expected_kwh = dict(sample.stored_kwh)
-            self._last_stored = dict(sample.stored_kwh)
-            self._idle_s = {}
+            if previous is not None and gap_s > RESET_AFTER_GAP.total_seconds():
+                self._reset(sample)
+            self._sync_real(sample)
             return self._roll(sample.timestamp)
 
         if self._slot is None:
-            self._slot = ActualSlot(start=slot_start(previous, self._step_minutes))
+            self._slot = SavingsSlot(start=slot_start(previous, self._step_minutes))
         hours = gap_s / 3600.0
-        secondary = [(max(0.0, kw) * hours, price) for kw, price in sample.secondary]
-        secondary_total = sum(load for load, _ in secondary)
-        ev_steps = {
-            device_id: EvStep(
-                plugged=ev.plugged,
-                real_kwh=max(0.0, ev.power_kw) * hours if ev.plugged else 0.0,
-                max_kw=ev.max_kw,
-            )
-            for device_id, ev in sample.ev.items()
-        }
-        site_kwh = sample.site_net_kw * hours
-        shared = self._shared_batteries(sample, gap_s)
-        flexible_kwh = sum(
-            kw for device_id, kw in sample.storage_kw.items() if device_id not in shared
-        ) * hours + sum(step.real_kwh for step in ev_steps.values())
-
         slot = self._slot
         slot.hours += hours
-        slot.actual_cost += settle(
-            site_kwh - secondary_total, secondary, sample.import_price, sample.export_price
+
+        secondary = [(max(0.0, kw) * hours, price) for kw, price in sample.secondary]
+        secondary_total = sum(load for load, _ in secondary)
+        prices = (sample.import_price, sample.export_price)
+
+        # ── Real house: measured flows ────────────────────────────────────
+        charge: dict[str, float] = {}
+        discharge: dict[str, float] = {}
+        forced: dict[str, float] = {}
+        flex_kwh = 0.0
+        for device_id, sc in self._batteries.items():
+            kw = sample.storage_kw.get(device_id, 0.0)
+            if abs(kw) * 1000.0 <= sc.standby_w:
+                continue  # standby draw: household load in both houses
+            kwh = kw * hours
+            flex_kwh += kwh
+            if kwh > 0:
+                charge[device_id] = kwh
+                stored = sample.stored_kwh.get(device_id)
+                if stored is not None and stored < sc.capacity_kwh * sc.min_soc_pct / 100.0 - 1e-6:
+                    forced[device_id] = kwh
+            else:
+                discharge[device_id] = -kwh
+        real_ev: dict[str, float] = {}
+        for device_id, ev in sample.ev.items():
+            if ev.plugged:
+                real_ev[device_id] = max(0.0, ev.power_kw) * hours
+                flex_kwh += real_ev[device_id]
+        household = sample.site_net_kw * hours - flex_kwh - secondary_total
+
+        real = _house_costs(
+            household, secondary, *prices, self._batteries, self.state.real,
+            charge, discharge, real_ev,
         )
-        slot.baseline_cost += baseline_step(
-            self.state,
-            self._batteries,
-            residual_kwh=site_kwh - flexible_kwh,
-            secondary=secondary,
-            ev=ev_steps,
-            import_price=sample.import_price,
-            export_price=sample.export_price,
-            hours=hours,
+
+        # ── Uncontrolled house: simulated flows ───────────────────────────
+        self._update_sessions(sample)
+        u_charge, u_discharge, u_ev = self._simulate(sample, household, forced, hours)
+        unc = _house_costs(
+            household, secondary, *prices, self._batteries, self.state.unc,
+            u_charge, u_discharge, u_ev,
         )
-        mirrored = self._mirror_shared(sample, shared, hours)
-        value = inventory_value(sample.stored_kwh, self.state, sample.cost_basis)
-        correction = 0.0
-        for device_id, kwh in self._soc_jumps(sample, hours, shared, mirrored).items():
-            correction += kwh * sample.cost_basis.get(device_id, 0.0)
-            slot.soc_correction_kwh[device_id] = slot.soc_correction_kwh.get(device_id, 0.0) + kwh
-        slot.soc_correction += correction
-        slot.inventory_delta += value - self._last_value - correction
-        self._last_value = value
-        self._last_stored = dict(sample.stored_kwh)
+
+        # ── Cars: book matched energy ─────────────────────────────────────
+        ev_real_booked = ev_unc_booked = 0.0
+        for device_id, ev in self.state.evs.items():
+            before = ev.matched_kwh
+            if real_ev.get(device_id, 0.0) > 0:
+                ev.real_kwh += real_ev[device_id]
+                ev.real_queue.append([real_ev[device_id], real.ev_cost.get(device_id, 0.0)])
+            if u_ev.get(device_id, 0.0) > 0:
+                ev.unc_kwh += u_ev[device_id]
+                ev.unc_queue.append([u_ev[device_id], unc.ev_cost.get(device_id, 0.0)])
+            matched = ev.matched_kwh - before
+            if matched > 0:
+                ev_real_booked += _release(ev.real_queue, matched)
+                ev_unc_booked += _release(ev.unc_queue, matched)
+
+        slot.real_bill += real.bill
+        slot.uncontrolled_bill += unc.bill
+        slot.real_cost += real.cost + ev_real_booked
+        slot.uncontrolled_cost += unc.cost + ev_unc_booked
+        slot.ev_saving += ev_unc_booked - ev_real_booked
+
+        self._sync_real(sample)
+        self._housekeeping(sample.timestamp, active={*u_charge, *u_discharge})
         return self._roll(sample.timestamp)
 
-    def _shared_batteries(self, sample: LiveSample, gap_s: float) -> dict[str, str]:
-        """Batteries whose power this interval is device behaviour shared by
-        both sites: ``{device_id: "standby" | "forced"}``.  Also tracks how
-        long each battery has been idle."""
-        shared: dict[str, str] = {}
-        for sc in self._batteries:
-            kw = sample.storage_kw.get(sc.device_id)
-            stored = sample.stored_kwh.get(sc.device_id)
-            if kw is None or stored is None:
-                self._idle_s.pop(sc.device_id, None)
-                continue
-            min_kwh = sc.capacity_kwh * sc.min_soc_pct / 100.0
-            if abs(kw) * 1000.0 <= sc.standby_w:
-                shared[sc.device_id] = "standby"
-                self._idle_s[sc.device_id] = self._idle_s.get(sc.device_id, 0.0) + gap_s
-            else:
-                self._idle_s[sc.device_id] = 0.0
-                if kw > 0 and stored < min_kwh - 1e-6:
-                    shared[sc.device_id] = "forced"
-        return shared
+    # -- helpers ------------------------------------------------------------
 
-    def _mirror_shared(
-        self, sample: LiveSample, shared: Mapping[str, str], hours: float
-    ) -> dict[str, float]:
-        """Apply the real stored-energy change of shared batteries to the
-        shadow site; return the mirrored kWh per battery."""
-        mirrored: dict[str, float] = {}
-        for sc in self._batteries:
-            band = sc.capacity_kwh * SOC_BAND_PCT / 100.0
-            budget = min(
-                band,
-                self._mirror_budget.get(sc.device_id, band)
-                + sc.capacity_kwh * SOC_DRIFT_PCT_PER_H / 100.0 * hours,
-            )
-            self._mirror_budget[sc.device_id] = budget
-            reason = shared.get(sc.device_id)
-            if reason is None:
+    def _init_batteries(self, sample: LiveSample) -> None:
+        """A battery seen for the first time starts with the same ledger in
+        both houses."""
+        for device_id in self._batteries:
+            stored = sample.stored_kwh.get(device_id)
+            if stored is None:
                 continue
-            if reason == "standby" and self._idle_s.get(sc.device_id, 0.0) < IDLE_MIRROR_AFTER_S:
-                continue
-            now = sample.stored_kwh.get(sc.device_id)
-            before = self._last_stored.get(sc.device_id)
-            shadow = self.state.stored_kwh.get(sc.device_id)
-            if now is None or before is None or shadow is None:
-                continue
-            delta = now - before
-            if reason == "standby":
-                delta = max(-budget, min(budget, delta))
-                self._mirror_budget[sc.device_id] = budget - abs(delta)
-            self.state.stored_kwh[sc.device_id] = min(
-                max(shadow + delta, 0.0), sc.capacity_kwh
-            )
-            mirrored[sc.device_id] = delta
-        return mirrored
+            if device_id not in self.state.real:
+                basis = sample.cost_basis.get(device_id, 0.0)
+                self.state.real[device_id] = Ledger(stored, stored * basis)
+            if device_id not in self.state.unc:
+                led = self.state.real[device_id]
+                self.state.unc[device_id] = Ledger(led.stored_kwh, led.value_eur)
+                self.state.last_resync[device_id] = sample.timestamp.isoformat()
 
-    def _soc_jumps(
+    def _sync_real(self, sample: LiveSample) -> None:
+        """The real ledgers' kWh follow the SoC readings (value is kept)."""
+        for device_id, led in self.state.real.items():
+            stored = sample.stored_kwh.get(device_id)
+            if stored is not None:
+                led.stored_kwh = max(0.0, stored)
+
+    def _update_sessions(self, sample: LiveSample) -> None:
+        """Open a session at plug-in, drop it (unbooked rest) at unplug."""
+        for device_id, ev in sample.ev.items():
+            if ev.plugged is True:
+                self.state.evs.setdefault(device_id, EvSession())
+            elif ev.plugged is False:
+                self.state.evs.pop(device_id, None)
+
+    def _simulate(
         self,
         sample: LiveSample,
+        household: float,
+        forced: Mapping[str, float],
         hours: float,
-        shared: Mapping[str, str],
-        mirrored: Mapping[str, float],
-    ) -> dict[str, float]:
-        """Stored-energy change (kWh) per battery that measured power cannot
-        explain (see "SoC corrections" in the module docstring)."""
-        jumps: dict[str, float] = {}
-        for sc in self._batteries:
-            reported = sample.stored_kwh.get(sc.device_id)
-            if reported is None:
-                self._expected_kwh.pop(sc.device_id, None)
-                continue
-            expected = self._expected_kwh.get(sc.device_id)
-            if expected is None or shared.get(sc.device_id) == "forced":
-                # A forced recharge is mirrored in full: nothing to explain.
-                self._expected_kwh[sc.device_id] = reported
-                continue
-            # Mirrored (shared) changes are explained by definition.
-            expected += mirrored.get(sc.device_id, 0.0)
-            kw = 0.0 if shared.get(sc.device_id) == "standby" else sample.storage_kw.get(sc.device_id, 0.0)
-            expected += kw * hours * sc.charge_efficiency if kw > 0 else kw * hours / sc.discharge_efficiency
-            expected = min(max(expected, 0.0), sc.capacity_kwh)
-            drift = sc.capacity_kwh * SOC_DRIFT_PCT_PER_H / 100.0 * hours
-            expected += max(-drift, min(drift, reported - expected))
-            deviation = reported - expected
-            band = sc.capacity_kwh * SOC_BAND_PCT / 100.0
-            if abs(deviation) > band:
-                jump = deviation - math.copysign(band, deviation)
-                expected += jump
-                jumps[sc.device_id] = jump
-            self._expected_kwh[sc.device_id] = expected
-        return jumps
+    ) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
+        """Flows of the uncontrolled house for one interval (AC kWh)."""
+        charge: dict[str, float] = {}
+        discharge: dict[str, float] = {}
+        ev_kwh: dict[str, float] = {}
+        led = self.state.unc
 
-    def _roll(self, now: datetime) -> list[ActualSlot]:
+        def room(device_id: str) -> float:
+            sc = self._batteries[device_id]
+            full = sc.capacity_kwh * sc.max_soc_pct / 100.0
+            pending = charge.get(device_id, 0.0) * sc.charge_efficiency
+            return max(0.0, full - led[device_id].stored_kwh - pending) / sc.charge_efficiency
+
+        def charge_headroom(device_id: str) -> float:
+            sc = self._batteries[device_id]
+            return max(0.0, sc.max_charge_kw * hours - charge.get(device_id, 0.0))
+
+        # Forced recharge below min SoC happens in both houses.
+        for device_id, kwh in forced.items():
+            if device_id in led:
+                take = min(kwh, room(device_id))
+                charge[device_id] = charge.get(device_id, 0.0) + take
+
+        # PV surplus: batteries first (configuration order) …
+        surplus = max(0.0, -household)
+        for device_id in self._batteries:
+            if device_id not in led or surplus <= 1e-12:
+                continue
+            take = min(surplus, charge_headroom(device_id), room(device_id))
+            if take > 0:
+                charge[device_id] = charge.get(device_id, 0.0) + take
+                surplus -= take
+
+        # … then the cars.
+        end = sample.timestamp
+        for device_id, ev in self.state.evs.items():
+            live = sample.ev.get(device_id)
+            if live is None or not live.plugged:
+                continue
+            need = ev.need_kwh if ev.mode == "deadline" else ev.real_kwh + max(
+                0.0, live.power_kw * hours
+            )
+            missing = max(0.0, need - ev.unc_kwh)
+            cap = live.max_kw * hours
+            pv = min(surplus, cap, missing)
+            surplus -= pv
+            grid = 0.0
+            rest = missing - pv
+            if ev.mode == "deadline" and rest > 0:
+                deadline = ev.deadline_dt()
+                left_h = max(0.0, (deadline - end).total_seconds() / 3600.0) if deadline else 0.0
+                grid = min(cap - pv, max(0.0, rest - live.max_kw * left_h))
+            elif ev.mode == "follow" and rest > 0:
+                grid = min(cap - pv, rest)
+            if pv + grid > 0:
+                ev_kwh[device_id] = pv + grid
+
+        # Deficit of the zone (household + cars): batteries discharge.
+        deficit = household + sum(charge.values()) + sum(ev_kwh.values())
+        for device_id, sc in self._batteries.items():
+            if device_id not in led or deficit <= 1e-12 or charge.get(device_id, 0.0) > 0:
+                continue
+            usable = max(0.0, led[device_id].stored_kwh - sc.capacity_kwh * sc.min_soc_pct / 100.0)
+            give = min(deficit, sc.max_discharge_kw * hours, usable * sc.discharge_efficiency)
+            if give > 0:
+                discharge[device_id] = give
+                deficit -= give
+        return charge, discharge, ev_kwh
+
+    def _housekeeping(self, now: datetime, active: set[str] | frozenset[str] = frozenset()) -> None:
+        """Set uncontrolled batteries to the real SoC at natural resync points
+        (both idle at the same SoC limit) and at least every ``RESYNC_AFTER``.
+
+        *active*: uncontrolled batteries that charged or discharged this tick —
+        one just leaving a limit must not be pulled back to it.
+        """
+        for device_id, sc in self._batteries.items():
+            real, unc = self.state.real.get(device_id), self.state.unc.get(device_id)
+            if real is None or unc is None:
+                continue
+            band = sc.capacity_kwh * LIMIT_BAND_PCT / 100.0
+            low = sc.capacity_kwh * sc.min_soc_pct / 100.0 + band
+            high = sc.capacity_kwh * sc.max_soc_pct / 100.0 - band
+            idle = device_id not in active
+            both_empty = idle and real.stored_kwh <= low and unc.stored_kwh <= low
+            both_full = idle and real.stored_kwh >= high and unc.stored_kwh >= high
+            last = self.state.last_resync.get(device_id)
+            overdue = last is None or now - datetime.fromisoformat(last) >= RESYNC_AFTER
+            if both_empty or both_full or overdue:
+                unc.resize(real.stored_kwh)
+                self.state.last_resync[device_id] = now.isoformat()
+
+    def _reset(self, sample: LiveSample) -> None:
+        """Restart the uncontrolled house level with reality (after a gap)."""
+        self._sync_real(sample)
+        for device_id, real in self.state.real.items():
+            unc = self.state.unc.get(device_id)
+            if unc is not None:
+                unc.resize(real.stored_kwh)
+                self.state.last_resync[device_id] = sample.timestamp.isoformat()
+        for ev in self.state.evs.values():
+            ev.unc_kwh = ev.real_kwh
+            ev.real_queue.clear()
+            ev.unc_queue.clear()
+
+    def _roll(self, now: datetime) -> list[SavingsSlot]:
         """Close the open slot once *now* has left it."""
         slot = self._slot
         if slot is None or slot.start == slot_start(now, self._step_minutes):
@@ -569,115 +649,11 @@ class SavingsTracker:
         return [slot] if slot.hours > 0 else []
 
 
-# ---------------------------------------------------------------------------
-# Predicted saving — from a solved plan
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class PredictedSlot:
-    """Predicted result of one plan slot."""
-
-    start: datetime
-    hours: float
-    baseline_cost: float
-    plan_cost: float
-    inventory_delta: float
-
-    @property
-    def saving(self) -> float:
-        return self.baseline_cost - self.plan_cost + self.inventory_delta
-
-
-def predict_slots(
-    plan: EnergyPlan,
-    state: ShadowState,
-    batteries: Sequence[StorageConstraints],
-    *,
-    stored_kwh: Mapping[str, float],
-    cost_basis: Mapping[str, float],
-    ev_max_kw: Mapping[str, float],
-) -> list[PredictedSlot]:
-    """Predicted saving per slot of *plan*, continuing from the shadow *state*.
-
-    The plan supplies the planned site (``PlanFlow``); the unplanned site is
-    simulated forward from *state* on the plan's own forecasts and prices.
-    *state* is not modified.  Returns ``[]`` for plans that carry no
-    economics (no solve, or an optimizer that does not report them).
-
-    stored_kwh:
-        Real stored energy per battery right now (the plan's starting point).
-    """
-    sim = state.copy()
-    for sc in batteries:
-        if sc.device_id in stored_kwh:
-            sim.stored_kwh.setdefault(sc.device_id, stored_kwh[sc.device_id])
-    value = inventory_value(stored_kwh, sim, cost_basis)
-
-    out: list[PredictedSlot] = []
-    for flow in plan.flows:
-        if flow.load_kw is None or not flow.hours or flow.import_price is None:
-            return []
-        hours = flow.hours
-        export_price = flow.export_price or 0.0
-        secondary = [
-            (kw * hours, price)
-            for kw, price in zip(flow.secondary_kw, flow.secondary_prices)
-        ]
-        secondary_total = sum(load for load, _ in secondary)
-        fixed_kwh = (flow.load_kw - flow.pv_kw) * hours
-
-        # Every open session stays plugged in; the planned charging is what
-        # the "real" car receives.
-        ev_steps = {
-            device_id: EvStep(
-                plugged=True,
-                real_kwh=flow.ev_kw.get(device_id, 0.0) * hours,
-                max_kw=ev_max_kw.get(device_id, flow.ev_kw.get(device_id, 0.0)),
-            )
-            for device_id in {*sim.evs, *flow.ev_kw}
-        }
-        plan_cost = settle(
-            fixed_kwh + (flow.storage_kw + sum(flow.ev_kw.values())) * hours,
-            secondary,
-            flow.import_price,
-            export_price,
-        )
-        baseline_cost = baseline_step(
-            sim,
-            batteries,
-            residual_kwh=fixed_kwh + secondary_total,
-            secondary=secondary,
-            ev=ev_steps,
-            import_price=flow.import_price,
-            export_price=export_price,
-            hours=hours,
-        )
-        new_value = inventory_value(flow.stored_kwh, sim, cost_basis)
-        out.append(
-            PredictedSlot(
-                start=flow.timestep,
-                hours=hours,
-                baseline_cost=baseline_cost,
-                plan_cost=plan_cost,
-                inventory_delta=new_value - value,
-            )
-        )
-        value = new_value
-    return out
-
-
 def day_ahead_window_end(now: datetime, lead: timedelta) -> datetime:
-    """End (exclusive) of the slots a plan made at *now* may freeze.
+    """End (exclusive) of the local day a plan made at *now* plans ahead for.
 
-    A day's prediction is frozen by the last plans before local midnight and
-    then left alone, so it is a genuine forecast of the whole coming day.
-    Plans made earlier in a day may only fill slots of that same day that
-    have no prediction yet (after a restart or a failed planning run).
-
-    lead:
-        How long before midnight the coming day opens up — one planning
-        interval plus one slot, so at least one plan falls inside it.
+    Within *lead* before local midnight this is the end of the coming day;
+    otherwise the end of the current day.
     """
     day = (now + lead).astimezone().date() + timedelta(days=1)
     # A naive datetime is read as local time, which keeps midnight correct

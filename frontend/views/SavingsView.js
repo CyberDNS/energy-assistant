@@ -2,19 +2,28 @@ import { defineComponent, ref, computed, onMounted } from 'vue'
 import { fetchSavings } from '../api.js'
 import PlotlyChart from '../components/PlotlyChart.js'
 
-// Predicted vs. real savings (see core/savings.py).  All values in €.
+// Savings against a simulated uncontrolled house (see core/savings.py).
+// All values in €.
 
-const C_PREDICTED = '#6b7bb5'
-const C_REAL      = '#4caf7d'
-const C_LAST_PLAN = '#ad7b00'
-const C_LOSS      = '#e07070'
+const C_SAVING   = '#4caf7d'
+const C_LOSS     = '#e07070'
+const C_UNCTRL   = '#9aa5a0'
+const C_REAL     = '#6b7bb5'
 
+const HOUR_MS = 3600000
+const DAY_MS  = 24 * HOUR_MS
+
+// Rolling windows ending now; the server picks the bar size from the length.
 const RANGES = [
-  { days: 7,   label: '7 d' },
-  { days: 30,  label: '30 d' },
-  { days: 90,  label: '90 d' },
-  { days: 365, label: '1 y' },
+  { hours: 24,   label: '24 h', tick: { dtick: 3 * HOUR_MS, tickformat: '%H:%M' } },
+  { hours: 72,   label: '3 d',  tick: { dtick: 12 * HOUR_MS, tickformat: '%d.%m. %H:%M' } },
+  { hours: 168,  label: '7 d',  tick: { dtick: DAY_MS, tickformat: '%d.%m.' } },
+  { hours: 720,  label: '30 d', tick: { dtick: DAY_MS, tickformat: '%d.%m.' } },
+  { hours: 2160, label: '90 d', tick: { dtick: 7 * DAY_MS, tickformat: '%d.%m.' } },
+  { hours: 8760, label: '1 y',  tick: { dtick: 'M1', tickformat: '%b %y' } },
 ]
+
+const BUCKET_LABEL = { hour: 'hour', day: 'day', week: 'week' }
 
 function eur(v, signed = false) {
   if (v == null) return '—'
@@ -23,8 +32,15 @@ function eur(v, signed = false) {
   return (signed && v > 0.005 ? '+' : '') + s
 }
 
-function sum(rows, key) {
-  return rows.reduce((acc, r) => acc + (r[key] ?? 0), 0)
+function kwh(v) {
+  return v == null ? '—' : v.toFixed(1) + ' kWh'
+}
+
+// Plotly date axes ignore UTC offsets: give them local wall-clock time.
+function localX(iso) {
+  const d = new Date(iso)
+  const p = n => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
 
 function cumulative(values) {
@@ -32,16 +48,12 @@ function cumulative(values) {
   return values.map(v => (acc += v))
 }
 
-const HOVER = '%{x|%d.%m.}  %{y:.2f} €<extra>%{fullData.name}</extra>'
-
-const DAY_MS = 86400000
-
-// One labelled tick per day (bars sit on midnight, so each label is under its
-// own bar); coarser steps once the range would not fit.
-function dayTicks(nDays) {
-  if (nDays <= 31) return { dtick: DAY_MS, tick0: '2000-01-03' }
-  if (nDays <= 120) return { dtick: 7 * DAY_MS, tick0: '2000-01-03' }  // Mondays
-  return { dtick: 'M1', tick0: '2000-01-01' }
+function storedTotals(house) {
+  const devices = Object.values(house ?? {})
+  return {
+    kwh: devices.reduce((a, d) => a + (d.kwh ?? 0), 0),
+    value: devices.reduce((a, d) => a + (d.value_eur ?? 0), 0),
+  }
 }
 
 export default defineComponent({
@@ -49,18 +61,15 @@ export default defineComponent({
   components: { PlotlyChart },
 
   setup() {
-    const days    = ref(30)
-    const rows    = ref([])
-    const allTime = ref(null)
-    const loaded  = ref(false)
-    const error   = ref(null)
+    const range  = ref(RANGES[2])
+    const data   = ref(null)
+    const loaded = ref(false)
+    const error  = ref(null)
 
-    async function load(d) {
-      days.value = d
+    async function load(r) {
+      range.value = r
       try {
-        const resp = await fetchSavings(d)
-        rows.value = resp.days ?? []
-        allTime.value = resp.totals ?? null
+        data.value = await fetchSavings(r.hours)
         error.value = null
       } catch (e) {
         error.value = String(e.message ?? e)
@@ -68,151 +77,146 @@ export default defineComponent({
       loaded.value = true
     }
 
-    const period = computed(() => {
-      const r = rows.value
-      const real = sum(r, 'real')
-      const predicted = sum(r, 'predicted')
-      const baseline = sum(r, 'baseline_cost')
-      return {
-        real,
-        predicted,
-        deviation: real - predicted,
-        predictedLatest: sum(r, 'predicted_latest'),
-        baseline,
-        actual: sum(r, 'actual_cost'),
-        // Share of the unplanned bill that was saved.
-        pct: baseline > 0.005 ? real / baseline * 100 : null,
-        // How much of the promised saving actually arrived.
-        realised: Math.abs(predicted) > 0.005 ? real / predicted * 100 : null,
-      }
+    const buckets = computed(() => data.value?.buckets ?? [])
+    const totals  = computed(() => data.value?.totals ?? null)
+    const allTime = computed(() => data.value?.all_time ?? null)
+    const pct = computed(() => {
+      const t = totals.value
+      return t && t.uncontrolled_cost > 0.005 ? t.real / t.uncontrolled_cost * 100 : null
     })
+    const stored = computed(() => ({
+      real: storedTotals(data.value?.stored?.real),
+      uncontrolled: storedTotals(data.value?.stored?.uncontrolled),
+    }))
+    const bucketLabel = computed(() => BUCKET_LABEL[data.value?.bucket] ?? 'period')
 
-    const x = computed(() => rows.value.map(r => r.date))
+    const x = computed(() => buckets.value.map(b => localX(b.start)))
+    const HOVER = computed(() =>
+      `%{x|${range.value.tick.tickformat}}  %{y:.2f} €<extra>%{fullData.name}</extra>`)
 
-    const dailyTraces = computed(() => [
-      { name: 'Predicted (day-ahead)', type: 'bar', x: x.value, y: rows.value.map(r => r.predicted),
-        marker: { color: C_PREDICTED }, hovertemplate: HOVER },
-      { name: 'Real', type: 'bar', x: x.value, y: rows.value.map(r => r.real),
-        marker: { color: C_REAL }, hovertemplate: HOVER },
-      { name: 'Predicted (last plan)', mode: 'lines+markers', x: x.value,
-        y: rows.value.map(r => r.predicted_latest),
-        line: { color: C_LAST_PLAN, width: 1.5, dash: 'dot' }, marker: { size: 5 }, hovertemplate: HOVER },
-    ])
-
-    const cumulativeTraces = computed(() => [
-      { name: 'Predicted (day-ahead)', mode: 'lines', x: x.value,
-        y: cumulative(rows.value.map(r => r.predicted)),
-        line: { color: C_PREDICTED, dash: 'dash' }, hovertemplate: HOVER },
-      { name: 'Real', mode: 'lines', x: x.value,
-        y: cumulative(rows.value.map(r => r.real)),
-        line: { color: C_REAL, width: 2.5 }, fill: 'tozeroy', fillcolor: 'rgba(76,175,125,.12)',
-        hovertemplate: HOVER },
-    ])
-
-    const deviationTraces = computed(() => {
-      const y = rows.value.map(r => r.deviation)
+    const savingTraces = computed(() => {
+      const y = buckets.value.map(b => b.real)
       return [{
-        name: 'Real − predicted', type: 'bar', x: x.value, y,
-        marker: { color: y.map(v => (v >= 0 ? C_REAL : C_LOSS)) }, hovertemplate: HOVER,
+        name: 'Saving', type: 'bar', x: x.value, y,
+        marker: { color: y.map(v => (v >= 0 ? C_SAVING : C_LOSS)) }, hovertemplate: HOVER.value,
       }]
     })
+
+    const cumulativeTraces = computed(() => [{
+      name: 'Saving', mode: 'lines', x: x.value,
+      y: cumulative(buckets.value.map(b => b.real)),
+      line: { color: C_SAVING, width: 2.5, shape: 'hv' },
+      fill: 'tozeroy', fillcolor: 'rgba(76,175,125,.12)', hovertemplate: HOVER.value,
+    }])
+
+    const costTraces = computed(() => [
+      { name: 'Uncontrolled house', type: 'bar', x: x.value,
+        y: buckets.value.map(b => b.uncontrolled_cost),
+        marker: { color: C_UNCTRL }, hovertemplate: HOVER.value },
+      { name: 'Real house', type: 'bar', x: x.value,
+        y: buckets.value.map(b => b.real_cost),
+        marker: { color: C_REAL }, hovertemplate: HOVER.value },
+    ])
 
     // One layout object per chart: Plotly writes the computed axis ranges
     // back into the layout it is given, so charts must not share axes.
     const layout = (extra = {}) => ({
       xaxis: {
-        type: 'date', tickformat: '%d.%m.', tickangle: 0, tickmode: 'linear',
-        ...dayTicks(rows.value.length),
+        type: 'date', tickangle: 0, tickmode: 'linear',
+        tick0: '2000-01-03', ...range.value.tick,
       },
       yaxis: { title: '€', zeroline: true, zerolinecolor: '#9aa5a0' },
       ...extra,
     })
-    const dailyLayout      = computed(() => layout())
-    const cumulativeLayout = computed(() => layout())
-    const deviationLayout  = computed(() => layout({ showlegend: false }))
+    const savingLayout     = computed(() => layout({ showlegend: false }))
+    const cumulativeLayout = computed(() => layout({ showlegend: false }))
+    const costLayout       = computed(() => layout())
 
-    onMounted(() => load(days.value))
+    onMounted(() => load(range.value))
 
     return {
-      RANGES, days, rows, allTime, loaded, error, load, period, eur,
-      dailyTraces, cumulativeTraces, deviationTraces,
-      dailyLayout, cumulativeLayout, deviationLayout,
+      RANGES, range, data, loaded, error, load, eur, kwh,
+      buckets, totals, allTime, pct, stored, bucketLabel,
+      savingTraces, cumulativeTraces, costTraces,
+      savingLayout, cumulativeLayout, costLayout,
     }
   },
 
   template: `
     <div>
       <div class="range-btns">
-        <button v-for="r in RANGES" :key="r.days"
-          :class="['range-btn', days === r.days ? 'active' : '']"
-          @click="load(r.days)">{{ r.label }}</button>
+        <button v-for="r in RANGES" :key="r.hours"
+          :class="['range-btn', range.hours === r.hours ? 'active' : '']"
+          @click="load(r)">{{ r.label }}</button>
       </div>
 
       <div v-if="error" class="bad" style="margin-bottom:8px;font-size:.82rem">⚠ {{ error }}</div>
 
-      <div v-if="loaded && !rows.length" class="panel savings-empty">
-        <h2>No savings recorded yet</h2>
+      <div v-if="loaded && !buckets.length" class="panel savings-empty">
+        <h2>No savings recorded in this window</h2>
         <p>
-          Savings are booked per 15-minute slot once a slot has both a measurement
-          and a day-ahead prediction. A day's prediction is frozen shortly before
-          midnight, so the first numbers appear during the day after the first start.
+          Savings are booked per 15-minute slot by comparing the real house with a
+          simulated uncontrolled house on the same load, PV and prices. The first
+          numbers appear a few minutes after start.
         </p>
       </div>
 
-      <template v-else-if="rows.length">
+      <template v-else-if="totals">
         <div class="kpis savings-kpis">
           <div class="card">
-            <div class="k">Real savings</div>
-            <div class="v" :class="period.real >= 0 ? 'ok' : 'bad'">{{ eur(period.real) }}</div>
-            <div class="savings-sub" v-if="period.pct != null">{{ period.pct.toFixed(1) }} % of unplanned cost</div>
+            <div class="k">Saving</div>
+            <div class="v" :class="totals.real >= 0 ? 'ok' : 'bad'">{{ eur(totals.real) }}</div>
+            <div class="savings-sub" v-if="pct != null">{{ pct.toFixed(1) }} % of uncontrolled cost</div>
           </div>
           <div class="card">
-            <div class="k">Predicted (day-ahead)</div>
-            <div class="v">{{ eur(period.predicted) }}</div>
-            <div class="savings-sub" v-if="period.realised != null">{{ period.realised.toFixed(0) }} % realised</div>
+            <div class="k">Uncontrolled house</div>
+            <div class="v">{{ eur(totals.uncontrolled_cost) }}</div>
+            <div class="savings-sub">grid bill {{ eur(totals.uncontrolled_bill) }}</div>
           </div>
           <div class="card">
-            <div class="k">Deviation</div>
-            <div class="v" :class="period.deviation >= 0 ? 'ok' : 'bad'">{{ eur(period.deviation, true) }}</div>
-            <div class="savings-sub">real − predicted</div>
+            <div class="k">Real house</div>
+            <div class="v">{{ eur(totals.real_cost) }}</div>
+            <div class="savings-sub">grid bill {{ eur(totals.real_bill) }}</div>
           </div>
           <div class="card">
-            <div class="k">Predicted (last plan)</div>
-            <div class="v">{{ eur(period.predictedLatest) }}</div>
-            <div class="savings-sub">just before each slot</div>
+            <div class="k">Of which cars</div>
+            <div class="v" :class="totals.ev_saving >= 0 ? 'ok' : 'bad'">{{ eur(totals.ev_saving) }}</div>
+            <div class="savings-sub">smart vs. last-moment charging</div>
           </div>
           <div class="card">
-            <div class="k">Unplanned cost</div>
-            <div class="v">{{ eur(period.baseline) }}</div>
-            <div class="savings-sub">actual {{ eur(period.actual) }}</div>
+            <div class="k">Still stored</div>
+            <div class="v">{{ kwh(stored.real.kwh) }}</div>
+            <div class="savings-sub">uncontrolled {{ kwh(stored.uncontrolled.kwh) }}</div>
           </div>
           <div class="card" v-if="allTime">
             <div class="k">All time</div>
             <div class="v" :class="allTime.real >= 0 ? 'ok' : 'bad'">{{ eur(allTime.real) }}</div>
-            <div class="savings-sub">predicted {{ eur(allTime.predicted) }}</div>
+            <div class="savings-sub">over {{ (allTime.hours / 24).toFixed(1) }} days</div>
           </div>
         </div>
 
         <div class="panel" style="margin-bottom:10px">
-          <h2>Savings per day — predicted vs. real</h2>
-          <PlotlyChart :traces="dailyTraces" :layout="dailyLayout" barmode="group" height="300px" />
+          <h2>Saving per {{ bucketLabel }}</h2>
+          <PlotlyChart :traces="savingTraces" :layout="savingLayout" height="280px" />
         </div>
 
         <div class="row2-eq">
           <div class="panel">
-            <h2>Cumulative savings</h2>
+            <h2>Cumulative saving</h2>
             <PlotlyChart :traces="cumulativeTraces" :layout="cumulativeLayout" height="260px" />
           </div>
           <div class="panel">
-            <h2>Deviation per day (real − predicted)</h2>
-            <PlotlyChart :traces="deviationTraces" :layout="deviationLayout" height="260px" />
+            <h2>Cost per {{ bucketLabel }} — uncontrolled vs. real</h2>
+            <PlotlyChart :traces="costTraces" :layout="costLayout" barmode="group" height="260px" />
           </div>
         </div>
 
         <p class="savings-note">
-          Compared against an unplanned site: batteries in plain self-consumption, cars charging
-          at full power when plugged in. Unplanned cost minus actual cost is not exactly the
-          saving — energy still stored (or still owed to a car) is valued as well.
+          Compared against a simulated uncontrolled house on the same load, PV and prices:
+          its batteries charge from PV surplus only and cover the household load, and cars charge
+          as late as possible to reach their charge plan. Stored energy is costed when it is used,
+          at what it cost to store it (ledger) — charging saves nothing by itself, the saving shows
+          when the energy replaces grid power.
         </p>
       </template>
     </div>
