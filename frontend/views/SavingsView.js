@@ -68,14 +68,23 @@ export default defineComponent({
     const loaded = ref(false)
     const error  = ref(null)
 
+    // Range and data change together, so the charts render once per switch
+    // (the new tick settings never meet the old data).
+    const pending = ref(null)   // range clicked, data still loading
+    let request = 0
     async function load(r) {
-      range.value = r
+      const mine = ++request
+      pending.value = r
       try {
-        data.value = await fetchSavings(r.hours)
+        const resp = await fetchSavings(r.hours)
+        if (mine !== request) return  // a newer click won
+        data.value = resp
+        range.value = r
         error.value = null
       } catch (e) {
-        error.value = String(e.message ?? e)
+        if (mine === request) error.value = String(e.message ?? e)
       }
+      if (mine === request) pending.value = null
       loaded.value = true
     }
 
@@ -204,7 +213,7 @@ export default defineComponent({
     onMounted(() => load(range.value))
 
     return {
-      RANGES, range, data, loaded, error, load, eur, kwh,
+      RANGES, range, pending, data, loaded, error, load, eur, kwh,
       buckets, totals, allTime, pct, stored, bucketLabel,
       savingTraces, cumulativeTraces, costTraces, detailTraces, slots, savingTitle,
       savingLayout, cumulativeLayout, costLayout, detailLayout,
@@ -215,7 +224,7 @@ export default defineComponent({
     <div>
       <div class="range-btns">
         <button v-for="r in RANGES" :key="r.hours"
-          :class="['range-btn', range.hours === r.hours ? 'active' : '']"
+          :class="['range-btn', (pending ?? range).hours === r.hours ? 'active' : '']"
           @click="load(r)">{{ r.label }}</button>
       </div>
 
