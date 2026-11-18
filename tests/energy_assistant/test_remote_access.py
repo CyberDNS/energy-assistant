@@ -10,7 +10,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-from energy_assistant.core.savings import ActualSlot, PredictedSlot
+from energy_assistant.core.savings import SavingsSlot
 from energy_assistant.server.remote_access import HA_INGRESS_PROXY, ApiAccessMiddleware
 from energy_assistant.storage.sqlite import SqliteStorageBackend
 
@@ -90,10 +90,10 @@ class TestMcpEndpoint:
         app._cfg = AppConfig(server={"api_token": TOKEN})
         app._storage = SqliteStorageBackend(tmp_path / "h.db")
         await app._storage.start()
-        await app._storage.save_savings_predictions(
-            "day_ahead", [PredictedSlot(T0, 0.25, 0.30, 0.10, 0.05)], T0, overwrite=False
+        await app._storage.save_savings_slot(
+            SavingsSlot(T0, 0.25, real_cost=0.35, uncontrolled_cost=0.40,
+                        real_bill=0.45, uncontrolled_bill=0.40, ev_saving=0.01)
         )
-        await app._storage.save_savings_actual(ActualSlot(T0, 0.25, 0.40, 0.35, -0.02))
         return app
 
     async def test_savings_slots_endpoint_has_all_components(self, tmp_path: Path) -> None:
@@ -103,11 +103,10 @@ class TestMcpEndpoint:
                 r = await c.get("/api/savings/slots", params={"start": "2026-11-16T00:00:00"})
             body = r.json()
             (slot,) = body["slots"]
-            assert slot["real"] == pytest.approx(0.03)
-            assert slot["inventory_delta"] == pytest.approx(-0.02)
-            assert slot["day_ahead"]["saving"] == pytest.approx(0.25)
-            assert slot["latest"] is None
-            assert body["totals"]["deviation"] == pytest.approx(0.03 - 0.25)
+            assert slot["saving"] == pytest.approx(0.05)
+            assert slot["real_bill"] == pytest.approx(0.45)
+            assert slot["ev_saving"] == pytest.approx(0.01)
+            assert body["totals"]["real"] == pytest.approx(0.05)
         finally:
             await app._storage.stop()
 
@@ -140,7 +139,7 @@ class TestMcpEndpoint:
                     "arguments": {"start": "2026-11-16T00:00:00Z", "end": "2026-11-17T00:00:00Z"},
                 })
                 data = result.get("structuredContent") or json.loads(result["content"][0]["text"])
-                assert data["slots"][0]["day_ahead"]["plan_cost"] == pytest.approx(0.10)
+                assert data["slots"][0]["uncontrolled_cost"] == pytest.approx(0.40)
         finally:
             await app._storage.stop()
 

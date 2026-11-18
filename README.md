@@ -76,8 +76,8 @@ the web UI behind ingress keeps full control. `/health` stays open.
 The MCP endpoint is `http://<host>:<port>/mcp` (streamable HTTP, stateless).
 Its tools are read-only wrappers around the REST API: `get_status`,
 `get_plan` (full per-slot flows), `get_forecast`, `get_savings`,
-`get_savings_slots` (predicted vs. real per accounting slot, with all cost
-components), `get_history`, `get_ledger`, `get_config`, `get_ev`,
+`get_savings_slots` (real vs. simulated uncontrolled house per accounting
+slot, with all cost components), `get_history`, `get_ledger`, `get_config`, `get_ev`,
 `get_ev_plan`, `get_controllable`, `get_learned_forecasts`, `get_plan_inputs`.
 For Claude Code:
 
@@ -93,7 +93,7 @@ The Plan tab can be deep-linked and embedded (e.g. in an iframe / webpage card):
 | URL | Shows |
 |---|---|
 | `#/plan` | Plan tab |
-| `#/savings` | Savings tab: predicted vs. real savings per day |
+| `#/savings` | Savings tab: savings against an uncontrolled house over rolling windows (24 h – 1 y) |
 | `#/plan/<vehicle>` or `#/plan?vehicle=<vehicle>` | One EV only: target, 7-day strip, weekly plan, "Charge now" and its charging-plan chart. `<vehicle>` is the EV's asset id (case-insensitive). |
 | `…?embed=1` | Hides the header, KPI tiles and tab bar. Combine with any route, e.g. `#/plan/bandit?embed=1`. |
 
@@ -115,23 +115,28 @@ made in the Energy Assistant UI are mirrored back to the entities.
 
 ### Savings KPIs in Home Assistant
 
-With `backends.mqtt` configured, an "Energy Assistant" device exposes four
-cumulative totals in € (`device_class: monetary`, `state_class: total`):
+With `backends.mqtt` configured, an "Energy Assistant" device exposes the
+cumulative **Real savings** in € (`device_class: monetary`, `state_class:
+total`). Use Home Assistant's `utility_meter` or statistics cards to get daily,
+monthly or yearly figures.
 
-| Sensor | Meaning |
-|---|---|
-| Real savings | Measured cost of the unplanned site minus the real cost |
-| Predicted savings | What the day-ahead plan expected to save for the same slots |
-| Savings deviation | Real − predicted |
-| Predicted savings (last plan) | Prediction of the last plan before each slot began |
+The saving compares the real house with a **simulated uncontrolled house** on
+the same measured load, PV and prices, per 15-minute slot:
 
-"Unplanned" means the hardware left to itself: batteries do plain
-self-consumption and a car charges at full power as soon as it is plugged in.
-Both sites see the same load, PV and prices, per 15-minute slot. The day-ahead
-prediction of a day is frozen shortly before local midnight; the gap between
-it and "last plan" is forecast error, the gap between "last plan" and "real"
-is execution. Use Home Assistant's `utility_meter` or statistics cards to get
-daily, monthly or yearly figures from the totals.
+- its batteries charge from PV surplus only and discharge to cover the load of
+  the zone they regulate on (household and cars, not a separately billed heat
+  pump),
+- a car charges from PV surplus left after the batteries, and from the grid as
+  late as possible to reach its charge plan's target by the deadline.
+
+Both houses keep a ledger per battery: charging moves the energy's cost into
+the ledger (grid energy at the import price, PV at the feed-in price it would
+have earned) and using it costs the ledger's average cost. So a charging slot
+saves nothing and the saving shows when stored energy replaces grid power:
+(price at that moment − ledger cost) × kWh. Car energy charged earlier than
+the uncontrolled car would have is held at its cost until the uncontrolled car
+charges it too. The Savings tab and `GET /api/savings?hours=168` show the
+same numbers; details in `src/energy_assistant/core/savings.py`.
 
 Threshold devices count as fixed load and contribute no saving. Nothing is
 published in dry-run mode.
@@ -204,5 +209,4 @@ series:
     extend_to: false
     data_generator: |
       return (entity.attributes.data || []).map(r => [r[0], r[3]]);
-``` The Savings tab of the web UI shows the same
-numbers per day; `GET /api/savings?days=30` returns them as JSON. Details: `src/energy_assistant/core/savings.py`.
+```

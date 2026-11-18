@@ -37,7 +37,7 @@ import json
 import logging
 import sqlite3
 import zlib
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import aiosqlite
@@ -45,7 +45,7 @@ import aiosqlite
 from ..assets.ev import EvDayOverride, EvWeeklyTarget
 from ..core.execution_log import ExecutionSlot
 from ..core.models import EnergyPlan, Measurement
-from ..core.savings import ActualSlot, PredictedSlot
+from ..core.savings import SavingsSlot
 
 _log = logging.getLogger(__name__)
 
@@ -194,9 +194,28 @@ _DELETE_EV_FORCE_CHARGE = "DELETE FROM ev_force_charge WHERE asset_id = ?"
 
 _LOAD_ALL_EV_FORCE_CHARGE = "SELECT asset_id, target_soc_pct FROM ev_force_charge"
 
-# Savings accounting (core/savings.py).  One row per accounting slot; these
-# tables are tiny (96 rows a day) and are never purged — the KPI totals are
-# sums over them.
+# Savings accounting (core/savings.py): real house vs. simulated uncontrolled
+# house, one row per accounting slot (96 a day), kept for SAVINGS_KEEP_DAYS.
+_CREATE_SAVINGS_SLOTS_TABLE = """
+CREATE TABLE IF NOT EXISTS savings_slots (
+    slot_start        TEXT PRIMARY KEY,
+    hours             REAL NOT NULL,
+    real_cost         REAL NOT NULL,
+    uncontrolled_cost REAL NOT NULL,
+    real_bill         REAL NOT NULL,
+    uncontrolled_bill REAL NOT NULL,
+    ev_saving         REAL NOT NULL
+)
+"""
+
+SAVINGS_KEEP_DAYS = 400
+"""Savings slots are kept this long (the dashboard's longest range is 1 y)."""
+
+LEGACY_SAVINGS_KEEP_DAYS = 7
+"""Rows of the previous accounting (savings_actual / savings_predicted, no
+longer written) are kept this long for debugging, then purged."""
+
+# Legacy accounting (before #82): no longer written, read-only for debugging.
 _CREATE_SAVINGS_ACTUAL_TABLE = """
 CREATE TABLE IF NOT EXISTS savings_actual (
     slot_start      TEXT PRIMARY KEY,
@@ -288,6 +307,12 @@ CREATE TABLE IF NOT EXISTS control_execution (
 )
 """
 
+_PURGE_SAVINGS_SQL = (
+    ("DELETE FROM savings_slots WHERE slot_start < ?", SAVINGS_KEEP_DAYS),
+    ("DELETE FROM savings_actual WHERE slot_start < ?", LEGACY_SAVINGS_KEEP_DAYS),
+    ("DELETE FROM savings_predicted WHERE slot_start < ?", LEGACY_SAVINGS_KEEP_DAYS),
+)
+
 _PURGE_DIAGNOSTICS_SQL = (
     "DELETE FROM plan_snapshots WHERE created_at < ?",
     "DELETE FROM control_execution WHERE slot_start < ?",
@@ -377,6 +402,7 @@ class SqliteStorageBackend:
         await self._db.execute(_CREATE_SAVINGS_ACTUAL_TABLE)
         await self._db.execute(_CREATE_SAVINGS_PREDICTED_TABLE)
         await self._db.execute(_CREATE_SAVINGS_STATE_TABLE)
+        await self._db.execute(_CREATE_SAVINGS_SLOTS_TABLE)
         await self._add_missing_columns("savings_actual", _SAVINGS_ACTUAL_ADDED_COLUMNS)
         await self._db.execute(_CREATE_PLAN_SNAPSHOTS_TABLE)
         await self._db.execute(_CREATE_CONTROL_EXECUTION_TABLE)
@@ -739,56 +765,60 @@ class SqliteStorageBackend:
     # Savings accounting
     # ------------------------------------------------------------------
 
-    async def save_savings_actual(self, slot: ActualSlot) -> None:
-        """Persist the measured result of one accounting slot."""
-        assert self._db is not None, "Call start() before save_savings_actual()"
+    async def save_savings_slot(self, slot: SavingsSlot) -> None:
+        """Persist the result of one accounting slot."""
+        assert self._db is not None, "Call start() before save_savings_slot()"
         await self._db.execute(
-            "INSERT OR REPLACE INTO savings_actual"
-            " (slot_start, hours, baseline_cost, actual_cost, inventory_delta, soc_correction)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO savings_slots VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
-                _utc_iso(slot.start), slot.hours,
-                slot.baseline_cost, slot.actual_cost, slot.inventory_delta,
-                slot.soc_correction,
+                _utc_iso(slot.start), slot.hours, slot.real_cost, slot.uncontrolled_cost,
+                slot.real_bill, slot.uncontrolled_bill, slot.ev_saving,
             ),
         )
         await self._db.commit()
 
-    async def save_savings_predictions(
-        self,
-        kind: str,
-        slots: "list[PredictedSlot]",
-        created_at: datetime,
-        overwrite: bool,
-    ) -> int:
-        """Persist predicted slots of *kind*; return how many rows were written.
+    async def query_savings_slots(self, start: datetime, end: datetime) -> list[dict]:
+        """Savings slots in ``[start, end)``, oldest first."""
+        assert self._db is not None, "Call start() before query_savings_slots()"
+        async with self._db.execute(
+            "SELECT slot_start, hours, real_cost, uncontrolled_cost, real_bill,"
+            " uncontrolled_bill, ev_saving FROM savings_slots"
+            " WHERE slot_start >= ? AND slot_start < ? ORDER BY slot_start",
+            (_utc_iso(start), _utc_iso(end)),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [
+            {
+                "slot_start": datetime.fromisoformat(r[0]),
+                "hours": r[1],
+                "real_cost": r[2],
+                "uncontrolled_cost": r[3],
+                "saving": r[3] - r[2],
+                "real_bill": r[4],
+                "uncontrolled_bill": r[5],
+                "ev_saving": r[6],
+            }
+            for r in rows
+        ]
 
-        With ``overwrite=False`` a slot that already has a prediction of this
-        kind keeps it — that is what freezes a day-ahead prediction.
-        """
-        assert self._db is not None, "Call start() before save_savings_predictions()"
-        verb = "INSERT OR REPLACE" if overwrite else "INSERT OR IGNORE"
-        before = self._db.total_changes
-        await self._db.executemany(
-            f"{verb} INTO savings_predicted VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [
-                (
-                    _utc_iso(s.start), kind, _utc_iso(created_at), s.hours,
-                    s.baseline_cost, s.plan_cost, s.inventory_delta,
-                )
-                for s in slots
-            ],
-        )
+    async def purge_savings(self, now: datetime) -> int:
+        """Delete savings slots past their retention (legacy rows after
+        ``LEGACY_SAVINGS_KEEP_DAYS``).  Returns the number of rows deleted."""
+        assert self._db is not None, "Call start() before purge_savings()"
+        deleted = 0
+        for sql, days in _PURGE_SAVINGS_SQL:
+            cutoff = _utc_iso(now - timedelta(days=days))
+            async with self._db.execute(sql, (cutoff,)) as cursor:
+                deleted += max(cursor.rowcount, 0)
         await self._db.commit()
-        return self._db.total_changes - before
+        return deleted
 
-    async def query_savings(self, start: datetime, end: datetime) -> list[dict]:
-        """Compared slots in ``[start, end)``, oldest first.
+    async def query_legacy_savings(self, start: datetime, end: datetime) -> list[dict]:
+        """Slots of the previous accounting (before #82) in ``[start, end)``.
 
-        ``predicted`` is the day-ahead prediction, ``predicted_latest`` the
-        one from the last plan before the slot (``None`` if there was none).
+        Read-only, for debugging until they are purged.
         """
-        assert self._db is not None, "Call start() before query_savings()"
+        assert self._db is not None, "Call start() before query_legacy_savings()"
         async with self._db.execute(
             _QUERY_SAVINGS, (_utc_iso(start), _utc_iso(end))
         ) as cursor:
@@ -811,7 +841,7 @@ class SqliteStorageBackend:
         ]
 
     async def save_savings_state(self, state: dict) -> None:
-        """Persist the shadow-site state (single row)."""
+        """Persist the savings tracker state (single row)."""
         assert self._db is not None, "Call start() before save_savings_state()"
         await self._db.execute(
             "INSERT OR REPLACE INTO savings_state VALUES (1, ?, ?)",

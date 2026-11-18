@@ -72,8 +72,8 @@ its own availability topic.
 Savings KPIs
 ------------
 With ``savings_kpis=True`` one more HA device, "Energy Assistant", carries
-cumulative monetary totals (``state_class: total``) — predicted savings, real
-savings and their difference.  Home Assistant's long-term statistics turn
+a cumulative monetary total (``state_class: total``): the real savings
+against the simulated uncontrolled house.  Home Assistant's long-term statistics turn
 those into any period (utility meter, statistics cards).  See
 ``core/savings.py`` for how the numbers are computed.
 """
@@ -113,10 +113,10 @@ _SITE_DEVICE = {
 # (key in the state payload, unique-id suffix, entity name)
 _SAVINGS_SENSORS = (
     ("real", "savings_real", "Real savings"),
-    ("predicted", "savings_predicted", "Predicted savings"),
-    ("deviation", "savings_deviation", "Savings deviation"),
-    ("predicted_latest", "savings_predicted_last_plan", "Predicted savings (last plan)"),
 )
+# Sensors of the previous (predicted vs. real) accounting: their discovery
+# configs are cleared so Home Assistant removes the entities.
+_REMOVED_SAVINGS_UIDS = ("savings_predicted", "savings_deviation", "savings_predicted_last_plan")
 _DEVICE_BASE = "energy_assistant/device"
 # Device types whose readings come from Home Assistant in the first place
 # (re-publishing them would only duplicate HA's own entities), and virtual
@@ -560,6 +560,8 @@ class EvMqttPublisher:
         if self._savings_kpis:
             for config_topic, config_payload in _savings_discovery_configs():
                 await client.publish(config_topic, json.dumps(config_payload), retain=True)
+            for uid in _REMOVED_SAVINGS_UIDS:
+                await client.publish(f"{_DISC}/sensor/ea_{uid}/config", "", retain=True)
         for config_topic, payload in list(self._device_configs.items()):
             await client.publish(config_topic, payload, retain=True)
         _log.info(
