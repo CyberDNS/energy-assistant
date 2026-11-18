@@ -31,6 +31,7 @@ export default defineComponent({
     const el = ref(null)
     let initialized = false
     let ro = null
+    let axisKey = null
 
     function buildLayout() {
       const width = el.value?.offsetWidth ?? 600
@@ -41,9 +42,23 @@ export default defineComponent({
       return mkLayout({ ...props.layout, xaxis, ...(props.barmode ? { barmode: props.barmode } : {}) })
     }
 
+    // x-axis settings whose change makes Plotly.react extremely slow on a
+    // date axis (seconds even for a handful of points) — redraw from
+    // scratch instead, which takes milliseconds.
+    function xAxisKey() {
+      const x = props.layout.xaxis ?? {}
+      return JSON.stringify([x.type, x.dtick, x.tick0, x.tickformat, x.tickmode])
+    }
+
     function draw() {
       if (!el.value || !props.traces.length) return
       const layout = buildLayout()
+      const key = xAxisKey()
+      if (initialized && key !== axisKey) {
+        Plotly.purge(el.value)
+        initialized = false
+      }
+      axisKey = key
       if (initialized) {
         Plotly.react(el.value, props.traces, layout, PLT_OPT)
       } else {
