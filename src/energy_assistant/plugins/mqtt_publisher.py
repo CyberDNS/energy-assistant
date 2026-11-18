@@ -55,6 +55,20 @@ after every planning cycle (``publish_price_curve``):
   - ``sensor.energy_assistant_effective_electricity_price`` — current
     effective price (see ``core/price_curve.py``).
 
+Device sub-devices
+------------------
+Every configured device whose readings do not already come from Home
+Assistant (Modbus, Zendure, openWB MQTT, Tibber, differential, ioBroker …)
+gets its own HA device, linked to the "Energy Assistant" device via
+``via_device`` so it shows up as one of its sub-devices.  See
+``select_discovery_devices`` for which devices qualify.  Entities are created
+lazily: a sensor's discovery config is published the first time the device
+reports a value for it (``power_w``, ``energy_kwh``, ``soc_pct`` and the
+known ``extra`` keys in ``_DEVICE_FIELDS``), so a device only gets the
+sensors it can actually fill.  Values are published per control tick, only
+on change, under ``energy_assistant/device/{device_id}/…``; each device has
+its own availability topic.
+
 Savings KPIs
 ------------
 With ``savings_kpis=True`` one more HA device, "Energy Assistant", carries
@@ -70,14 +84,15 @@ import asyncio
 import json
 import logging
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Any, Awaitable, Callable
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable, Mapping
 from zoneinfo import ZoneInfo
 
 import aiomqtt
 
 from ..assets.ev import EvChargingAsset, EvChargingGoal, EvWeeklyTarget, default_weekly_target
 from ..core.config import MqttConfig
-from ..core.models import EV_DISPLAY_MODES, DeviceState
+from ..core.models import EV_DISPLAY_MODES, DeviceRole, DeviceState
 from ..core.price_curve import PriceSlot, current_slot, price_curve_payload
 
 _log = logging.getLogger(__name__)
@@ -102,6 +117,77 @@ _SAVINGS_SENSORS = (
     ("deviation", "savings_deviation", "Savings deviation"),
     ("predicted_latest", "savings_predicted_last_plan", "Predicted savings (last plan)"),
 )
+_DEVICE_BASE = "energy_assistant/device"
+# Device types whose readings come from Home Assistant in the first place
+# (re-publishing them would only duplicate HA's own entities), and virtual
+# devices with no readings of their own.
+_HA_SOURCED_MARKER = "homeassistant"
+_VIRTUAL_DEVICE_TYPES = frozenset({"generic_consumer"})
+
+
+@dataclass(frozen=True)
+class DiscoveryDevice:
+    """A configured device exposed to Home Assistant as a sub-device."""
+
+    device_id: str
+    name: str
+    role: DeviceRole
+    model: str
+
+
+@dataclass(frozen=True)
+class _Field:
+    """One publishable reading: DeviceState attribute or ``extra`` key."""
+
+    key: str
+    name: str
+    fmt: str
+    unit: str | None = None
+    device_class: str | None = None
+    state_class: str | None = "measurement"
+    entity_category: str | None = None
+    icon: str | None = None
+
+
+# (source, field) — source is "attr" for DeviceState attributes, "extra" for
+# DeviceState.extra keys.  Unknown extra keys are not published.
+_DEVICE_FIELDS: tuple[tuple[str, _Field], ...] = (
+    ("attr", _Field("power_w", "Power", ".0f", "W", "power")),
+    ("attr", _Field("energy_kwh", "Energy", ".3f", "kWh", "energy", "total_increasing")),
+    ("attr", _Field("soc_pct", "State of Charge", ".1f", "%", "battery")),
+    ("extra", _Field("import_w", "Import power", ".0f", "W", "power")),
+    ("extra", _Field("export_w", "Export power", ".0f", "W", "power")),
+    ("extra", _Field("charge_w", "Charge power", ".0f", "W", "power")),
+    ("extra", _Field("discharge_w", "Discharge power", ".0f", "W", "power")),
+    ("extra", _Field("home_w", "Home output power", ".0f", "W", "power")),
+    ("extra", _Field("grid_input_w", "Grid input power", ".0f", "W", "power")),
+    ("extra", _Field("solar_w", "Solar input power", ".0f", "W", "power")),
+    ("extra", _Field("meter_production_kwh", "Exported energy", ".3f", "kWh", "energy",
+                     "total_increasing")),
+    ("extra", _Field("accumulated_consumption_today_kwh", "Consumption today", ".3f", "kWh",
+                     "energy", "total_increasing")),
+    ("extra", _Field("frequency_hz", "Grid frequency", ".2f", "Hz", "frequency")),
+    ("extra", _Field("max_cha_w", "Max charge power", ".0f", "W", "power",
+                     entity_category="diagnostic")),
+    ("extra", _Field("max_dsch_w", "Max discharge power", ".0f", "W", "power",
+                     entity_category="diagnostic")),
+    ("extra", _Field("input_limit_w", "Input limit", ".0f", "W", "power",
+                     entity_category="diagnostic")),
+    ("extra", _Field("output_limit_w", "Output limit", ".0f", "W", "power",
+                     entity_category="diagnostic")),
+    ("extra", _Field("min_soc_pct", "Min SoC", ".0f", "%", None,
+                     entity_category="diagnostic", icon="mdi:battery-arrow-down")),
+    ("extra", _Field("max_soc_pct", "Max SoC", ".0f", "%", None,
+                     entity_category="diagnostic", icon="mdi:battery-arrow-up")),
+    ("extra", _Field("pulse_battery_v", "Pulse battery voltage", ".2f", "V", "voltage",
+                     entity_category="diagnostic")),
+)
+# Readings already shown on the EV device (the car's SoC) are not repeated
+# on the chargepoint.
+_ROLE_SKIP_FIELDS: dict[DeviceRole, frozenset[str]] = {
+    DeviceRole.EV_CHARGER: frozenset({"soc_pct"}),
+}
+
 _RECONNECT_DELAY_S = 30
 CHARGING_MODES = ("instant_charging", "pv_charging", "stop", "disconnected", "disabled")
 # Sentinel boundary between PV and Instant mode — see assets/ev.py.
@@ -123,8 +209,13 @@ class EvMqttPublisher:
         on_disable_override: Callable[[str], Awaitable[None]],
         on_set_weekly: Callable[[str, int, dict[str, Any]], Awaitable[None]] | None = None,
         savings_kpis: bool = False,
+        devices: list[DiscoveryDevice] | None = None,
     ) -> None:
         self._savings_kpis = savings_kpis
+        self._devices = list(devices or [])
+        # Discovery configs of device sensors seen so far (topic → payload)
+        # — created lazily as readings appear, re-published on reconnect.
+        self._device_configs: dict[str, str] = {}
         # Last published KPI payload — re-published on every (re)connect.
         self._savings_payload: str | None = None
         # Last price curve — attributes re-published on reconnect; the state
@@ -216,6 +307,15 @@ class EvMqttPublisher:
             await self._queue_if_changed(
                 _reading_messages(asset, device_states.get(asset.device_id))
             )
+        for device in self._devices:
+            state = device_states.get(device.device_id)
+            for field in _device_fields_present(device, state):
+                topic, config = _device_sensor_config(device, field)
+                if topic not in self._device_configs:
+                    payload = json.dumps(config)
+                    self._device_configs[topic] = payload
+                    await self._queue.put((topic, payload, True))
+            await self._queue_if_changed(_device_reading_messages(device, state))
 
     async def _queue_if_changed(self, msgs: list[tuple[str, str | None]]) -> None:
         """Queue retained messages whose payload differs from the last one
@@ -460,7 +560,12 @@ class EvMqttPublisher:
         if self._savings_kpis:
             for config_topic, config_payload in _savings_discovery_configs():
                 await client.publish(config_topic, json.dumps(config_payload), retain=True)
-        _log.info("MQTT Discovery published for %d EV asset(s)", len(self._assets))
+        for config_topic, payload in list(self._device_configs.items()):
+            await client.publish(config_topic, payload, retain=True)
+        _log.info(
+            "MQTT Discovery published for %d EV asset(s), %d device(s)",
+            len(self._assets), len(self._devices),
+        )
 
 
 # ------------------------------------------------------------------
@@ -883,6 +988,112 @@ def _reading_messages(
     plugged = state.extra.get("plugged") if state is not None else None
     if plugged is not None:
         msgs.append((f"{base}/plugged", "ON" if plugged else "OFF"))
+    return msgs
+
+
+# ------------------------------------------------------------------
+# Pure helpers — device sub-devices
+# ------------------------------------------------------------------
+
+def select_discovery_devices(
+    devices_cfg: Mapping[str, Mapping[str, Any]],
+    roles: Mapping[str, DeviceRole],
+) -> list[DiscoveryDevice]:
+    """Pick the configured devices to expose as HA sub-devices.
+
+    *roles* maps the device ids that were actually built to their role.
+    Skipped: devices fed from Home Assistant (plugin type containing
+    ``homeassistant``), virtual devices without readings, devices that
+    failed to build, and devices with ``ha_discovery: false``.  The HA
+    device name is the device's ``name:`` (or its id, title-cased).
+    """
+    out: list[DiscoveryDevice] = []
+    for device_id, cfg in devices_cfg.items():
+        type_name = str(cfg.get("type", ""))
+        if (
+            device_id not in roles
+            or _HA_SOURCED_MARKER in type_name
+            or type_name in _VIRTUAL_DEVICE_TYPES
+            or cfg.get("ha_discovery") is False
+        ):
+            continue
+        out.append(DiscoveryDevice(
+            device_id=device_id,
+            name=str(cfg.get("name") or device_id.replace("_", " ").title()),
+            role=roles[device_id],
+            model=type_name or "device",
+        ))
+    return out
+
+
+def _device_value(source: str, field: _Field, state: DeviceState) -> float | None:
+    raw = getattr(state, field.key, None) if source == "attr" else state.extra.get(field.key)
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    return float(raw)
+
+
+def _device_fields_present(
+    device: DiscoveryDevice, state: DeviceState | None
+) -> list[_Field]:
+    """The fields *state* has a numeric value for (in table order)."""
+    if state is None:
+        return []
+    skip = _ROLE_SKIP_FIELDS.get(device.role, frozenset())
+    return [
+        field for source, field in _DEVICE_FIELDS
+        if field.key not in skip and _device_value(source, field, state) is not None
+    ]
+
+
+def _device_sensor_config(device: DiscoveryDevice, field: _Field) -> tuple[str, dict]:
+    """Discovery (topic, config) for one sensor of a sub-device."""
+    uid = f"ea_dev_{device.device_id}_{field.key}"
+    base = f"{_DEVICE_BASE}/{device.device_id}"
+    config: dict[str, Any] = {
+        "unique_id": uid,
+        "name": field.name,
+        "device": {
+            "identifiers": [f"energy_assistant_device_{device.device_id}"],
+            "name": device.name,
+            "manufacturer": "Energy Assistant",
+            "model": device.model,
+            "via_device": _SITE_DEVICE["identifiers"][0],
+        },
+        "state_topic": f"{base}/{field.key}",
+        "availability": [
+            {"topic": _STATUS_TOPIC},
+            {"topic": f"{base}/available"},
+        ],
+        "availability_mode": "all",
+    }
+    for key in ("unit", "device_class", "state_class", "entity_category", "icon"):
+        value = getattr(field, key)
+        if value is not None:
+            config["unit_of_measurement" if key == "unit" else key] = value
+    return f"{_DISC}/sensor/{uid}/config", config
+
+
+def _device_reading_messages(
+    device: DiscoveryDevice, state: DeviceState | None
+) -> list[tuple[str, str]]:
+    """Live (topic, payload) messages for one sub-device.
+
+    The device counts as available while it reports anything at all — the
+    plugins' ``available`` flag can mean more than reachability (an openWB
+    chargepoint is "unavailable" whenever no car is plugged in, yet its
+    power reading is valid).
+    """
+    base = f"{_DEVICE_BASE}/{device.device_id}"
+    present = _device_fields_present(device, state)
+    online = state is not None and (state.available or bool(present))
+    msgs: list[tuple[str, str]] = [(f"{base}/available", "online" if online else "offline")]
+    if state is None:
+        return msgs
+    by_key = {field.key: source for source, field in _DEVICE_FIELDS}
+    for field in present:
+        value = _device_value(by_key[field.key], field, state)
+        msgs.append((f"{base}/{field.key}", format(value, field.fmt)))
     return msgs
 
 
