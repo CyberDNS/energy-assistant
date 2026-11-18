@@ -9,6 +9,8 @@ const C_SAVING   = '#4caf7d'
 const C_LOSS     = '#e07070'
 const C_UNCTRL   = '#9aa5a0'
 const C_REAL     = '#6b7bb5'
+const C_CAR      = '#d08a2e'
+const C_PRICE    = '#ad7b00'
 
 const HOUR_MS = 3600000
 const DAY_MS  = 24 * HOUR_MS
@@ -94,12 +96,62 @@ export default defineComponent({
     const HOVER = computed(() =>
       `%{x|${range.value.tick.tickformat}}  %{y:.2f} €<extra>%{fullData.name}</extra>`)
 
+    // Per-slot detail (24 h / 3 d): what the batteries and cars did.
+    const slots = computed(() => data.value?.slots ?? null)
+    const slotX = computed(() => (slots.value ?? []).map(r => localX(r.slot_start)))
+    const SLOT_HOVER = '%{x|%d.%m. %H:%M}  %{y:.2f} €<extra>%{fullData.name}</extra>'
+
     const savingTraces = computed(() => {
-      const y = buckets.value.map(b => b.real)
+      const perSlot = slots.value != null
+      const y = perSlot ? slots.value.map(r => r.saving) : buckets.value.map(b => b.real)
       return [{
-        name: 'Saving', type: 'bar', x: x.value, y,
-        marker: { color: y.map(v => (v >= 0 ? C_SAVING : C_LOSS)) }, hovertemplate: HOVER.value,
+        name: 'Saving', type: 'bar', x: perSlot ? slotX.value : x.value, y,
+        marker: { color: y.map(v => (v >= 0 ? C_SAVING : C_LOSS)) },
+        hovertemplate: perSlot ? SLOT_HOVER : HOVER.value,
       }]
+    })
+    const savingTitle = computed(() =>
+      slots.value != null ? '15 min' : bucketLabel.value)
+
+    const kw = (kwhVal, hours) => (kwhVal == null || !hours ? null : kwhVal / hours)
+    const storedText = house => (slots.value ?? []).map(r => {
+      const d = r.stored_detail?.[house] ?? {}
+      return Object.entries(d).map(([k, v]) => `${k}: ${v.toFixed(2)} kWh`).join('<br>')
+    })
+
+    const detailTraces = computed(() => {
+      const r = slots.value ?? []
+      const xs = slotX.value
+      const line = (extra) => ({ mode: 'lines', x: xs, line: { shape: 'hv', width: 2 }, ...extra })
+      const traces = [
+        line({ name: 'Stored — real', y: r.map(s => s.real_stored_kwh),
+          line: { shape: 'hv', width: 2.5, color: C_REAL }, customdata: storedText('real'),
+          hovertemplate: '%{x|%H:%M}  %{y:.2f} kWh<br>%{customdata}<extra>Stored — real</extra>' }),
+        line({ name: 'Stored — uncontrolled', y: r.map(s => s.uncontrolled_stored_kwh),
+          line: { shape: 'hv', width: 2, color: C_UNCTRL, dash: 'dash' },
+          customdata: storedText('uncontrolled'),
+          hovertemplate: '%{x|%H:%M}  %{y:.2f} kWh<br>%{customdata}<extra>Stored — uncontrolled</extra>' }),
+        line({ name: 'Import price', y: r.map(s => s.import_price), yaxis: 'y2',
+          line: { shape: 'hv', width: 1.2, color: C_PRICE, dash: 'dot' },
+          hovertemplate: '%{x|%H:%M}  %{y:.3f} €/kWh<extra>Import price</extra>' }),
+        line({ name: 'Battery — real', y: r.map(s => kw(s.real_battery_kwh, s.hours)), yaxis: 'y3',
+          line: { shape: 'hv', width: 2, color: C_REAL },
+          hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra>Battery — real</extra>' }),
+        line({ name: 'Battery — uncontrolled', y: r.map(s => kw(s.uncontrolled_battery_kwh, s.hours)),
+          yaxis: 'y3', line: { shape: 'hv', width: 2, color: C_UNCTRL, dash: 'dash' },
+          hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra>Battery — uncontrolled</extra>' }),
+      ]
+      if (r.some(s => (s.real_ev_kwh ?? 0) > 0 || (s.uncontrolled_ev_kwh ?? 0) > 0)) {
+        traces.push(
+          line({ name: 'Car — real', y: r.map(s => kw(s.real_ev_kwh, s.hours)), yaxis: 'y4',
+            line: { shape: 'hv', width: 2, color: C_CAR },
+            hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra>Car — real</extra>' }),
+          line({ name: 'Car — uncontrolled', y: r.map(s => kw(s.uncontrolled_ev_kwh, s.hours)),
+            yaxis: 'y4', line: { shape: 'hv', width: 2, color: C_CAR, dash: 'dash' },
+            hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra>Car — uncontrolled</extra>' }),
+        )
+      }
+      return traces
     })
 
     const cumulativeTraces = computed(() => [{
@@ -131,14 +183,31 @@ export default defineComponent({
     const savingLayout     = computed(() => layout({ showlegend: false }))
     const cumulativeLayout = computed(() => layout({ showlegend: false }))
     const costLayout       = computed(() => layout())
+    const detailLayout     = computed(() => {
+      const base = layout()
+      return {
+        ...base,
+        xaxis: { ...base.xaxis, anchor: 'y3' },
+        yaxis:  { title: 'kWh stored', domain: [0.56, 1], rangemode: 'tozero' },
+        yaxis2: { title: '€/kWh', overlaying: 'y', side: 'right', showgrid: false,
+                  rangemode: 'tozero' },
+        yaxis3: { title: 'battery kW (+ charge)', domain: [0, 0.44], zeroline: true,
+                  zerolinecolor: '#9aa5a0' },
+        // Cars draw ~10× the battery power: own scale, same panel.
+        yaxis4: { title: 'car kW', overlaying: 'y3', side: 'right', showgrid: false,
+                  rangemode: 'tozero', titlefont: { color: C_CAR }, tickfont: { color: C_CAR } },
+        legend: { orientation: 'h', y: -0.14, font: { size: 10 } },
+        margin: { t: 10, r: 60, b: 60, l: 50 },
+      }
+    })
 
     onMounted(() => load(range.value))
 
     return {
       RANGES, range, data, loaded, error, load, eur, kwh,
       buckets, totals, allTime, pct, stored, bucketLabel,
-      savingTraces, cumulativeTraces, costTraces,
-      savingLayout, cumulativeLayout, costLayout,
+      savingTraces, cumulativeTraces, costTraces, detailTraces, slots, savingTitle,
+      savingLayout, cumulativeLayout, costLayout, detailLayout,
     }
   },
 
@@ -196,8 +265,13 @@ export default defineComponent({
         </div>
 
         <div class="panel" style="margin-bottom:10px">
-          <h2>Saving per {{ bucketLabel }}</h2>
+          <h2>Saving per {{ savingTitle }}</h2>
           <PlotlyChart :traces="savingTraces" :layout="savingLayout" height="280px" />
+        </div>
+
+        <div class="panel" style="margin-bottom:10px" v-if="slots && slots.length">
+          <h2>Batteries and cars — real vs. uncontrolled</h2>
+          <PlotlyChart :traces="detailTraces" :layout="detailLayout" height="440px" />
         </div>
 
         <div class="row2-eq">

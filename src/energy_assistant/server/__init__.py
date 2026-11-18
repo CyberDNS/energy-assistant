@@ -158,6 +158,7 @@ def _savings_totals(rows: list[dict]) -> dict[str, float]:
 
 
 _BUCKETS = ("hour", "day", "week")
+_SLOT_DETAIL_MAX_HOURS = 72
 
 
 def _bucket_start(ts: datetime, bucket: str) -> datetime:
@@ -2151,6 +2152,11 @@ class Application:
                 ],
                 "stored": self._savings.stored(),
                 "all_time": _savings_totals(all_rows),
+                # Per-slot detail (what batteries and cars did in both
+                # houses) for windows short enough to chart it.
+                "slots": [
+                    {**row, "slot_start": row["slot_start"].isoformat()} for row in rows
+                ] if hours <= _SLOT_DETAIL_MAX_HOURS else None,
             }
 
         @api.get("/api/savings/slots")

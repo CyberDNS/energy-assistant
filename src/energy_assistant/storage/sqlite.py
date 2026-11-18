@@ -208,6 +208,19 @@ CREATE TABLE IF NOT EXISTS savings_slots (
 )
 """
 
+# Per-slot detail added later (created on older DBs by start()): what the
+# batteries and cars did in both houses, for the short-range charts.
+_SAVINGS_SLOTS_ADDED_COLUMNS = {
+    "real_battery_kwh": "REAL",
+    "uncontrolled_battery_kwh": "REAL",
+    "real_ev_kwh": "REAL",
+    "uncontrolled_ev_kwh": "REAL",
+    "real_stored_kwh": "REAL",
+    "uncontrolled_stored_kwh": "REAL",
+    "import_price": "REAL",
+    "stored_detail": "TEXT",
+}
+
 SAVINGS_KEEP_DAYS = 400
 """Savings slots are kept this long (the dashboard's longest range is 1 y)."""
 
@@ -403,6 +416,7 @@ class SqliteStorageBackend:
         await self._db.execute(_CREATE_SAVINGS_PREDICTED_TABLE)
         await self._db.execute(_CREATE_SAVINGS_STATE_TABLE)
         await self._db.execute(_CREATE_SAVINGS_SLOTS_TABLE)
+        await self._add_missing_columns("savings_slots", _SAVINGS_SLOTS_ADDED_COLUMNS)
         await self._add_missing_columns("savings_actual", _SAVINGS_ACTUAL_ADDED_COLUMNS)
         await self._db.execute(_CREATE_PLAN_SNAPSHOTS_TABLE)
         await self._db.execute(_CREATE_CONTROL_EXECUTION_TABLE)
@@ -769,10 +783,19 @@ class SqliteStorageBackend:
         """Persist the result of one accounting slot."""
         assert self._db is not None, "Call start() before save_savings_slot()"
         await self._db.execute(
-            "INSERT OR REPLACE INTO savings_slots VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO savings_slots (slot_start, hours, real_cost,"
+            " uncontrolled_cost, real_bill, uncontrolled_bill, ev_saving,"
+            " real_battery_kwh, uncontrolled_battery_kwh, real_ev_kwh, uncontrolled_ev_kwh,"
+            " real_stored_kwh, uncontrolled_stored_kwh, import_price, stored_detail)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 _utc_iso(slot.start), slot.hours, slot.real_cost, slot.uncontrolled_cost,
                 slot.real_bill, slot.uncontrolled_bill, slot.ev_saving,
+                slot.real_battery_kwh, slot.uncontrolled_battery_kwh,
+                slot.real_ev_kwh, slot.uncontrolled_ev_kwh,
+                sum(slot.real_stored.values()), sum(slot.uncontrolled_stored.values()),
+                slot.import_price,
+                json.dumps({"real": slot.real_stored, "uncontrolled": slot.uncontrolled_stored}),
             ),
         )
         await self._db.commit()
@@ -782,7 +805,9 @@ class SqliteStorageBackend:
         assert self._db is not None, "Call start() before query_savings_slots()"
         async with self._db.execute(
             "SELECT slot_start, hours, real_cost, uncontrolled_cost, real_bill,"
-            " uncontrolled_bill, ev_saving FROM savings_slots"
+            " uncontrolled_bill, ev_saving, real_battery_kwh, uncontrolled_battery_kwh,"
+            " real_ev_kwh, uncontrolled_ev_kwh, real_stored_kwh, uncontrolled_stored_kwh,"
+            " import_price, stored_detail FROM savings_slots"
             " WHERE slot_start >= ? AND slot_start < ? ORDER BY slot_start",
             (_utc_iso(start), _utc_iso(end)),
         ) as cursor:
@@ -797,6 +822,14 @@ class SqliteStorageBackend:
                 "real_bill": r[4],
                 "uncontrolled_bill": r[5],
                 "ev_saving": r[6],
+                "real_battery_kwh": r[7],
+                "uncontrolled_battery_kwh": r[8],
+                "real_ev_kwh": r[9],
+                "uncontrolled_ev_kwh": r[10],
+                "real_stored_kwh": r[11],
+                "uncontrolled_stored_kwh": r[12],
+                "import_price": r[13],
+                "stored_detail": json.loads(r[14]) if r[14] else None,
             }
             for r in rows
         ]
