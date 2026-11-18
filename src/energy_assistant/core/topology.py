@@ -25,6 +25,24 @@ root device ID.  Children are listed under a ``children:`` key::
 
 Nodes without children may be listed as plain strings in their parent's
 ``children`` list.  A node with its own children may be a nested dict.
+
+Grid connection limit
+---------------------
+The root node (the grid connection point) may declare a connection limit::
+
+    topology:
+      - main_grid_meter:
+          max_import_kw: 24        # e.g. main fuse / connection agreement
+          curtail_order:           # optional: curtailed first → last
+            - home_battery
+            - wallbox
+          limit_hysteresis_kw: 1.0 # optional, default 5 % of the limit
+          children: [...]
+
+The planner keeps planned import below ``max_import_kw``; the control loop
+enforces it every tick by reducing flexible loads (see
+``core/grid_limit.py``).  Without ``curtail_order``, storage charging is
+curtailed before EV charging, each in registration order.
 """
 
 from __future__ import annotations
@@ -47,6 +65,12 @@ class TopologyNode:
 
     device_id: str
     children: list["TopologyNode"] = field(default_factory=list)
+    max_import_kw: float | None = None
+    """Connection limit on import through this node (kW); root node only."""
+    curtail_order: list[str] = field(default_factory=list)
+    """Device ids curtailed first → last when the limit is reached."""
+    limit_hysteresis_kw: float | None = None
+    """Headroom below the limit required before curtailment is released."""
 
     def find(self, device_id: str) -> "TopologyNode | None":
         """Return the node with *device_id*, searching depth-first, or None."""
@@ -107,7 +131,16 @@ def build_topology(cfg: "list[dict[str, Any]] | None") -> "TopologyNode | None":
         )
 
     root_id, subtree = next(iter(root_entry.items()))
-    return _parse_node(root_id, subtree or {})
+    root = _parse_node(root_id, subtree or {})
+    if isinstance(subtree, dict):
+        if (limit := subtree.get("max_import_kw")) is not None:
+            root.max_import_kw = float(limit)
+            if root.max_import_kw <= 0:
+                raise ValueError("topology: max_import_kw must be > 0")
+        root.curtail_order = [str(d) for d in subtree.get("curtail_order") or []]
+        if (hyst := subtree.get("limit_hysteresis_kw")) is not None:
+            root.limit_hysteresis_kw = max(0.0, float(hyst))
+    return root
 
 
 def _parse_node(device_id: str, subtree: dict | list | None) -> TopologyNode:

@@ -86,6 +86,11 @@ class OptimizationContext:
     and each entry here is carved out of the total consumption and priced at
     its own tariff.  Empty (the default) means one price for the whole site.
     """
+    max_import_kw: float | None = None
+    """Grid connection limit (kW) on import at the connection point, all
+    tariffs together — from ``max_import_kw`` on the topology root.  None = no
+    limit.  The realtime control loop enforces it per tick as well.
+    """
     producer_device_ids: set[str] = field(default_factory=set)
     """Device IDs with role=producer (PV panels).
 

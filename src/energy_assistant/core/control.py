@@ -78,6 +78,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from .grid_limit import GridLimit, GridLimitGuard
 from .ledger import BatteryCostLedger
 from .models import ControlIntent, DeviceCommand, EnergyPlan, DeviceState, StorageConstraints, ThresholdConstraints, intent_display_mode
 from .realtime_slice_optimizer import StorageSliceInput, optimize_storage_slice
@@ -86,6 +87,16 @@ if TYPE_CHECKING:
     from .registry import DeviceRegistry
 
 _log = logging.getLogger(__name__)
+
+
+@dataclass
+class _SlotEnergy:
+    """Energy a storage device delivered since tracking of a charge intent began."""
+
+    key: tuple[datetime, datetime]
+    """(intent timestep, plan created_at) — tracking restarts when it changes."""
+    tracked_h: float = 0.0
+    delivered_kwh: float = 0.0
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -362,6 +373,19 @@ class StorageControlContributor:
         surplus_w = max(0.0, -live.grid_power_w - live.ev_pv_reserved_w)
         return min(surplus_w, max_charge_w) if surplus_w > 1.0 else 0.0
 
+    # Grid limit participation (see core/grid_limit.py).
+
+    def expected_draw_w(self, setpoint_w: float, live: LiveSituation) -> float | None:
+        return setpoint_w
+
+    def curtail_setpoint_w(
+        self, setpoint_w: float, reduce_by_w: float, live: LiveSituation
+    ) -> float:
+        """Reduce charging, down to 0 W — never into discharge."""
+        if setpoint_w <= 0.0:
+            return setpoint_w
+        return max(0.0, setpoint_w - reduce_by_w)
+
     def charge_price_eur_per_kwh(
         self, intent: ControlIntent | None, live: LiveSituation
     ) -> float:
@@ -425,8 +449,11 @@ class ControlLoop:
         self,
         ledger: BatteryCostLedger,
         contributors: list[ControlContributor] | None = None,
+        grid_limit: GridLimit | None = None,
     ) -> None:
         self._ledger = ledger
+        # Site import limit, enforced on every tick (see core/grid_limit.py).
+        self._grid_guard = GridLimitGuard(grid_limit) if grid_limit is not None else None
         self._contributors: list[ControlContributor] = list(contributors or [])
         self._active_plan: EnergyPlan | None = None
         self._last_storage_setpoints_w: dict[str, float] = {}
@@ -437,6 +464,9 @@ class ControlLoop:
         # (used by the execution log, see core/execution_log.py).
         self.last_modes: dict[str, str] = {}
         self.last_intents: dict[str, ControlIntent | None] = {}
+        # Energy delivered per storage device in the current charge slot
+        # (see _slot_energy_target_w).
+        self._slot_energy: dict[str, _SlotEnergy] = {}
 
     # ------------------------------------------------------------------
     # Plan management
@@ -697,6 +727,10 @@ class ControlLoop:
                 continue
             intent = intents[contributor.device_id]
             planned_w = (intent.power_kw * 1000.0) if intent is not None else 0.0
+            if planned_w > 1.0:
+                planned_w = self._slot_energy_target_w(
+                    contributor, intent, live, planned_w
+                )
 
             # Soften discharge tracking when live PV surplus exists so the
             # realtime layer may absorb otherwise-exported PV instead.
@@ -807,7 +841,75 @@ class ControlLoop:
                 self._last_storage_setpoints_w[contributor.device_id] = setpoint_w
 
             result.append((contributor.device_id, setpoint_w, mode, intent))
-        return result
+        return self._apply_grid_limit(result, live)
+
+    def _apply_grid_limit(
+        self,
+        rows: list[tuple[str, float | None, str, ControlIntent | None]],
+        live: LiveSituation,
+    ) -> list[tuple[str, float | None, str, ControlIntent | None]]:
+        """Curtail flexible loads so site import stays below the grid limit."""
+        if self._grid_guard is None:
+            return rows
+        limited = self._grid_guard.apply(
+            {did: sp for did, sp, _m, _i in rows},
+            list(self._contributors),
+            live,
+            previous=self.last_setpoints,
+        )
+        out: list[tuple[str, float | None, str, ControlIntent | None]] = []
+        storage_ids = {
+            c.device_id for c in self._contributors if isinstance(c, StorageControlContributor)
+        }
+        for did, sp, mode, intent in rows:
+            new_sp = limited.get(did, sp)
+            if new_sp != sp and did in storage_ids and new_sp is not None:
+                self._last_storage_setpoints_w[did] = new_sp
+            out.append((did, new_sp, mode, intent))
+        return out
+
+    def _slot_energy_target_w(
+        self,
+        contributor: "StorageControlContributor",
+        intent: ControlIntent,
+        live: LiveSituation,
+        planned_w: float,
+    ) -> float:
+        """Charge power that delivers the slot's planned energy by its end.
+
+        The plan's charge power is an average over the slot.  Whatever the
+        battery fell behind (ramp-up, a short PV dip on a PV-only intent,
+        device inaccuracy) or got ahead (absorbed extra surplus) since the
+        tracking of this intent began is spread over the rest of the slot:
+
+            target = planned + (planned × tracked_h − delivered) / remaining_h
+
+        Tracking restarts for every new slot and every new plan (the new
+        plan already accounts for the energy stored so far).  Energy is only
+        counted on real control ticks (``dt_hours > 0``), not on status
+        previews.  The result is clamped to ``[0, max_charge]``.
+        """
+        assert self._active_plan is not None
+        did = contributor.device_id
+        key = (intent.timestep, self._active_plan.created_at)
+        tracker = self._slot_energy.get(did)
+        if tracker is None or tracker.key != key:
+            # New slot or new plan: start counting from this tick on.
+            tracker = self._slot_energy[did] = _SlotEnergy(key=key)
+        elif live.dt_hours > 0:
+            state = live.device_states.get(did)
+            measured_w = state.power_w if state is not None and state.power_w is not None else 0.0
+            tracker.tracked_h += live.dt_hours
+            tracker.delivered_kwh += max(0.0, measured_w) / 1000.0 * live.dt_hours
+
+        slot_end = intent.timestep + timedelta(minutes=self._active_plan.step_minutes)
+        remaining_h = (slot_end - live.timestamp).total_seconds() / 3600.0
+        # Never spread a deficit over less than one control tick.
+        remaining_h = max(remaining_h, live.dt_hours, 1e-6)
+        deficit_kwh = planned_w / 1000.0 * tracker.tracked_h - tracker.delivered_kwh
+        target_w = planned_w + deficit_kwh * 1000.0 / remaining_h
+        max_w = contributor._constraints.max_charge_kw * 1000.0
+        return min(max(0.0, target_w), max_w)
 
     def _export_profitable(
         self,
