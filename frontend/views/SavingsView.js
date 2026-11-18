@@ -34,6 +34,16 @@ function cumulative(values) {
 
 const HOVER = '%{x|%d.%m.}  %{y:.2f} €<extra>%{fullData.name}</extra>'
 
+const DAY_MS = 86400000
+
+// One labelled tick per day (bars sit on midnight, so each label is under its
+// own bar); coarser steps once the range would not fit.
+function dayTicks(nDays) {
+  if (nDays <= 31) return { dtick: DAY_MS, tick0: '2000-01-03' }
+  if (nDays <= 120) return { dtick: 7 * DAY_MS, tick0: '2000-01-03' }  // Mondays
+  return { dtick: 'M1', tick0: '2000-01-01' }
+}
+
 export default defineComponent({
   name: 'SavingsView',
   components: { PlotlyChart },
@@ -110,13 +120,16 @@ export default defineComponent({
     // One layout object per chart: Plotly writes the computed axis ranges
     // back into the layout it is given, so charts must not share axes.
     const layout = (extra = {}) => ({
-      xaxis: { type: 'date', tickformat: '%d.%m.', tickangle: 0 },
+      xaxis: {
+        type: 'date', tickformat: '%d.%m.', tickangle: 0, tickmode: 'linear',
+        ...dayTicks(rows.value.length),
+      },
       yaxis: { title: '€', zeroline: true, zerolinecolor: '#9aa5a0' },
       ...extra,
     })
-    const dailyLayout      = layout()
-    const cumulativeLayout = layout()
-    const deviationLayout  = layout({ showlegend: false })
+    const dailyLayout      = computed(() => layout())
+    const cumulativeLayout = computed(() => layout())
+    const deviationLayout  = computed(() => layout({ showlegend: false }))
 
     onMounted(() => load(days.value))
 
