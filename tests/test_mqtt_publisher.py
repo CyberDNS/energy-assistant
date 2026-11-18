@@ -3,9 +3,12 @@
 from datetime import datetime, timedelta, timezone
 
 from energy_assistant.assets.ev import EvChargingAsset, EvWeeklyTarget
+import json
+
 from energy_assistant.core.models import (
     EV_DISPLAY_MODES,
     ControlIntent,
+    DeviceRole,
     DeviceState,
     EnergyPlan,
     ev_current_mode,
@@ -13,7 +16,9 @@ from energy_assistant.core.models import (
 from energy_assistant.plugins.mqtt_publisher import (
     _STATUS_TOPIC,
     CHARGING_MODES,
+    DiscoveryDevice,
     EvMqttPublisher,
+    select_discovery_devices,
     charging_mode_from_setpoint,
     _build_state_messages,
     _discovery_configs,
@@ -275,3 +280,97 @@ async def test_readings_are_published_only_on_change() -> None:
         (f"{base}/range", "340"),
         (f"{base}/range_available", "offline"),
     ]
+
+
+# ── Device sub-devices ────────────────────────────────────────────────────────
+
+def test_select_discovery_devices_skips_ha_and_virtual_devices() -> None:
+    cfg = {
+        "main_grid_meter": {"type": "generic_homeassistant"},
+        "cooler": {"type": "threshold_homeassistant"},
+        "baseline": {"type": "generic_consumer"},
+        "sma_battery": {"type": "modbus", "name": "SMA Speicher"},
+        "household_meter": {"type": "tibber_local"},
+        "hidden": {"type": "zendure", "ha_discovery": False},
+        "broken": {"type": "modbus"},  # failed to build → not in roles
+    }
+    roles = {k: DeviceRole.METER for k in cfg if k != "broken"}
+    roles["sma_battery"] = DeviceRole.STORAGE
+    picked = select_discovery_devices(cfg, roles)
+    assert [(d.device_id, d.name, d.model) for d in picked] == [
+        ("sma_battery", "SMA Speicher", "modbus"),
+        ("household_meter", "Household Meter", "tibber_local"),
+    ]
+    assert picked[0].role is DeviceRole.STORAGE
+
+
+def _noop_pub(devices: list[DiscoveryDevice]) -> EvMqttPublisher:
+    async def noop(*_a):
+        pass
+
+    return EvMqttPublisher(None, [], noop, noop, noop, devices=devices)
+
+
+def _drain(pub: EvMqttPublisher) -> list[tuple[str, str]]:
+    out = []
+    while not pub._queue.empty():
+        out.append(pub._queue.get_nowait()[:2])
+    return out
+
+
+async def test_device_sensors_are_discovered_lazily_as_subdevices() -> None:
+    bat = DiscoveryDevice("sma_battery", "SMA Battery", DeviceRole.STORAGE, "modbus")
+    pub = _noop_pub([bat])
+    await pub.publish_readings({"sma_battery": DeviceState(
+        device_id="sma_battery", power_w=-1234.4, soc_pct=55.25,
+        extra={"max_cha_w": 3000, "unknown_key": 1.0, "chargemode": "pv"},
+    )})
+    queued = _drain(pub)
+    configs = {t: json.loads(p) for t, p in queued if t.startswith("homeassistant/")}
+    assert set(configs) == {
+        "homeassistant/sensor/ea_dev_sma_battery_power_w/config",
+        "homeassistant/sensor/ea_dev_sma_battery_soc_pct/config",
+        "homeassistant/sensor/ea_dev_sma_battery_max_cha_w/config",
+    }
+    power = configs["homeassistant/sensor/ea_dev_sma_battery_power_w/config"]
+    assert power["device"]["via_device"] == "energy_assistant_kpis"
+    assert power["device"]["identifiers"] == ["energy_assistant_device_sma_battery"]
+    assert power["device_class"] == "power" and power["unit_of_measurement"] == "W"
+    assert [a["topic"] for a in power["availability"]] == [
+        _STATUS_TOPIC, "energy_assistant/device/sma_battery/available",
+    ]
+    states = {t: p for t, p in queued if not t.startswith("homeassistant/")}
+    assert states == {
+        "energy_assistant/device/sma_battery/available": "online",
+        "energy_assistant/device/sma_battery/power_w": "-1234",
+        "energy_assistant/device/sma_battery/soc_pct": "55.2",
+        "energy_assistant/device/sma_battery/max_cha_w": "3000",
+    }
+
+    # Same values again: nothing new.  A new field: only its config + value.
+    await pub.publish_readings({"sma_battery": DeviceState(
+        device_id="sma_battery", power_w=-1234.0, soc_pct=55.2, energy_kwh=12.5,
+        extra={"max_cha_w": 3000},
+    )})
+    assert _drain(pub) == [
+        ("homeassistant/sensor/ea_dev_sma_battery_energy_kwh/config",
+         pub._device_configs["homeassistant/sensor/ea_dev_sma_battery_energy_kwh/config"]),
+        ("energy_assistant/device/sma_battery/energy_kwh", "12.500"),
+    ]
+
+
+async def test_chargepoint_stays_available_without_car_and_skips_soc() -> None:
+    cp = DiscoveryDevice("cp5", "Chargepoint 5", DeviceRole.EV_CHARGER, "openwb_mqtt")
+    pub = _noop_pub([cp])
+    await pub.publish_readings({"cp5": DeviceState(
+        device_id="cp5", power_w=0.0, soc_pct=80.0, available=False,
+        extra={"plugged": False},
+    )})
+    states = {t: p for t, p in _drain(pub) if not t.startswith("homeassistant/")}
+    assert states == {
+        "energy_assistant/device/cp5/available": "online",
+        "energy_assistant/device/cp5/power_w": "0",
+    }
+    # Unreachable (no readings at all) → offline; missing state → offline.
+    await pub.publish_readings({"cp5": DeviceState(device_id="cp5", available=False)})
+    assert _drain(pub) == [("energy_assistant/device/cp5/available", "offline")]

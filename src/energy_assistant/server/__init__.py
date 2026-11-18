@@ -121,7 +121,11 @@ from ..loader.device_loader import (
 )
 from ..plugins import registry as plugin_registry
 from ..plugins.milp_highs import MilpHigsOptimizer
-from ..plugins.mqtt_publisher import EvMqttPublisher, charging_mode_from_setpoint
+from ..plugins.mqtt_publisher import (
+    EvMqttPublisher,
+    charging_mode_from_setpoint,
+    select_discovery_devices,
+)
 from ..storage.sqlite import SqliteStorageBackend
 
 _log = logging.getLogger(__name__)
@@ -721,6 +725,11 @@ class Application:
                 # A dry run controls nothing, so it has no savings to report —
                 # and a test instance must not overwrite the real totals.
                 savings_kpis=not self._dry_run,
+                # Every device not already fed from HA, as a sub-device.
+                devices=select_discovery_devices(
+                    self._cfg.devices,
+                    {d.device_id: d.role for d in self._registry.all()},
+                ),
             )
             await self._mqtt_publisher.publish_weekly_plans(self._ev_weekly_plans)
             await self._publish_savings()
