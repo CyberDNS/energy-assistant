@@ -240,7 +240,8 @@ class TestMilpHigsOptimizerEconomics:
         evening_intents = [
             i for i in plan.intents if now + timedelta(hours=16) <= i.timestep
         ]
-        assert any(i.power_kw > 0 and i.grid_allowed for i in midday_intents), "expected charging during midday"
+        # Midday charging comes from the PV surplus, so it is PV-only (#79).
+        assert any(i.power_kw > 0 and not i.grid_allowed for i in midday_intents), "expected PV charging during midday"
         assert any(i.power_kw < 0 for i in evening_intents), "expected discharging in the evening"
 
 
@@ -1305,3 +1306,44 @@ class TestSecondaryTariffLoad:
         bought = sum(pulp.value(v["s_imp"][(0, t)]) for t in range(n))
         discharged = sum(pulp.value(v["d"][("bat", t)]) for t in range(n))
         assert bought + discharged >= 4 * 2000.0 - 1.0
+
+
+class TestChargeIntentGridLabel:
+    """A charge intent allows grid import only where the plan imports (#79)."""
+
+    @staticmethod
+    async def _plan(now: datetime, pv_kw: list[float], load_kw: float, prices: list[float]):
+        def series(values: list[float]) -> list[ForecastPoint]:
+            return [ForecastPoint(timestamp=now + timedelta(hours=h), value=v) for h, v in enumerate(values)]
+        ctx = OptimizationContext(
+            device_states={"bat": _state("bat", soc_pct=10.0)},
+            storage_constraints=[_battery("bat", capacity_kwh=10.0, max_charge_kw=3.0)],
+            forecasts={
+                ForecastQuantity.PRICE: series(prices),
+                ForecastQuantity.PV_GENERATION: series(pv_kw),
+                ForecastQuantity.CONSUMPTION: series([load_kw] * len(prices)),
+            },
+            horizon=timedelta(hours=len(prices)),
+        )
+        plan = await MilpHigsOptimizer(step_minutes=60).optimize(ctx)
+        flows = {f.timestep: f for f in plan.flows}
+        return [
+            (i, flows[i.timestep]) for i in plan.intents
+            if i.power_kw > 0 and i.timestep in flows
+        ]
+
+    async def test_pv_covered_charge_is_pv_only_and_grid_charge_is_grid_allowed(self) -> None:
+        now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        # Hours 1–2: cheap grid, no PV.  Hours 4–7: 3 kW PV over a 0.5 kW load.
+        # Evening expensive, so the battery fills from both.
+        prices = [0.30, 0.05, 0.05, 0.30, 0.30, 0.30, 0.30, 0.30] + [0.60] * 16
+        pv = [0.0, 0.0, 0.0, 0.0, 3.0, 3.0, 3.0, 3.0] + [0.0] * 16
+        charges = await self._plan(now, pv, 0.5, prices)
+        assert charges, "expected charging"
+        for intent, flow in charges:
+            if flow.grid_import_kw > 0.001:
+                assert intent.grid_allowed, f"{intent.timestep}: imports, must be grid_allowed"
+            else:
+                assert not intent.grid_allowed, f"{intent.timestep}: PV-covered, must be PV-only"
+        assert any(i.grid_allowed for i, _f in charges), "expected a grid-charge slot"
+        assert any(not i.grid_allowed for i, _f in charges), "expected a PV-only charge slot"
