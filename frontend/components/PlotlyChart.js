@@ -34,7 +34,10 @@ export default defineComponent({
 
     function buildLayout() {
       const width = el.value?.offsetWidth ?? 600
-      const xaxis = { ...props.layout.xaxis, nticks: xNticks(width) }
+      // A fixed tick step (dtick) wins over the width-based tick count.
+      const xaxis = props.layout.xaxis?.dtick
+        ? { ...props.layout.xaxis }
+        : { ...props.layout.xaxis, nticks: xNticks(width) }
       return mkLayout({ ...props.layout, xaxis, ...(props.barmode ? { barmode: props.barmode } : {}) })
     }
 
@@ -55,7 +58,9 @@ export default defineComponent({
       draw()
       ro = new ResizeObserver(entries => {
         const w = entries[0]?.contentRect.width
-        if (w && initialized) Plotly.relayout(el.value, { 'xaxis.nticks': xNticks(w) })
+        if (w && initialized && !props.layout.xaxis?.dtick) {
+          Plotly.relayout(el.value, { 'xaxis.nticks': xNticks(w) })
+        }
       })
       ro.observe(el.value)
     })

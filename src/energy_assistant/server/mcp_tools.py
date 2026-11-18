@@ -29,16 +29,19 @@ EV chargers, PV, dynamic tariffs). Nothing here changes the installation.
 Good starting points:
 - get_status: live grid power, prices, device states, current setpoints.
 - get_plan: the active optimizer plan (per-slot flows, SoC, prices, intents).
-- get_savings / get_savings_slots: predicted (day-ahead plan) vs. real savings,
-  per day or per accounting slot with all cost components.
+- get_savings / get_savings_slots: savings against a simulated uncontrolled
+  house, per rolling window or per accounting slot with all cost components.
 - get_history: measured power/SoC and battery-ledger history (kept ~8 days).
 - get_execution: per slot and device, the plan's intent vs. the setpoint sent
   vs. the measured power — did the control loop follow the plan?
 - list_plan_snapshots / get_plan_snapshot: every past plan (kept ~8 days),
-  including the frozen day-ahead plan of each day.
-Savings KPIs: saving = unplanned baseline cost - actual cost + inventory delta
-+ soc_correction (value change of energy held beyond the unplanned "shadow"
-site; soc_correction = implausible battery SoC jumps, e.g. BMS recalibration).
+  including the day-ahead plan of each day (made shortly before midnight).
+Savings: saving = uncontrolled cost - real cost. Both houses run on the same
+measured load, PV and prices; the uncontrolled one charges batteries from PV
+surplus only, discharges them to cover load, and charges cars as late as
+possible to reach their charge plan. Battery energy is costed when used, at
+its own house's ledger cost (charging moves the cost into the ledger), so
+charging slots save nothing and the saving shows when stored energy is used.
 """
 
 
@@ -75,18 +78,19 @@ def build_mcp_server(api: FastAPI) -> MCPServer:
         return await get("/api/forecast")
 
     @mcp.tool(annotations=_READ_ONLY)
-    async def get_savings(days: int = 30) -> dict[str, Any]:
-        """Predicted vs. real savings: all-time totals plus one row per local
-        day for the last *days* days. 'predicted' is the frozen day-ahead
-        prediction, 'predicted_latest' the last plan before each slot."""
-        return await get("/api/savings", days=days)
+    async def get_savings(hours: float = 720.0, bucket: str | None = None) -> dict[str, Any]:
+        """Savings over the rolling window of the last *hours*: totals, one row
+        per *bucket* ('hour', 'day' or 'week', local time; default by window
+        length), energy still stored in both houses and all-time totals.
+        'real' is the saving (uncontrolled cost - real cost)."""
+        return await get("/api/savings", hours=hours, bucket=bucket)
 
     @mcp.tool(annotations=_READ_ONLY)
     async def get_savings_slots(start: str, end: str | None = None) -> dict[str, Any]:
-        """Per accounting slot in [start, end): measured baseline/actual cost,
-        inventory delta and real saving, next to the day-ahead and latest
-        prediction with their own cost components. Use it to find *when* the
-        real and predicted savings diverged."""
+        """Per accounting slot in [start, end) (max 31 days): ledger-based
+        cost of the real and the uncontrolled house, both plain grid bills,
+        the saving and the part booked for cars. Use it to find *when*
+        savings were made or lost."""
         return await get("/api/savings/slots", start=start, end=end)
 
     @mcp.tool(annotations=_READ_ONLY)
@@ -114,8 +118,8 @@ def build_mcp_server(api: FastAPI) -> MCPServer:
 
     @mcp.tool(annotations=_READ_ONLY)
     async def list_plan_snapshots(start: str, end: str | None = None) -> dict[str, Any]:
-        """Stored plans made in [start, end): creation time and whether the
-        plan froze a day-ahead savings prediction."""
+        """Stored plans made in [start, end): creation time and whether it is
+        the day-ahead plan (made shortly before midnight for the coming day)."""
         return await get("/api/plan/snapshots", start=start, end=end)
 
     @mcp.tool(annotations=_READ_ONLY)
