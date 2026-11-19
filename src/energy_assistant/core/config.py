@@ -113,6 +113,9 @@ class AppConfig:
     controller: dict[str, Any] = field(default_factory=dict)
     server: dict[str, Any] = field(default_factory=dict)
     logging: dict[str, Any] = field(default_factory=dict)
+    energy_dashboard: dict[str, Any] = field(default_factory=dict)
+    """Import of the Home Assistant Energy dashboard's consumers
+    (``loader/energy_dashboard.py``)."""
     default_tariff_id: str | None = None
     """Tariff used for devices/loads that have no explicit ``tariff:`` key.
 

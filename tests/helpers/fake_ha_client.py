@@ -19,6 +19,9 @@ class FakeHAClient:
         self.weather: dict[str, list[tuple[datetime, float]]] = {}
         self.statistics_calls = 0
         self.fail_statistics = False
+        self.last_units: dict[str, str] | None = None
+        # Result of get_energy_prefs (None → raise, like an unreachable HA).
+        self.energy_prefs: dict[str, Any] | None = None
 
     async def get_entity_state(self, entity_id: str) -> Any:
         return self._states.get(entity_id)
@@ -38,8 +41,10 @@ class FakeHAClient:
         end: datetime | None = None,
         period: str = "hour",
         types: tuple[str, ...] = ("mean", "min", "max"),
+        units: dict[str, str] | None = None,
     ) -> dict[str, list[dict[str, Any]]]:
         self.statistics_calls += 1
+        self.last_units = units
         if self.fail_statistics:
             raise RuntimeError("statistics unavailable")
         return {
@@ -50,6 +55,11 @@ class FakeHAClient:
             for sid in statistic_ids
             if sid in self.statistics
         }
+
+    async def get_energy_prefs(self) -> dict[str, Any]:
+        if self.energy_prefs is None:
+            raise RuntimeError("energy prefs unavailable")
+        return self.energy_prefs
 
     async def get_weather_forecast(
         self, entity_id: str, forecast_type: str = "hourly"

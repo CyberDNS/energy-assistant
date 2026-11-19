@@ -23,6 +23,75 @@ _TEMP_CACHE_TTL = timedelta(minutes=30)
 # A local day needs this many hourly temperatures (observed + forecast)
 # before its mean is trusted.
 _MIN_TEMP_HOURS = 18
+# Statistics are requested in these units so power sensors (hourly mean) and
+# energy meters (hourly change) both read as watts.
+_STAT_UNITS = {"power": "W", "energy": "Wh"}
+_STAT_TYPES = ("mean", "min", "max", "change")
+# A subtracted meter that last read below this (W) and then reports nothing
+# is taken to be switched off, not broken.
+_IDLE_W = 5.0
+
+
+def hourly_watts(rows: list[dict[str, Any]], scale: float = 1.0) -> dict[datetime, float]:
+    """Hourly mean power (W) from statistics rows, keyed by hour start.
+
+    A power sensor contributes its hourly ``mean``; an energy meter (a
+    statistic with a sum) its hourly ``change``, which in Wh equals the mean
+    power over that hour.
+    """
+    out: dict[datetime, float] = {}
+    for row in rows:
+        value = row.get("mean")
+        if value is None:
+            value = row.get("change")
+        if value is not None:
+            out[row["start"]] = float(value) * scale
+    return out
+
+
+def residual_watts(
+    target: dict[datetime, float],
+    parts: dict[str, dict[datetime, float]],
+) -> tuple[dict[datetime, float], set[datetime]]:
+    """``target`` minus every series in *parts*, per hour.
+
+    Returns ``(residual, gap_hours)``.  Before a part's first statistics row
+    the part counts as zero (it was not metered yet, its load is part of the
+    residual).  After that, an hour without a value is
+
+    * zero when the part's last value before it was idle (below
+      ``_IDLE_W``): a device switched off at the breaker often reports
+      nothing at all until it is back;
+    * a gap otherwise (a meter or recorder outage while the device was
+      drawing power): the residual would be wrong, so the caller excludes
+      the hour.
+
+    The residual is clamped at zero; consumption cannot be negative, and
+    small negative values only come from the meters not being sampled at
+    the same instant.
+    """
+    first = {name: min(series) for name, series in parts.items() if series}
+    last: dict[str, float] = {}
+    residual: dict[datetime, float] = {}
+    gaps: set[datetime] = set()
+    for ts in sorted(target):
+        value = target[ts]
+        gap = False
+        for name, series in parts.items():
+            if name not in first or ts < first[name]:
+                continue
+            part = series.get(ts)
+            if part is None:
+                if last.get(name, 0.0) >= _IDLE_W:
+                    gap = True
+                continue
+            last[name] = part
+            value -= part
+        if gap:
+            gaps.add(ts)
+        else:
+            residual[ts] = max(0.0, value)
+    return residual, gaps
 
 
 @dataclass(frozen=True)
@@ -159,7 +228,15 @@ class LearnedConsumptionForecast:
     history_entity:
         Power sensor whose hourly statistics are the training target.
     history_unit:
-        ``"W"`` (default) or ``"kW"``.
+        ``None`` (default): Home Assistant converts the statistics to watts,
+        whatever unit the sensor has, and energy meters (kWh/Wh) are read
+        as their hourly change.  ``"W"`` or ``"kW"`` reads the hourly mean
+        as is, scaled from that unit (for sensors without a unit).
+    subtract:
+        Further power sensors or energy meters whose hourly values are
+        subtracted from ``history_entity`` before fitting.  With them the
+        model learns a *residual*, e.g. the household meter minus every
+        consumer that has its own forecast, so nothing is counted twice.
     temperature_entity:
         Outdoor temperature sensor (°C) with long-term statistics.  Optional.
     weather_entity:
@@ -186,7 +263,8 @@ class LearnedConsumptionForecast:
         ha_client: Any,
         history_entity: str,
         *,
-        history_unit: str = "W",
+        history_unit: str | None = None,
+        subtract: list[str] | None = None,
         temperature_entity: str | None = None,
         weather_entity: str | None = None,
         history_days: int = 730,
@@ -198,12 +276,14 @@ class LearnedConsumptionForecast:
         model_path: Path | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
-        if history_unit not in ("W", "kW"):
+        if history_unit not in (None, "W", "kW"):
             raise ValueError(f"history_unit must be 'W' or 'kW', got {history_unit!r}")
         self._id = forecast_id
         self._ha = ha_client
         self._history_entity = history_entity
-        self._to_w = 1000.0 if history_unit == "kW" else 1.0
+        self._subtract = [e for e in dict.fromkeys(subtract or []) if e != history_entity]
+        # None → let HA convert to W / Wh; else scale the raw mean ourselves.
+        self._to_w = None if history_unit is None else (1000.0 if history_unit == "kW" else 1.0)
         self._temperature_entity = temperature_entity
         self._weather_entity = weather_entity
         self._history = timedelta(days=history_days)
@@ -234,6 +314,14 @@ class LearnedConsumptionForecast:
     @property
     def forecast_id(self) -> str:
         return self._id
+
+    @property
+    def history_entity(self) -> str:
+        return self._history_entity
+
+    @property
+    def subtract(self) -> list[str]:
+        return list(self._subtract)
 
     @property
     def model(self) -> LearnedModel | None:
@@ -312,17 +400,27 @@ class LearnedConsumptionForecast:
     async def _fetch_history(self) -> tuple[list[DaySample], list[DaySample]]:
         """Fetch hourly statistics; return ``(usable days, excluded days)``."""
         now = self._clock()
-        ids = [self._history_entity]
-        if self._temperature_entity:
+        ids = [self._history_entity, *self._subtract]
+        if self._temperature_entity and self._temperature_entity not in ids:
             ids.append(self._temperature_entity)
         ids += [r.entity for r in self._exclude_when if r.entity not in ids]
-        stats = await self._ha.get_statistics(ids, start=now - self._history, period="hour")
+        if self._to_w is None:
+            stats = await self._ha.get_statistics(
+                ids, start=now - self._history, period="hour",
+                types=_STAT_TYPES, units=_STAT_UNITS,
+            )
+            scale = 1.0
+        else:
+            stats = await self._ha.get_statistics(ids, start=now - self._history, period="hour")
+            scale = self._to_w
 
-        power = {
-            row["start"]: row["mean"] * self._to_w
-            for row in stats.get(self._history_entity, [])
-            if row.get("mean") is not None
-        }
+        power = hourly_watts(stats.get(self._history_entity, []), scale)
+        gaps: set[datetime] = set()
+        if self._subtract:
+            power, gaps = residual_watts(
+                power,
+                {e: hourly_watts(stats.get(e, []), scale) for e in self._subtract},
+            )
         temp = None
         if self._temperature_entity:
             temp = {
@@ -330,7 +428,7 @@ class LearnedConsumptionForecast:
                 for row in stats.get(self._temperature_entity, [])
                 if row.get("mean") is not None
             }
-        excluded = {
+        excluded = gaps | {
             ts for ts in power if any(r.contains(ts) for r in self._exclude)
         }
         for rule in self._exclude_when:
@@ -407,6 +505,7 @@ class LearnedConsumptionForecast:
         return {
             "id": self._id,
             "history_entity": self._history_entity,
+            "subtract": list(self._subtract),
             "temperature_entity": self._temperature_entity,
             "weather_entity": self._weather_entity,
             "status": "fitted" if model else ("fallback" if self._fallback else "no_model"),

@@ -29,6 +29,7 @@ from ..core.topology import TopologyNode, build_topology
 from ..plugins import registry as plugin_registry
 from ..plugins._homeassistant.client import HAClient
 from ..plugins._iobroker.pool import IoBrokerConnectionPool
+from .forecast_config import effective_forecast_configs
 
 _log = logging.getLogger(__name__)
 
@@ -126,10 +127,9 @@ def build_device_forecast_map(
         ctx = BuildContext(backends=app_config.backends)
 
     providers: dict[str, object] = {}
-    for device_id, cfg in app_config.devices.items():
-        forecast_cfg = cfg.get("forecast")
-        if not forecast_cfg or not isinstance(forecast_cfg, dict):
-            continue
+    # Default learning for basic consumers and ``subtract: [auto]`` are
+    # applied here (see ``forecast_config``).
+    for device_id, forecast_cfg in effective_forecast_configs(app_config).items():
         try:
             provider = plugin_registry.build_forecast(f"{device_id}_forecast", forecast_cfg, ctx)
             if provider is not None:
