@@ -144,6 +144,23 @@ class TestBatteries:
         assert second.uncontrolled_cost == pytest.approx(0.36 / 3, abs=1e-6)
         assert second.saving == pytest.approx(0.12 - 0.40, abs=1e-6)
 
+    def test_negative_household_reading_without_pv_is_not_stored(self) -> None:
+        """Grid meter and wallbox sampled at different moments can make the
+        household look like it exports at night — that is no PV surplus."""
+        tracker = SavingsTracker([BAT], step_minutes=60)
+        samples = [
+            LiveSample(**{**_sample(m, -0.5).__dict__, "pv_kw": 0.0}) for m in range(0, 62)
+        ]
+        _run(tracker, samples)
+        assert tracker.state.unc["bat"].stored_kwh == pytest.approx(MIN)
+        # With measured PV the surplus is stored as before, up to the PV.
+        tracker = SavingsTracker([BAT], step_minutes=60)
+        samples = [
+            LiveSample(**{**_sample(m, -0.5).__dict__, "pv_kw": 0.3}) for m in range(0, 62)
+        ]
+        _run(tracker, samples)
+        assert tracker.state.unc["bat"].stored_kwh == pytest.approx(MIN + 0.3 * 61 / 60)
+
     def test_uncontrolled_battery_does_not_cover_the_separately_billed_load(self) -> None:
         tracker = SavingsTracker([BAT], step_minutes=60)
         hp = [(1.0, 0.18)]  # heat pump 1 kW on its own tariff
@@ -370,6 +387,7 @@ class TestServerWiring:
             )
         )
         app._grid_meter_id = "grid"
+        app._pv_device_id = None
         app._poll_interval_s = 5.0
         app._plan_interval_s = 900.0
         app._storage_constraints = [BAT]

@@ -255,6 +255,11 @@ class LiveSample:
     export_price: float
     cost_basis: Mapping[str, float] = field(default_factory=dict)
     """Only used to start a battery's ledgers (value = stored × basis)."""
+    pv_kw: float | None = None
+    """Measured PV production (≥ 0), ``None`` if unknown.  Caps the surplus
+    the uncontrolled house can store: a household reading below zero without
+    PV (e.g. grid meter and wallbox sampled at different moments while a car
+    draws 11 kW) is measurement skew, not free energy."""
 
 
 @dataclass
@@ -584,6 +589,8 @@ class SavingsTracker:
 
         # PV surplus: batteries first (configuration order) …
         surplus = max(0.0, -household)
+        if sample.pv_kw is not None:
+            surplus = min(surplus, max(0.0, sample.pv_kw) * hours)
         for device_id in self._batteries:
             if device_id not in led or surplus <= 1e-12:
                 continue

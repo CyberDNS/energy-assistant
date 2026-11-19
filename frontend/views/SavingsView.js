@@ -122,45 +122,51 @@ export default defineComponent({
     const savingTitle = computed(() =>
       slots.value != null ? '15 min' : bucketLabel.value)
 
-    const kw = (kwhVal, hours) => (kwhVal == null || !hours ? null : kwhVal / hours)
     const storedText = house => (slots.value ?? []).map(r => {
       const d = r.stored_detail?.[house] ?? {}
       return Object.entries(d).map(([k, v]) => `${k}: ${v.toFixed(2)} kWh`).join('<br>')
     })
+    const priceTrace = () => ({
+      name: 'Import price', mode: 'lines', x: slotX.value, yaxis: 'y2',
+      y: (slots.value ?? []).map(s => s.import_price),
+      line: { shape: 'hv', width: 1.3, color: C_PRICE, dash: 'dot' },
+      hovertemplate: '%{x|%H:%M}  %{y:.3f} €/kWh<extra>Import price</extra>',
+    })
 
-    const detailTraces = computed(() => {
+    // Batteries: stored energy of both houses; the gap between them is the
+    // energy the plan held back (or used earlier) — shaded.
+    const batteryTraces = computed(() => {
       const r = slots.value ?? []
-      const xs = slotX.value
-      const line = (extra) => ({ mode: 'lines', x: xs, line: { shape: 'hv', width: 2 }, ...extra })
-      const traces = [
-        line({ name: 'Stored — real', y: r.map(s => s.real_stored_kwh),
+      return [
+        { name: 'Uncontrolled', mode: 'lines', x: slotX.value, y: r.map(s => s.uncontrolled_stored_kwh),
+          line: { shape: 'hv', width: 2, color: C_UNCTRL, dash: 'dash' }, customdata: storedText('uncontrolled'),
+          hovertemplate: '%{x|%H:%M}  %{y:.2f} kWh<br>%{customdata}<extra>Uncontrolled</extra>' },
+        { name: 'Real (shaded: difference)', mode: 'lines', x: slotX.value, y: r.map(s => s.real_stored_kwh),
+          fill: 'tonexty', fillcolor: 'rgba(107,123,181,.18)',
           line: { shape: 'hv', width: 2.5, color: C_REAL }, customdata: storedText('real'),
-          hovertemplate: '%{x|%H:%M}  %{y:.2f} kWh<br>%{customdata}<extra>Stored — real</extra>' }),
-        line({ name: 'Stored — uncontrolled', y: r.map(s => s.uncontrolled_stored_kwh),
-          line: { shape: 'hv', width: 2, color: C_UNCTRL, dash: 'dash' },
-          customdata: storedText('uncontrolled'),
-          hovertemplate: '%{x|%H:%M}  %{y:.2f} kWh<br>%{customdata}<extra>Stored — uncontrolled</extra>' }),
-        line({ name: 'Import price', y: r.map(s => s.import_price), yaxis: 'y2',
-          line: { shape: 'hv', width: 1.2, color: C_PRICE, dash: 'dot' },
-          hovertemplate: '%{x|%H:%M}  %{y:.3f} €/kWh<extra>Import price</extra>' }),
-        line({ name: 'Battery — real', y: r.map(s => kw(s.real_battery_kwh, s.hours)), yaxis: 'y3',
-          line: { shape: 'hv', width: 2, color: C_REAL },
-          hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra>Battery — real</extra>' }),
-        line({ name: 'Battery — uncontrolled', y: r.map(s => kw(s.uncontrolled_battery_kwh, s.hours)),
-          yaxis: 'y3', line: { shape: 'hv', width: 2, color: C_UNCTRL, dash: 'dash' },
-          hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra>Battery — uncontrolled</extra>' }),
+          hovertemplate: '%{x|%H:%M}  %{y:.2f} kWh<br>%{customdata}<extra>Real</extra>' },
+        priceTrace(),
       ]
-      if (r.some(s => (s.real_ev_kwh ?? 0) > 0 || (s.uncontrolled_ev_kwh ?? 0) > 0)) {
-        traces.push(
-          line({ name: 'Car — real', y: r.map(s => kw(s.real_ev_kwh, s.hours)), yaxis: 'y4',
-            line: { shape: 'hv', width: 2, color: C_CAR },
-            hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra>Car — real</extra>' }),
-          line({ name: 'Car — uncontrolled', y: r.map(s => kw(s.uncontrolled_ev_kwh, s.hours)),
-            yaxis: 'y4', line: { shape: 'hv', width: 2, color: C_CAR, dash: 'dash' },
-            hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra>Car — uncontrolled</extra>' }),
-        )
-      }
-      return traces
+    })
+
+    // Cars: energy charged since the start of the window — same energy,
+    // different timing; the shaded gap is energy one car got earlier.
+    const hasCars = computed(() => (slots.value ?? []).some(
+      s => (s.real_ev_kwh ?? 0) > 0.01 || (s.uncontrolled_ev_kwh ?? 0) > 0.01))
+    const carTraces = computed(() => {
+      const r = slots.value ?? []
+      return [
+        { name: 'Uncontrolled car', mode: 'lines', x: slotX.value,
+          y: cumulative(r.map(s => s.uncontrolled_ev_kwh ?? 0)),
+          line: { shape: 'hv', width: 2, color: C_CAR, dash: 'dash' },
+          hovertemplate: '%{x|%H:%M}  %{y:.1f} kWh<extra>Uncontrolled car</extra>' },
+        { name: 'Real car (shaded: difference)', mode: 'lines', x: slotX.value,
+          y: cumulative(r.map(s => s.real_ev_kwh ?? 0)),
+          fill: 'tonexty', fillcolor: 'rgba(208,138,46,.18)',
+          line: { shape: 'hv', width: 2.5, color: C_CAR },
+          hovertemplate: '%{x|%H:%M}  %{y:.1f} kWh<extra>Real car</extra>' },
+        priceTrace(),
+      ]
     })
 
     const cumulativeTraces = computed(() => [{
@@ -192,31 +198,32 @@ export default defineComponent({
     const savingLayout     = computed(() => layout({ showlegend: false }))
     const cumulativeLayout = computed(() => layout({ showlegend: false }))
     const costLayout       = computed(() => layout())
-    const detailLayout     = computed(() => {
-      const base = layout()
-      return {
-        ...base,
-        xaxis: { ...base.xaxis, anchor: 'y3' },
-        yaxis:  { title: 'kWh stored', domain: [0.56, 1], rangemode: 'tozero' },
-        yaxis2: { title: '€/kWh', overlaying: 'y', side: 'right', showgrid: false,
-                  rangemode: 'tozero' },
-        yaxis3: { title: 'battery kW (+ charge)', domain: [0, 0.44], zeroline: true,
-                  zerolinecolor: '#9aa5a0' },
-        // Cars draw ~10× the battery power: own scale, same panel.
-        yaxis4: { title: 'car kW', overlaying: 'y3', side: 'right', showgrid: false,
-                  rangemode: 'tozero', titlefont: { color: C_CAR }, tickfont: { color: C_CAR } },
-        legend: { orientation: 'h', y: -0.14, font: { size: 10 } },
-        margin: { t: 10, r: 60, b: 60, l: 50 },
-      }
+    // Price on its own right axis, scaled to its range (not from 0) so the
+    // variation over the window stays visible.
+    const priceAxis = computed(() => {
+      const p = (slots.value ?? []).map(s => s.import_price).filter(v => v != null)
+      if (!p.length) return { overlaying: 'y', side: 'right', showgrid: false }
+      const lo = Math.min(...p), hi = Math.max(...p), pad = (hi - lo) * 0.6 || 0.02
+      return { title: '€/kWh', overlaying: 'y', side: 'right', showgrid: false,
+               tickformat: '.2f', range: [lo - 3 * pad, hi + pad] }
     })
+    const slotLayout = yTitle => computed(() => ({
+      ...layout(),
+      yaxis: { title: yTitle, rangemode: 'tozero' },
+      yaxis2: priceAxis.value,
+      legend: { orientation: 'h', y: -0.22, font: { size: 10 } },
+      margin: { t: 10, r: 60, b: 60, l: 50 },
+    }))
+    const batteryLayout = slotLayout('kWh stored')
+    const carLayout     = slotLayout('kWh charged')
 
     onMounted(() => load(range.value))
 
     return {
       RANGES, range, pending, data, loaded, error, load, eur, kwh,
       buckets, totals, allTime, pct, stored, bucketLabel,
-      savingTraces, cumulativeTraces, costTraces, detailTraces, slots, savingTitle,
-      savingLayout, cumulativeLayout, costLayout, detailLayout,
+      savingTraces, cumulativeTraces, costTraces, batteryTraces, carTraces, hasCars,
+      slots, savingTitle, savingLayout, cumulativeLayout, costLayout, batteryLayout, carLayout,
     }
   },
 
@@ -278,10 +285,19 @@ export default defineComponent({
           <PlotlyChart :traces="savingTraces" :layout="savingLayout" height="280px" />
         </div>
 
-        <div class="panel" style="margin-bottom:10px" v-if="slots && slots.length">
-          <h2>Batteries and cars — real vs. uncontrolled</h2>
-          <PlotlyChart :traces="detailTraces" :layout="detailLayout" height="440px" />
-        </div>
+        <template v-if="slots && slots.length">
+          <div class="panel" style="margin-bottom:10px">
+            <h2>Batteries — stored energy, real vs. uncontrolled</h2>
+            <p class="savings-sub">Shaded: the difference — energy the plan held back for later
+              (real above) or used earlier (real below)</p>
+            <PlotlyChart :traces="batteryTraces" :layout="batteryLayout" height="280px" />
+          </div>
+          <div class="panel" style="margin-bottom:10px" v-if="hasCars">
+            <h2>Cars — energy charged, real vs. uncontrolled</h2>
+            <p class="savings-sub">Same energy, different timing; shaded: energy one car got earlier</p>
+            <PlotlyChart :traces="carTraces" :layout="carLayout" height="240px" />
+          </div>
+        </template>
 
         <div class="row2-eq">
           <div class="panel">
