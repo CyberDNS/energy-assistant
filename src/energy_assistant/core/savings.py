@@ -32,8 +32,16 @@ counted in either house until it is used.
 Cars work the same way with a FIFO ledger per charging session: energy one
 car got earlier than the other is held at its cost, and once both cars have
 charged the same kWh the difference in what they paid for it is booked.
-Energy the real car gets beyond what the uncontrolled car charges (or that is
-still unmatched when the car is unplugged) is neutral.
+Energy the real car gets beyond what the uncontrolled car charges is neutral.
+
+A car unplugged before its plan's deadline ends the session early.  The
+uncontrolled car is then recalculated backwards from the unplug moment: it
+charges the energy the real car got (up to the plan's target) as late as
+possible before unplugging, at full power, in the slots it had not used yet.
+Those slots are priced at their measured import price and corrected
+afterwards (``SavingsTracker.pop_corrections``), so the saving shows where
+the uncontrolled car would have charged.  This ignores that the uncontrolled
+battery or PV might have covered part of that energy.
 
 Device behaviour both houses share
 ----------------------------------
@@ -172,6 +180,11 @@ class EvSession:
     real_queue: list[list[float]] = field(default_factory=list)
     """``[kWh, €]`` the real car charged that is not matched yet (FIFO)."""
     unc_queue: list[list[float]] = field(default_factory=list)
+    plugged_at: str | None = None
+    """ISO time the session started (plug-in)."""
+    unc_by_slot: dict[str, float] = field(default_factory=dict)
+    """Energy the uncontrolled car charged per slot (ISO start), so a
+    recalculation at an early unplug knows which slots are still free."""
 
     @property
     def matched_kwh(self) -> float:
@@ -298,6 +311,20 @@ class SavingsSlot:
         return self.price_hours / self.hours if self.hours > 0 else None
 
 
+@dataclass(frozen=True)
+class SlotCorrection:
+    """Change to an already closed slot (car recalculated at early unplug)."""
+
+    start: datetime
+    uncontrolled_ev_kwh: float
+    uncontrolled_cost: float
+    real_cost: float
+
+    @property
+    def ev_saving(self) -> float:
+        return self.uncontrolled_cost - self.real_cost
+
+
 @dataclass
 class _HouseResult:
     bill: float
@@ -391,6 +418,15 @@ class SavingsTracker:
         self.state = state or SavingsState()
         self._slot: SavingsSlot | None = None
         self._last_ts: datetime | None = None
+        # Import price of recent closed slots (for early-unplug recalculation)
+        # and corrections to closed slots waiting to be persisted.
+        self._prices: dict[datetime, float] = {}
+        self._corrections: list[SlotCorrection] = []
+
+    def pop_corrections(self) -> list[SlotCorrection]:
+        """Corrections to already closed slots since the last call."""
+        out, self._corrections = self._corrections, []
+        return out
 
     # -- charge plans -------------------------------------------------------
 
@@ -449,6 +485,7 @@ class SavingsTracker:
         hours = gap_s / 3600.0
         slot = self._slot
         slot.hours += hours
+        slot.price_hours += sample.import_price * hours
 
         secondary = [(max(0.0, kw) * hours, price) for kw, price in sample.secondary]
         secondary_total = sum(load for load, _ in secondary)
@@ -485,7 +522,7 @@ class SavingsTracker:
         )
 
         # ── Uncontrolled house: simulated flows ───────────────────────────
-        self._update_sessions(sample)
+        self._update_sessions(sample, previous)
         u_charge, u_discharge, u_ev = self._simulate(sample, household, forced, hours)
         unc = _house_costs(
             household, secondary, *prices, self._batteries, self.state.unc,
@@ -502,6 +539,8 @@ class SavingsTracker:
             if u_ev.get(device_id, 0.0) > 0:
                 ev.unc_kwh += u_ev[device_id]
                 ev.unc_queue.append([u_ev[device_id], unc.ev_cost.get(device_id, 0.0)])
+                key = slot.start.isoformat()
+                ev.unc_by_slot[key] = ev.unc_by_slot.get(key, 0.0) + u_ev[device_id]
             matched = ev.matched_kwh - before
             if matched > 0:
                 ev_real_booked += _release(ev.real_queue, matched)
@@ -516,7 +555,6 @@ class SavingsTracker:
         slot.uncontrolled_battery_kwh += sum(u_charge.values()) - sum(u_discharge.values())
         slot.real_ev_kwh += sum(real_ev.values())
         slot.uncontrolled_ev_kwh += sum(u_ev.values())
-        slot.price_hours += sample.import_price * hours
 
         self._sync_real(sample)
         self._housekeeping(
@@ -550,13 +588,70 @@ class SavingsTracker:
             if stored is not None:
                 led.stored_kwh = max(0.0, stored)
 
-    def _update_sessions(self, sample: LiveSample) -> None:
-        """Open a session at plug-in, drop it (unbooked rest) at unplug."""
+    def _update_sessions(self, sample: LiveSample, previous: datetime) -> None:
+        """Open a session at plug-in; close it at unplug."""
         for device_id, ev in sample.ev.items():
             if ev.plugged is True:
-                self.state.evs.setdefault(device_id, EvSession())
+                session = self.state.evs.setdefault(device_id, EvSession())
+                if session.plugged_at is None:
+                    session.plugged_at = previous.isoformat()
             elif ev.plugged is False:
-                self.state.evs.pop(device_id, None)
+                session = self.state.evs.pop(device_id, None)
+                if session is not None:
+                    self._settle_early_unplug(session, previous, ev.max_kw, sample.import_price)
+
+    def _settle_early_unplug(
+        self, ev: EvSession, unplugged: datetime, max_kw: float, fallback_price: float
+    ) -> None:
+        """Recalculate the uncontrolled car of a session that ended before its
+        deadline: it charges the energy the real car got (up to the plan's
+        target) as late as possible before *unplugged*.  Booked into the open
+        slot or emitted as corrections for closed slots."""
+        deadline = ev.deadline_dt()
+        if ev.mode != "deadline" or deadline is None or unplugged >= deadline or max_kw <= 0:
+            return
+        unmatched_real = sum(q[0] for q in ev.real_queue)
+        missing = min(ev.real_kwh, ev.need_kwh) - ev.unc_kwh
+        if missing <= 1e-6 or unmatched_real <= 1e-9:
+            return
+        missing = min(missing, unmatched_real)
+        real_cost_per_kwh = sum(q[1] for q in ev.real_queue) / unmatched_real
+        plugged_at = (
+            datetime.fromisoformat(ev.plugged_at) if ev.plugged_at else unplugged - timedelta(days=1)
+        )
+
+        known = [*self._prices.values()]
+        if self._slot is not None and self._slot.import_price is not None:
+            known.append(self._slot.import_price)
+        default_price = sum(known) / len(known) if known else fallback_price
+
+        # Walk back from the unplug moment through the slots, filling the
+        # capacity the uncontrolled car did not use.
+        t, rest = unplugged, missing
+        while rest > 1e-9 and t > plugged_at:
+            start = slot_start(t - timedelta(microseconds=1), self._step_minutes)
+            lo = max(start, plugged_at)
+            hours = (t - lo).total_seconds() / 3600.0
+            free = max(0.0, max_kw * hours - ev.unc_by_slot.get(start.isoformat(), 0.0))
+            kwh = min(rest, free)
+            t = lo
+            if kwh <= 0:
+                continue
+            rest -= kwh
+            if self._slot is not None and start == self._slot.start:
+                price = self._slot.import_price or default_price
+                unc_cost, real_cost = kwh * price, kwh * real_cost_per_kwh
+                self._slot.uncontrolled_ev_kwh += kwh
+                self._slot.uncontrolled_cost += unc_cost
+                self._slot.uncontrolled_bill += unc_cost
+                self._slot.real_cost += real_cost
+                self._slot.ev_saving += unc_cost - real_cost
+            else:
+                price = self._prices.get(start, default_price)
+                self._corrections.append(SlotCorrection(
+                    start=start, uncontrolled_ev_kwh=kwh,
+                    uncontrolled_cost=kwh * price, real_cost=kwh * real_cost_per_kwh,
+                ))
 
     def _simulate(
         self,
@@ -678,6 +773,10 @@ class SavingsTracker:
         if slot is None or slot.start == slot_start(now, self._step_minutes):
             return []
         self._slot = None
+        if slot.import_price is not None:
+            self._prices[slot.start] = slot.import_price
+            cutoff = now - timedelta(days=3)
+            self._prices = {k: v for k, v in self._prices.items() if k >= cutoff}
         return [slot] if slot.hours > 0 else []
 
 
