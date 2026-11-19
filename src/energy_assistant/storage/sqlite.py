@@ -602,6 +602,26 @@ class SqliteStorageBackend:
             )
         return result
 
+    async def query_power_soc(
+        self,
+        device_id: str,
+        start: datetime,
+        end: datetime,
+    ) -> list[tuple[datetime, float | None, float | None]]:
+        """``(timestamp, power_w, soc_pct)`` for *device_id* in ``[start, end]``.
+
+        A light version of :meth:`query` for long windows (a week of polls is
+        ~200k rows): plain tuples, no ``Measurement`` objects.
+        """
+        assert self._db is not None, "Call start() before query_power_soc()"
+        async with self._db.execute(
+            "SELECT timestamp, power_w, soc_pct FROM measurements "
+            "WHERE device_id = ? AND timestamp BETWEEN ? AND ? ORDER BY timestamp",
+            (device_id, _utc_ts(start), _utc_ts(end)),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [(datetime.fromisoformat(r[0]), r[1], r[2]) for r in rows]
+
     async def save_ledger_state(
         self,
         device_id: str,

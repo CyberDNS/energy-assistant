@@ -309,3 +309,13 @@ th.num, td.num { text-align:right; font-variant-numeric:tabular-nums; }
   /* six tiles read better wrapped than in the scrolling KPI row */
   .kpis.savings-kpis { display:grid; grid-template-columns:1fr 1fr; overflow:visible; }
 }
+.learn-cats { display:flex; gap:4px; flex-wrap:wrap; margin-bottom:6px; }
+.learn-cat { padding:6px 14px; border:1px solid var(--line); background:var(--card); border-radius:8px; cursor:pointer; font-size:.88rem; font-weight:600; color:var(--muted); }
+.learn-cat.active { border-color:var(--accent); color:var(--accent); box-shadow:inset 0 -3px 0 var(--accent); }
+.learn-count { display:inline-block; min-width:18px; padding:0 5px; margin-left:4px; border-radius:9px; background:var(--line); color:var(--ink); font-size:.72rem; text-align:center; }
+.learn-about { color:var(--muted); font-size:.8rem; margin-bottom:10px; max-width:900px; }
+.learn-dot { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:6px; vertical-align:middle; }
+.learn-dot.dot-ok { background:var(--ok); }
+.learn-dot.dot-warn { background:var(--warn); }
+.learn-dot.dot-off { background:var(--bad); }
+.range-btn.active .learn-dot { box-shadow:0 0 0 1.5px #fff; }

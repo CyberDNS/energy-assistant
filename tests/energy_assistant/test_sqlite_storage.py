@@ -175,6 +175,25 @@ class TestSqliteStorageTimestampOffsets:
         assert [r.timestamp for r in rows] == [ts]
         await backend.stop()
 
+    async def test_query_power_soc_returns_tuples_in_order(self, tmp_path: Path) -> None:
+        backend = SqliteStorageBackend(tmp_path / "h.db")
+        await backend.start()
+        t0 = datetime(2026, 11, 17, 16, 0, tzinfo=timezone.utc)
+        for i, (p, soc) in enumerate([(100.0, 10.0), (None, 11.0), (-50.0, None)]):
+            await backend.write(Measurement(
+                device_id="b", timestamp=t0 + timedelta(seconds=3 * i), power_w=p, soc_pct=soc,
+            ))
+        await backend.write(Measurement(device_id="other", timestamp=t0, power_w=1.0))
+
+        rows = await backend.query_power_soc("b", t0, t0 + timedelta(minutes=1))
+
+        assert rows == [
+            (t0, 100.0, 10.0),
+            (t0 + timedelta(seconds=3), None, 11.0),
+            (t0 + timedelta(seconds=6), -50.0, None),
+        ]
+        await backend.stop()
+
     async def test_mixed_offsets_come_back_in_chronological_order(self, tmp_path: Path) -> None:
         backend = SqliteStorageBackend(tmp_path / "h.db")
         await backend.start()

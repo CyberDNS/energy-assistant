@@ -49,6 +49,10 @@ zendure:
   max_discharge_kw: 1.2
   maintenance_charge_w: 300
   # smart_mode: true   # keep limit writes in RAM instead of flash
+  # charge_efficiency: 0.95       # per direction; defaults 0.95
+  # discharge_efficiency: 0.95
+  # efficiency: learned           # plan with the round trip learned from measured
+  #                               # cycles once confident (default: configured)
 
 zendure_iobroker:
   # Find hub_id and device_serial: python scripts/probe_iobroker.py zendure
