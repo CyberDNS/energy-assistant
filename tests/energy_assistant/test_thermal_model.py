@@ -306,6 +306,7 @@ class TestApi:
         app._cfg = AppConfig()
         app._forecast_providers = []
         app._thermal_learners = {"aquarium": learner}
+        app._efficiency_learners = {}
         app._horizon = timedelta(hours=24)
 
         async def _no_plan() -> None:

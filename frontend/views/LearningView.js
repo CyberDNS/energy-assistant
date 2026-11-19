@@ -13,7 +13,21 @@ const C = {
   running:  'rgba(42,120,214,.16)',  // thermal: share of a window the device ran
   ambient:  '#8d9891',  // thermal: ambient input
   limit:    '#b8574a',  // thermal: thresholds
+  power:    'rgba(42,120,214,.30)',  // efficiency: battery power
+  cycle:    'rgba(235,104,52,.10)',  // efficiency: closed cycles
+  configured: '#8d9891',             // efficiency: configured value
 }
+
+// One category per learning method.  Order = order of the tabs.
+const CATEGORIES = [
+  { id: 'consumption', label: 'Consumption',
+    about: 'Daily energy per consumer, from the outdoor temperature and the kind of day, spread over the day with a learned hourly shape. Feeds the consumption forecast.' },
+  { id: 'thermal', label: 'Min/Max devices',
+    about: 'Devices kept between a minimum and a maximum (aquarium, fridge, AC): how fast the value drifts while idle and moves while running. Lets the planner shift their runs.' },
+  { id: 'storage', label: 'Batteries',
+    about: 'Round-trip efficiency from closed cycles (rest to rest at the same SoC): energy out ÷ energy in. Tells the planner what arbitrage really pays.' },
+]
+const categoryOf = i => i.category ?? (i.kind === 'thermal' ? 'thermal' : i.kind === 'efficiency' ? 'storage' : 'consumption')
 
 const RANGES = [
   { days: 30,  label: '30 d' },
@@ -50,21 +64,35 @@ export default defineComponent({
   setup() {
     const items    = ref([])
     const selected = ref(null)
+    const category = ref(null)
     const loading  = ref(true)
     const error    = ref('')
     const busy     = ref(false)
     const rangeDays = ref(90)
 
-    const item  = computed(() => items.value.find(i => i.id === selected.value) ?? items.value[0] ?? null)
+    const categories = computed(() => CATEGORIES
+      .map(c => ({ ...c, items: items.value.filter(i => categoryOf(i) === c.id) }))
+      .filter(c => c.items.length))
+    const cat = computed(() => categories.value.find(c => c.id === category.value) ?? categories.value[0] ?? null)
+    const item  = computed(() => cat.value?.items.find(i => i.id === selected.value) ?? cat.value?.items[0] ?? null)
+    function pickCategory(id) {
+      category.value = id
+      selected.value = categories.value.find(c => c.id === id)?.items[0]?.id ?? null
+    }
+    // Green: the learned model is what planning uses; amber: learning but not (yet) used.
+    const itemDot = i => (['fitted', 'learned'].includes(i.status) ? 'dot-ok'
+      : ['fallback', 'collecting', 'observing'].includes(i.status) ? 'dot-warn' : 'dot-off')
     const model = computed(() => item.value?.model ?? null)
     const isTemp = computed(() => model.value?.mode === 'temperature')
     const isThermal = computed(() => item.value?.kind === 'thermal')
-    const itemLabel = i => (i.kind === 'thermal' ? i.label : i.id.replace(/_forecast$/, ''))
+    const isEfficiency = computed(() => item.value?.kind === 'efficiency')
+    const itemLabel = i => (i.label ?? i.id.replace(/_forecast$/, ''))
 
     async function load() {
       try {
         items.value = await fetchLearned()
-        if (!items.value.some(i => i.id === selected.value)) selected.value = items.value[0]?.id ?? null
+        if (!categories.value.some(c => c.id === category.value)) category.value = categories.value[0]?.id ?? null
+        if (!cat.value?.items.some(i => i.id === selected.value)) selected.value = cat.value?.items[0]?.id ?? null
         error.value = ''
       } catch (e) {
         error.value = String(e.message ?? e)
@@ -109,11 +137,20 @@ export default defineComponent({
       return `${fmt(l.all)} kWh/day`
     })
 
-    const fittedAt = computed(() =>
-      model.value?.fitted_at ? new Date(model.value.fitted_at).toLocaleString() : '—')
+    const fittedAt = computed(() => {
+      const at = model.value?.fitted_at ?? item.value?.fitted_at
+      return at ? new Date(at).toLocaleString() : '—'
+    })
 
     const statusPill = computed(() => {
       const s = item.value?.status
+      if (isEfficiency.value) {
+        const est = item.value.estimate
+        if (s === 'learned')    return { cls: 'pill-ok',   text: 'Learned value in plan' }
+        if (s === 'observing')  return { cls: 'pill-warn', text: 'Learned — plan uses configured' }
+        if (s === 'collecting') return { cls: 'pill-warn', text: `Collecting cycles (${est?.cycles ?? 0} of ${item.value.min_cycles})` }
+        return { cls: 'pill-off', text: 'No closed cycle yet' }
+      }
       if (isThermal.value) {
         return s === 'learned'
           ? { cls: 'pill-ok', text: 'Learned model active' }
@@ -282,11 +319,87 @@ export default defineComponent({
       }
     })
 
+    // ── battery efficiency ───────────────────────────────────────────────
+    const pct = (v, dec = 1) => (v == null ? '—' : `${(v * 100).toFixed(dec)} %`)
+    const est = computed(() => item.value?.estimate ?? null)
+    const cyclesNewestFirst = computed(() => [...(item.value?.cycles ?? [])].reverse())
+    // Cycle ends with a day of padding on both sides, so a single cycle
+    // doesn't fill the axis and the reference lines stay visible.
+    const cycleSpan = computed(() => {
+      const ends = (item.value?.cycles ?? []).map(c => new Date(c.end).getTime())
+      if (!ends.length) return undefined
+      const day = 86400000
+      return [toPlotlyMinute(new Date(Math.min(...ends) - day).toISOString()),
+              toPlotlyMinute(new Date(Math.max(...ends) + day).toISOString())]
+    })
+    const cycleTraces = computed(() => {
+      const cyc = item.value?.cycles ?? []
+      if (!cyc.length) return []
+      const x = cyc.map(c => toPlotlyMinute(c.end))
+      const span = cycleSpan.value
+      const flat = (v, name, color, dash) => ({
+        name, type: 'scatter', mode: 'lines', x: span, y: [v * 100, v * 100],
+        line: { color, width: 2, dash }, hoverinfo: 'skip',
+      })
+      const traces = [{
+        name: 'Cycle', type: 'scatter', mode: 'markers', x, y: cyc.map(c => c.round_trip * 100),
+        marker: { color: C.actual, size: cyc.map(c => 6 + 4 * Math.sqrt(c.energy_in_kwh)), opacity: 0.75 },
+        customdata: cyc.map(c => [c.energy_in_kwh, c.energy_out_kwh, c.soc_pct]),
+        hovertemplate: '%{x|%d.%m. %H:%M} · %{y:.1f} %<br>in %{customdata[0]:.2f} kWh · out %{customdata[1]:.2f} kWh'
+          + ' · at %{customdata[2]:.0f} % SoC<extra>Cycle</extra>',
+      }]
+      if (est.value) traces.push(flat(est.value.round_trip, 'Learned', C.model, 'solid'))
+      traces.push(flat(item.value.configured.round_trip, 'Configured', C.configured, 'dash'))
+      return traces
+    })
+    const cycleLayout = computed(() => {
+      const cyc = item.value?.cycles ?? []
+      const vals = [...cyc.map(c => c.round_trip), item.value?.configured?.round_trip ?? 1]
+      const lo = Math.max(0, Math.floor(Math.min(...vals) * 20) / 20 - 0.05)
+      return {
+        xaxis: { type: 'date', tickformat: '%d.%m.', range: cycleSpan.value },
+        yaxis: { title: '% returned', range: [lo * 100, 102] },
+        hovermode: 'closest',
+      }
+    })
+    const socTraces = computed(() => {
+      const rows = item.value?.series ?? []
+      if (!rows.length) return []
+      const x = rows.map(r => toPlotlyMinute(r.t))
+      return [
+        { name: 'Power (kW, + charging)', type: 'bar', x, y: rows.map(r => r.power_w / 1000), yaxis: 'y2',
+          marker: { color: C.power }, width: 15 * 60000, offset: 0,
+          hovertemplate: '%{x|%d.%m. %H:%M} · %{y:.2f} kW<extra>Power</extra>' },
+        { name: 'SoC', type: 'scatter', mode: 'lines', x, y: rows.map(r => r.soc_pct),
+          line: { color: C.actual, width: 2, shape: 'hv' },
+          hovertemplate: '%{x|%d.%m. %H:%M} · %{y:.0f} %<extra>SoC</extra>' },
+      ]
+    })
+    const socLayout = computed(() => {
+      const rows = item.value?.series ?? []
+      const first = rows.length ? new Date(rows[0].t).getTime() : 0
+      const shapes = (item.value?.cycles ?? [])
+        .filter(c => new Date(c.end).getTime() >= first)
+        .map(c => ({ type: 'rect', xref: 'x', yref: 'paper', y0: 0, y1: 1,
+                     x0: toPlotlyMinute(c.start), x1: toPlotlyMinute(c.end),
+                     fillcolor: C.cycle, line: { width: 0 }, layer: 'below' }))
+      // Symmetric power axis: its zero sits at 50 % SoC.
+      const kw = Math.max(0.5, ...rows.map(r => Math.abs(r.power_w) / 1000)) * 1.05
+      return {
+        xaxis: { type: 'date', tickformat: '%d.%m. %H:%M' },
+        yaxis: { title: 'SoC (%)', range: [0, 100] },
+        yaxis2: { overlaying: 'y', side: 'right', showgrid: false, zeroline: true, range: [-kw, kw], ticksuffix: ' kW' },
+        shapes, bargap: 0, margin: { t: 10, r: 55, b: 60, l: 50 },
+      }
+    })
+
     const excludedDays = computed(() =>
       (item.value?.days ?? []).filter(d => d.status === 'excluded' || d.status === 'outlier').reverse())
 
     return {
       items, selected, item, model, isTemp, isThermal, itemLabel, loading, error, busy, refit, load,
+      categories, cat, pickCategory, itemDot, isEfficiency,
+      pct, est, cyclesNewestFirst, cycleTraces, cycleLayout, socTraces, socLayout,
       tUnit, rate, thermalModes, modeName, thermalForm, thermalTraces, thermalLayout,
       counts, formula, fittedAt, statusPill, fmt,
       scatterTraces, shapeTraces, seriesTraces, forecastTraces, forecastDays, excludedDays,
@@ -299,16 +412,25 @@ export default defineComponent({
       <div v-if="loading" class="panel">Loading…</div>
       <div v-else-if="!items.length" class="panel">
         No learned models configured. Give a consumer device a
-        <code>forecast:</code> section with <code>type: learned</code>, or add a threshold
-        device (aquarium cooler, AC, …), to see it here.
+        <code>forecast:</code> section with <code>type: learned</code>, add a threshold
+        device (aquarium cooler, AC, …) or a battery to see it here.
       </div>
 
       <template v-else-if="item">
+        <div class="learn-cats">
+          <button v-for="c in categories" :key="c.id"
+            :class="['learn-cat', cat.id === c.id ? 'active' : '']"
+            @click="pickCategory(c.id)">
+            {{ c.label }} <span class="learn-count">{{ c.items.length }}</span>
+          </button>
+        </div>
+        <div class="learn-about">{{ cat.about }}</div>
+
         <div class="learn-head">
-          <div class="range-btns" style="margin-bottom:0">
-            <button v-for="i in items" :key="i.id"
+          <div class="range-btns" style="margin-bottom:0; flex-wrap:wrap">
+            <button v-for="i in cat.items" :key="i.id"
               :class="['range-btn', item.id === i.id ? 'active' : '']"
-              @click="selected = i.id">{{ itemLabel(i) }}</button>
+              @click="selected = i.id"><span :class="['learn-dot', itemDot(i)]"></span>{{ itemLabel(i) }}</button>
           </div>
           <span :class="['pill', statusPill.cls]">{{ statusPill.text }}</span>
           <span class="learn-spacer"></span>
@@ -322,7 +444,88 @@ export default defineComponent({
           ⚠ {{ error || item.last_error }}
         </div>
 
-        <template v-if="isThermal">
+        <template v-if="isEfficiency">
+          <div class="kpis">
+            <div class="card">
+              <div class="k">Round trip, learned</div>
+              <div class="v">{{ pct(est?.round_trip) }}</div>
+              <div class="savings-sub" v-if="est">± {{ pct(est.spread) }} between cycles</div>
+            </div>
+            <div class="card">
+              <div class="k">Round trip, configured</div>
+              <div class="v">{{ pct(item.configured.round_trip) }}</div>
+              <div class="savings-sub">{{ pct(item.configured.charge_efficiency, 0) }} charge · {{ pct(item.configured.discharge_efficiency, 0) }} discharge</div>
+            </div>
+            <div class="card">
+              <div class="k">Per direction, learned</div>
+              <div class="v">{{ pct(est?.efficiency) }}</div>
+              <div class="savings-sub">√ round trip, charge = discharge</div>
+            </div>
+            <div class="card">
+              <div class="k">Plan uses</div>
+              <div class="v">{{ pct(item.planned.charge_efficiency) }}</div>
+              <div class="savings-sub">{{ item.mode === 'learned' ? 'efficiency: learned' : 'efficiency: configured' }}</div>
+            </div>
+            <div class="card">
+              <div class="k">Cycles used</div>
+              <div class="v">{{ est?.cycles ?? 0 }}</div>
+              <div class="savings-sub" v-if="est">{{ est.outliers }} outliers · over {{ fmt(est.window_days) }} days</div>
+            </div>
+            <div class="card">
+              <div class="k">Throughput</div>
+              <div class="v">{{ fmt(est?.energy_in_kwh) }} kWh</div>
+              <div class="savings-sub" v-if="est">in · {{ fmt(est.energy_out_kwh) }} kWh out</div>
+            </div>
+          </div>
+
+          <div class="row2">
+            <div class="panel">
+              <h2>Round trip per cycle</h2>
+              <PlotlyChart :traces="cycleTraces" :layout="cycleLayout" height="300px" />
+              <div class="footnote">
+                One dot per closed cycle, at its end; bigger dots moved more energy and weigh more.
+                Learned = all energy out ÷ all energy in, after dropping cycles far from the median.
+              </div>
+            </div>
+            <div class="panel">
+              <h2>Cycles ({{ item.cycles.length }})</h2>
+              <div class="learn-scroll">
+                <table>
+                  <thead><tr><th>From</th><th>To</th><th>SoC</th><th>In</th><th>Out</th><th>Round trip</th></tr></thead>
+                  <tbody>
+                    <tr v-for="c in cyclesNewestFirst" :key="c.start">
+                      <td>{{ new Date(c.start).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) }}</td>
+                      <td>{{ new Date(c.end).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) }}</td>
+                      <td>{{ fmt(c.soc_pct, 0) }} %</td>
+                      <td>{{ fmt(c.energy_in_kwh, 2) }}</td>
+                      <td>{{ fmt(c.energy_out_kwh, 2) }}</td>
+                      <td>{{ pct(c.round_trip) }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="footnote" v-if="!item.cycles.length">
+                No closed cycle yet: the battery has to rest, charge and discharge at least
+                {{ fmt(item.capacity_kwh * 0.15) }} kWh each way, and rest again at the same SoC reading.
+              </div>
+            </div>
+          </div>
+
+          <div class="panel full">
+            <h2>SoC and power — {{ item.label }}</h2>
+            <PlotlyChart :traces="socTraces" :layout="socLayout" height="320px" />
+            <div class="footnote">
+              Shaded: closed cycles. A cycle starts and ends with the battery idle at the same SoC reading, so the stored
+              energy is the same at both ends and SoC calibration errors cancel; cycles with an unexplained SoC jump
+              (BMS re-calibration) are dropped. Power up to {{ fmt(item.standby_w, 0) }} W (standby) is left out.
+              Cycles are kept {{ fmt(item.history_days, 0) }} days. The plan uses the learned value with
+              <code>efficiency: learned</code> on the battery once {{ item.min_cycles }} cycles have charged
+              1.5 × the capacity; the savings accounting always uses the configured values.
+            </div>
+          </div>
+        </template>
+
+        <template v-else-if="isThermal">
           <div class="kpis">
             <div class="card">
               <div class="k">Idle (drift)</div>
