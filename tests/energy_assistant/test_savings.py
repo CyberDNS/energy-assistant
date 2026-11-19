@@ -12,8 +12,9 @@ from pathlib import Path
 
 import pytest
 
-from energy_assistant.core.models import DeviceState, StorageConstraints
+from energy_assistant.core.models import DeviceState, StorageConstraints, ThresholdConstraints
 from energy_assistant.core.savings import (
+    DeviceLive,
     EvLive,
     Ledger,
     LiveSample,
@@ -253,6 +254,7 @@ class TestCars:
         assert corr == SlotCorrection(
             start=T0 + timedelta(hours=1), uncontrolled_ev_kwh=pytest.approx(11.0),
             uncontrolled_cost=pytest.approx(3.30), real_cost=pytest.approx(2.20),
+            component="cp",
         )
         assert corr.ev_saving == pytest.approx(11.0 * (0.30 - 0.20))
         assert tracker.pop_corrections() == []
@@ -291,6 +293,65 @@ class TestCars:
         assert slot.real_cost == pytest.approx(0.80)          # 2 kWh at 0.40
         assert slot.uncontrolled_cost == pytest.approx(0.40)  # 2 kWh at the 0.20 ledger cost
         assert slot.ev_saving == pytest.approx(-0.40)
+
+
+COOLER = ThresholdConstraints(
+    device_id="cooler", bottom_threshold=18.0, top_threshold=20.0, unit="°C",
+    direction="reduces", rated_power_kw=1.0, active_rate_per_h=2.0, drift_rate_per_h=1.0,
+)
+
+
+class TestThresholdDevices:
+    def _sample(self, m: int, on: bool, price: float, value: float = 19.5) -> LiveSample:
+        base = _sample(m, 1.0 if on else 0.0, price=price)
+        return LiveSample(**{**base.__dict__, "devices": {"cooler": DeviceLive(1.0 if on else 0.0, value)}})
+
+    def test_planner_running_early_and_cheap_saves_against_the_thermostat(self) -> None:
+        # Real: the planner runs the cooler for the first 30 min at 0.10.
+        # Uncontrolled: from 19.5 °C it drifts +1 °C/h, hits 20 °C after
+        # 30 min and runs (net −2 °C/h) at 0.30 until 18 °C.
+        tracker = SavingsTracker([BAT], step_minutes=60, devices=[COOLER])
+        samples = [self._sample(m, on=m <= 30, price=0.10 if m <= 30 else 0.30) for m in range(0, 122)]
+        slots = _run(tracker, samples)
+        total = sum(s.saving for s in slots)
+        dev = sum(s.components.get("cooler", 0.0) for s in slots)
+        # 0.5 kWh matched: real paid 0.10, the thermostat 0.30.
+        assert dev == pytest.approx(0.5 * (0.30 - 0.10), abs=0.01)
+        assert total == pytest.approx(sum(sum(s.components.values()) for s in slots))
+        first = slots[0]
+        assert first.devices["cooler"]["real_kwh"] == pytest.approx(0.5, abs=0.02)
+        assert first.devices["cooler"]["unc_kwh"] == pytest.approx(0.5, abs=0.02)
+        assert first.devices["cooler"]["unc_value"] is not None
+
+    def test_thermostat_respects_min_runtime(self) -> None:
+        cooler = COOLER.model_copy(update={"min_runtime_h": 1.0})
+        tracker = SavingsTracker([BAT], step_minutes=60, devices=[cooler])
+        tracker.tick(self._sample(0, on=False, price=0.3, value=20.0))
+        for m in range(1, 50):
+            tracker.tick(self._sample(m, on=False, price=0.3))
+        # Running since minute 0; 18 °C is reached after ~60 min at −2 °C/h,
+        # but not before the 1 h minimum either way — still on at 49 min.
+        assert tracker.state.devices["cooler"].running
+
+    def test_daily_resync_drops_unmatched_energy(self) -> None:
+        tracker = SavingsTracker([BAT], step_minutes=60, devices=[COOLER])
+        for m in range(0, 20):
+            tracker.tick(self._sample(m, on=True, price=0.3))
+        sim = tracker.state.devices["cooler"]
+        assert sim.real_queue  # real cooler ran, the thermostat did not yet
+        sim.last_resync = (T0 - timedelta(days=1)).isoformat()
+        tracker.tick(self._sample(20, on=False, price=0.3, value=18.7))
+        assert sim.real_queue == [] and sim.value == pytest.approx(18.7)
+
+    def test_device_energy_is_ordinary_load_before_batteries_charge(self) -> None:
+        # 1 kW PV surplus while the uncontrolled cooler runs (1 kW): the
+        # uncontrolled battery gets nothing.
+        tracker = SavingsTracker([BAT], step_minutes=60, devices=[COOLER])
+        for m in range(0, 30):
+            base = _sample(m, -1.0, stored=5.0)
+            tracker.tick(LiveSample(**{**base.__dict__, "devices": {"cooler": DeviceLive(0.0, 20.0)}}))
+        assert tracker.state.devices["cooler"].running
+        assert tracker.state.unc["bat"].stored_kwh == pytest.approx(5.0, abs=1e-6)
 
 
 class TestHousekeeping:
@@ -417,6 +478,8 @@ class TestSavingsStorage:
             assert row["saving"] == pytest.approx(0.2)
             assert row["ev_saving"] == pytest.approx(0.2)
             assert row["uncontrolled_bill"] == pytest.approx(0.9)
+            assert row["components"] == {"ev": pytest.approx(0.2)}
+            assert row["detail"]["evs"]["ev"]["unc_kwh"] == pytest.approx(2.0)
         finally:
             await db.stop()
 
@@ -458,6 +521,7 @@ class TestServerWiring:
         )
         app._grid_meter_id = "grid"
         app._pv_device_id = None
+        app._threshold_constraints = []
         app._poll_interval_s = 5.0
         app._plan_interval_s = 900.0
         app._storage_constraints = [BAT]
@@ -530,6 +594,7 @@ class TestServerWiring:
             assert week["totals"]["real"] == pytest.approx(0.60)
             assert day["all_time"]["real"] == pytest.approx(0.60)
             assert "real" in day["stored"] and "uncontrolled" in day["stored"]
+            assert day["groups"] == [{"id": "batteries", "kind": "batteries", "label": "Batteries"}]
             assert len(day["slots"]) == 2 and week["slots"] is None
             assert bad.status_code == 400
         finally:

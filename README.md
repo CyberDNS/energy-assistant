@@ -147,12 +147,18 @@ have earned) and using it costs the ledger's average cost. So a charging slot
 saves nothing and the saving shows when stored energy replaces grid power:
 (price at that moment − ledger cost) × kWh. Car energy charged earlier than
 the uncontrolled car would have is held at its cost until the uncontrolled car
-charges it too. A car unplugged before its plan's deadline gets the uncontrolled
+charges it too. Threshold devices (aquarium cooler, …) run in the uncontrolled house
+as a plain thermostat between their thresholds, on the device's learned thermal
+model; their energy is matched the same way, and the simulated value is set back
+to the measured one every 24 h. A car unplugged before its plan's deadline gets the uncontrolled
 car recalculated backwards from the unplug moment: it charges the same energy as
 late as possible before unplugging, priced at those slots' measured prices. The Savings tab and `GET /api/savings?hours=168` show the
 same numbers; for the 24 h and 3 d ranges the tab also charts, per 15-minute
 slot, the stored energy and battery/car power of both houses next to the
-price. Details in `src/energy_assistant/core/savings.py`.
+price. Below the totals the tab lists one panel per controlled group, built
+from the configuration: the batteries together, each car and each threshold
+device, each with its own share of the saving. Details in
+`src/energy_assistant/core/savings.py`.
 
 Threshold devices count as fixed load and contribute no saving. Nothing is
 published in dry-run mode.

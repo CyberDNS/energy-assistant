@@ -298,6 +298,11 @@ th.num, td.num { text-align:right; font-variant-numeric:tabular-nums; }
 .savings-kpis { grid-template-columns:repeat(auto-fill,minmax(170px,1fr)); }
 .savings-kpis .v { font-variant-numeric:tabular-nums; }
 .savings-sub { color:var(--muted); font-size:.75rem; margin-top:2px; }
+.savings-group-head { display:flex; align-items:baseline; gap:10px; }
+.savings-group-head h2 { margin-bottom:2px; }
+.savings-group-saving { font-variant-numeric:tabular-nums; font-weight:600; font-size:.9rem; }
+.savings-breakdown { display:flex; flex-direction:column; gap:2px; font-size:.82rem; margin-top:4px; }
+.savings-breakdown b { font-variant-numeric:tabular-nums; }
 .savings-note { color:var(--muted); font-size:.78rem; line-height:1.4; max-width:80ch; }
 .savings-empty p { color:var(--muted); font-size:.88rem; line-height:1.45; max-width:70ch; }
 @media (max-width: 600px) {

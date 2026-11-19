@@ -101,6 +101,7 @@ from ..core.price_curve import PriceCurveHistory, build_price_slots
 from ..core.plugin_registry import BuildContext
 from ..core.registry import DeviceRegistry
 from ..core.savings import (
+    DeviceLive,
     EvLive,
     LiveSample,
     SavingsSlot,
@@ -137,15 +138,26 @@ _RETENTION_INTERVAL_S = 3600.0
 _SAVINGS_STATE_MAX_AGE = timedelta(hours=1)
 
 
+def _float_or_none(value: Any) -> float | None:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _as_utc(ts: datetime) -> datetime:
     """Aware UTC datetime; a naive one is read as UTC."""
     return ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts.astimezone(timezone.utc)
 
 
-def _savings_totals(rows: list[dict]) -> dict[str, float]:
+def _savings_totals(rows: list[dict]) -> dict[str, Any]:
     """Sum savings slots (see ``SqliteStorageBackend.query_savings_slots``)."""
     real = sum(r["real_cost"] for r in rows)
     uncontrolled = sum(r["uncontrolled_cost"] for r in rows)
+    components: dict[str, float] = {}
+    for r in rows:
+        for key, value in (r.get("components") or {}).items():
+            components[key] = components.get(key, 0.0) + value
     return {
         "real": uncontrolled - real,
         "uncontrolled_cost": uncontrolled,
@@ -153,6 +165,7 @@ def _savings_totals(rows: list[dict]) -> dict[str, float]:
         "uncontrolled_bill": sum(r["uncontrolled_bill"] for r in rows),
         "real_bill": sum(r["real_bill"] for r in rows),
         "ev_saving": sum(r["ev_saving"] for r in rows),
+        "components": components,
         "hours": sum(r["hours"] for r in rows),
     }
 
@@ -711,16 +724,17 @@ class Application:
 
         # 7b' — Savings accounting: the real house vs. a simulated
         # uncontrolled house (core/savings.py).
+        self._threshold_constraints = parse_threshold_assets(self._cfg.assets, self._cfg.devices)
         self._savings = SavingsTracker(
             self._storage_constraints,
             step_minutes=self._optimizer._step_min,
             state=await self._load_savings_state(),
+            devices=self._threshold_constraints,
         )
         # Plan fidelity: what the control loop did with each slot's intent.
         self._execution_log = ExecutionLog(step_minutes=self._optimizer._step_min)
 
         # 7c — Threshold assets + contributors
-        self._threshold_constraints = parse_threshold_assets(self._cfg.assets, self._cfg.devices)
         self._threshold_contributors = [
             ThresholdControlContributor(tc) for tc in self._threshold_constraints
         ]
@@ -1752,6 +1766,16 @@ class Application:
             cost_basis=self._ledger.all_cost_bases(),
             pv_kw=abs(pv) if self._pv_device_id and (pv := power_kw(self._pv_device_id)) is not None
             else None,
+            devices={
+                tc.device_id: DeviceLive(
+                    power_kw=power_kw(tc.device_id),
+                    value=_float_or_none(
+                        (device_states.get(tc.device_id).extra or {}).get("measured_value")
+                        if device_states.get(tc.device_id) is not None else None
+                    ),
+                )
+                for tc in self._threshold_constraints
+            },
         )
 
     async def _track_savings(
@@ -1852,6 +1876,23 @@ class Application:
                     goal.target_by,
                 )
 
+    def _savings_groups(self) -> list[dict[str, Any]]:
+        """Controlled device groups the Savings tab shows one panel each for:
+        the batteries together, each car, each threshold device.  ``id`` is
+        the key in a slot's ``components`` / ``detail``."""
+        groups: list[dict[str, Any]] = []
+        if self._storage_constraints:
+            groups.append({"id": "batteries", "kind": "batteries", "label": "Batteries"})
+        for asset in self._ev_assets:
+            groups.append({"id": asset.device_id, "kind": "car", "label": asset.label})
+        for tc in self._threshold_constraints:
+            groups.append({
+                "id": tc.device_id, "kind": "device", "label": tc.label or tc.device_id,
+                "unit": tc.unit, "bottom_threshold": tc.bottom_threshold,
+                "top_threshold": tc.top_threshold,
+            })
+        return groups
+
     async def _thermal_inputs(self, horizon: timedelta) -> tuple[dict, dict]:
         """Current thermal model and ambient forecast per threshold device.
 
@@ -1867,6 +1908,11 @@ class Application:
                 ambients[device_id] = await learner.ambient_forecast(horizon)
             except Exception as exc:  # noqa: BLE001 — planning must not fail on it
                 _log.debug("thermal:%s: ambient forecast failed: %s", device_id, exc)
+            # The savings' uncontrolled thermostat runs on the same model.
+            points = ambients.get(device_id) or []
+            self._savings.set_thermal_model(
+                device_id, models[device_id], points[0].value if points else None
+            )
         return models, ambients
 
     def _is_day_ahead_plan(self, plan: EnergyPlan) -> bool:
@@ -2195,6 +2241,7 @@ class Application:
                 ],
                 "stored": self._savings.stored(),
                 "all_time": _savings_totals(all_rows),
+                "groups": self._savings_groups(),
                 # Per-slot detail (what batteries and cars did in both
                 # houses) for windows short enough to chart it.
                 "slots": [
