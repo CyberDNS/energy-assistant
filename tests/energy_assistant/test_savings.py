@@ -20,6 +20,7 @@ from energy_assistant.core.savings import (
     SavingsSlot,
     SavingsState,
     SavingsTracker,
+    SlotCorrection,
     day_ahead_window_end,
     settle,
 )
@@ -228,6 +229,57 @@ class TestCars:
         assert second.saving == pytest.approx(0.0, abs=1e-9)
         assert tracker.state.evs == {}
 
+    def _charge_then_unplug(self, unplug_minute: int, deadline_h: float):
+        """Real car charges 11 kWh in the first hour (0.20), then waits
+        (0.30) and is unplugged at *unplug_minute*."""
+        tracker = SavingsTracker([BAT], step_minutes=60)
+        tracker.tick(_sample(0, 0.0, ev=self._plugged(0.0)))
+        tracker.set_ev_goal("cp", 11.0, T0 + timedelta(hours=deadline_h))
+        samples = [
+            _sample(m, 11.0 if m <= 60 else 0.0, price=0.20 if m <= 60 else 0.30,
+                    ev=self._plugged(11.0 if m <= 60 else 0.0))
+            for m in range(1, unplug_minute)
+        ] + [
+            _sample(m, 0.0, price=0.30, ev=EvLive(False, 0.0, 11.0))
+            for m in range(unplug_minute, unplug_minute + 62)
+        ]
+        return tracker, _run(tracker, samples)
+
+    def test_early_unplug_recalculates_the_uncontrolled_car_back_from_unplug(self) -> None:
+        # Unplugged at 02:00 with the deadline at 06:00: the uncontrolled car
+        # would have charged the 11 kWh in the hour before unplugging (0.30).
+        tracker, slots = self._charge_then_unplug(121, deadline_h=6)
+        (corr,) = tracker.pop_corrections()
+        assert corr == SlotCorrection(
+            start=T0 + timedelta(hours=1), uncontrolled_ev_kwh=pytest.approx(11.0),
+            uncontrolled_cost=pytest.approx(3.30), real_cost=pytest.approx(2.20),
+        )
+        assert corr.ev_saving == pytest.approx(11.0 * (0.30 - 0.20))
+        assert tracker.pop_corrections() == []
+        assert tracker.state.evs == {}
+
+    def test_early_unplug_fills_the_open_slot_and_earlier_ones(self) -> None:
+        # Unplugged at 01:40: 40 min (7.33 kWh) in the open slot at 0.30,
+        # the remaining 3.67 kWh in 00:40–01:00 at 0.20.
+        tracker, slots = self._charge_then_unplug(101, deadline_h=6)
+        (corr,) = tracker.pop_corrections()
+        assert corr.start == T0
+        assert corr.uncontrolled_ev_kwh == pytest.approx(11.0 / 3)
+        assert corr.ev_saving == pytest.approx(0.0, abs=1e-9)
+        second = slots[1]
+        assert second.start == T0 + timedelta(hours=1)
+        assert second.uncontrolled_ev_kwh == pytest.approx(11.0 * 2 / 3)
+        assert second.ev_saving == pytest.approx(11.0 * 2 / 3 * (0.30 - 0.20))
+
+    def test_unplug_after_the_deadline_stays_neutral(self) -> None:
+        tracker = SavingsTracker([BAT], step_minutes=60)
+        tracker.tick(_sample(0, 0.0, ev=self._plugged(0.0)))
+        tracker.set_ev_goal("cp", 11.0, T0 + timedelta(minutes=30))
+        samples = [_sample(m, 0.0, ev=self._plugged(0.0)) for m in range(1, 60)]
+        samples += [_sample(60 + m, 0.0, ev=EvLive(False, 0.0, 11.0)) for m in range(0, 3)]
+        _run(tracker, samples)
+        assert tracker.pop_corrections() == []
+
     def test_uncontrolled_battery_discharges_into_the_car(self) -> None:
         tracker = SavingsTracker([BAT], step_minutes=60)
         # No charge plan: the uncontrolled car charges like the real one.
@@ -347,6 +399,24 @@ class TestSavingsStorage:
             assert new["uncontrolled_stored_kwh"] == pytest.approx(2.0)
             assert new["import_price"] == pytest.approx(0.4)
             assert new["stored_detail"]["real"]["b2"] == pytest.approx(1.0)
+        finally:
+            await db.stop()
+
+    async def test_correction_updates_a_stored_slot(self, tmp_path: Path) -> None:
+        db = SqliteStorageBackend(tmp_path / "h.db")
+        await db.start()
+        try:
+            await db.save_savings_slot(SavingsSlot(T0, 0.25, 0.1, 0.1, 0.1, 0.1, 0.0))
+            corr = SlotCorrection(T0, 2.0, uncontrolled_cost=0.8, real_cost=0.6)
+            assert await db.apply_savings_correction(corr)
+            assert not await db.apply_savings_correction(
+                SlotCorrection(T0 + timedelta(hours=5), 1.0, 0.1, 0.1)
+            )
+            (row,) = await db.query_savings_slots(T0, T0 + timedelta(hours=1))
+            assert row["uncontrolled_ev_kwh"] == pytest.approx(2.0)
+            assert row["saving"] == pytest.approx(0.2)
+            assert row["ev_saving"] == pytest.approx(0.2)
+            assert row["uncontrolled_bill"] == pytest.approx(0.9)
         finally:
             await db.stop()
 
