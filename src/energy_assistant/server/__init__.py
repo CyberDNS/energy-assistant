@@ -217,6 +217,15 @@ class _TariffZone:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+def _learning_category(item: dict[str, Any]) -> str:
+    """Learning-tab category of one ``/api/learned`` entry, one per learning
+    method: ``consumption`` (daily energy of a consumer, regressed on
+    temperature and day type, times an hourly shape), ``thermal`` (devices
+    kept between a min and a max: aquarium, fridge, AC) and ``storage``
+    (battery round-trip efficiency from closed charge/discharge cycles)."""
+    return {"thermal": "thermal", "efficiency": "storage"}.get(item.get("kind", ""), "consumption")
+
+
 def _storage_constraints_from_config(cfg: AppConfig) -> list[StorageConstraints]:
     """Extract ``StorageConstraints`` for every device with ``role: storage``."""
     result: list[StorageConstraints] = []
@@ -584,6 +593,7 @@ class Application:
         self._ev_contributors: list[EvChargerContributor] = []
         self._threshold_constraints: list[ThresholdConstraints] = []
         self._thermal_learners: dict[str, Any] = {}
+        self._efficiency_learners: dict[str, Any] = {}
         self._threshold_contributors: list[ThresholdControlContributor] = []
         self._ev_weekly_plans: dict[str, dict[int, EvWeeklyTarget]] = {}
         self._ev_day_overrides: dict[str, dict[date, EvDayOverride]] = {}
@@ -753,6 +763,12 @@ class Application:
         )
         if self._thermal_learners:
             _log.info("Learning thermal models for %s", ", ".join(self._thermal_learners))
+        # Learned round-trip efficiency per battery (plugins/learned/efficiency).
+        from ..plugins.learned.efficiency import build_efficiency_learners  # noqa: PLC0415
+        self._efficiency_learners = build_efficiency_learners(
+            self._storage_constraints, self._cfg.devices, self._storage,
+            self._build_ctx.data_dir,
+        )
 
         # 7d — MQTT publisher (optional — only started when mqtt: is configured)
         if self._cfg.backends.mqtt:
@@ -1308,7 +1324,7 @@ class Application:
         thermal_models, ambient_forecasts = await self._thermal_inputs(effective_horizon)
         context = OptimizationContext(
             device_states=device_states,
-            storage_constraints=self._storage_constraints,
+            storage_constraints=self._planning_storage_constraints(refit=True),
             threshold_constraints=self._threshold_constraints,
             thermal_models=thermal_models,
             ambient_forecasts=ambient_forecasts,
@@ -1925,6 +1941,22 @@ class Application:
             })
         return groups
 
+    def _planning_storage_constraints(self, refit: bool = False) -> list[StorageConstraints]:
+        """Storage constraints the plan runs on: the configured ones, with the
+        learned efficiency for batteries set to ``efficiency: learned`` once
+        their estimate is confident.  The savings accounting keeps the
+        configured values (see plugins/learned/efficiency)."""
+        out = []
+        for sc in self._storage_constraints:
+            learner = self._efficiency_learners.get(sc.device_id)
+            if learner is None:
+                out.append(sc)
+                continue
+            if refit:
+                learner.schedule_refit()
+            out.append(learner.apply(sc))
+        return out
+
     async def _thermal_inputs(self, horizon: timedelta) -> tuple[dict, dict]:
         """Current thermal model and ambient forecast per threshold device.
 
@@ -2415,11 +2447,25 @@ class Application:
                     out.append(await provider.diagnostics(self._horizon))
             for learner in self._thermal_learners.values():
                 out.append(await learner.diagnostics())
+            for learner in self._efficiency_learners.values():
+                out.append(await learner.diagnostics())
+            for item in out:
+                item.setdefault("category", _learning_category(item))
             return out
 
         @api.post("/api/learned/{forecast_id}/refit")
         async def refit_learned(forecast_id: str) -> dict:
-            """Refit one learned forecast or thermal model from fresh history now."""
+            """Refit one learned forecast, thermal or efficiency model now."""
+            eff = next(
+                (lr for lr in self._efficiency_learners.values() if lr.id == forecast_id), None
+            )
+            if eff is not None:
+                est = await eff.refit()
+                if est is None:
+                    raise HTTPException(409, f"No efficiency estimate: {eff.diagnostics_reason()}")
+                if eff.in_use:
+                    asyncio.create_task(self._run_plan())
+                return {"ok": True, "fitted_at": est.fitted_at}
             learner = next(
                 (lr for lr in self._thermal_learners.values() if lr.id == forecast_id), None
             )
@@ -2522,6 +2568,12 @@ class Application:
                         "discharge_efficiency": sc.discharge_efficiency,
                         "max_charge_kw":        sc.max_charge_kw,
                         "max_discharge_kw":     sc.max_discharge_kw,
+                        # Configured vs. learned round trip, and whether the
+                        # plan uses the learned one (plugins/learned/efficiency).
+                        "efficiency": (
+                            self._efficiency_learners[sc.device_id].summary()
+                            if sc.device_id in self._efficiency_learners else None
+                        ),
                     }
                     for sc in self._storage_constraints
                 ],
@@ -3590,7 +3642,7 @@ class Application:
                     "charge_efficiency":    sc.charge_efficiency,
                     "discharge_efficiency": sc.discharge_efficiency,
                 }
-                for sc in self._storage_constraints
+                for sc in self._planning_storage_constraints()
             },
         }
 

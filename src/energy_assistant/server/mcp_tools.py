@@ -167,8 +167,11 @@ def build_mcp_server(api: FastAPI) -> MCPServer:
 
     @mcp.tool(annotations=_READ_ONLY)
     async def get_learned_forecasts() -> dict[str, Any]:
-        """Learned consumption models (e.g. heat pump): fit quality and
-        parameters."""
+        """Every learned model, each with a ``category``: ``consumption``
+        (daily-energy forecasts, e.g. heat pump, household baseline),
+        ``thermal`` (min/max devices such as the aquarium cooler) and
+        ``storage`` (battery round-trip efficiency: configured vs. learned,
+        the closed cycles it is based on, and whether the plan uses it)."""
         return await get("/api/learned")
 
     @mcp.tool(annotations=_READ_ONLY)
