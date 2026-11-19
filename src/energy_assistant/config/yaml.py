@@ -8,6 +8,7 @@ Expected top-level sections
 ``topology``   Physical meter wiring as a tree.
 ``assets``     Managed objects (EVs, heat stores) — future.
 ``optimizer``  Algorithm, horizon, schedule.
+``energy_dashboard``  Optional import of the HA Energy dashboard consumers.
 
 Secrets
 -------
@@ -99,6 +100,7 @@ class YamlConfigLoader:
             controller=raw.get("controller") or {},
             server=raw.get("server") or {},
             logging=raw.get("logging") or {},
+            energy_dashboard=raw.get("energy_dashboard") or {},
             default_tariff_id=default_tariff_id,
         )
 

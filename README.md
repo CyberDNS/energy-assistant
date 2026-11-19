@@ -113,6 +113,47 @@ discovery as configuration entities on the EV device — per weekday a `number`
 Changes are written straight to the weekly plan and trigger a re-plan; edits
 made in the Energy Assistant UI are mirrored back to the entities.
 
+### Learned consumption forecasts
+
+Consumers are forecast from Home Assistant's long-term statistics (`type:
+learned`, see `plugins/learned/__init__.py`): a daily energy per weekday/weekend
+(or, with `temperature_entity`, a function of the outdoor temperature) times a
+learned hourly shape, refitted every 6 h.
+
+- **Learning is on by default** for every consumer that reads one HA power
+  sensor (`type: generic_homeassistant`): it learns its forecast from that
+  sensor. A `static_profile` it declares is used until the first fit. Set
+  `learning: false` to turn it off, or `learning: {history_days: 365, …}` to
+  pass options.
+- **Residual household baseline.** Instead of a static profile, the household
+  baseline learns the household meter minus every consumer that has its own
+  forecast, so nothing is counted twice:
+
+  ```yaml
+  - id: baseline
+    role: consumer
+    type: generic_consumer
+    forecast:
+      type: learned
+      history_entity: sensor.power_consumption_household
+      subtract: [auto]      # every learned consumer on the same tariff
+      fallback: { type: static_profile, profile: … }
+  ```
+
+  `auto` follows the configuration: adding or removing a consumer changes the
+  residual at the next refit. Loads the optimizer plans itself (EV chargers,
+  batteries, threshold devices) are part of the plan, not of the forecast: if
+  the household sensor contains one, add its power sensor to `subtract`
+  (e.g. an aquarium cooler's smart plug), and exclude the dashboard entry
+  containing it from the import.
+- **Import the Energy dashboard.** With `energy_dashboard: {import_consumers:
+  true}` every "individual device" of HA's Energy dashboard becomes a consumer
+  with a learned forecast (live power from its power sensor, if it has one).
+  Entries already used by a configured device are skipped; list EV chargers and
+  other planned loads under `exclude:`. See `config.yaml.example`.
+
+The Learning tab shows each model, its training days and fit quality.
+
 ### Learned thermal models
 
 Threshold devices (aquarium cooler, fridge, AC, …) are planned with a model of

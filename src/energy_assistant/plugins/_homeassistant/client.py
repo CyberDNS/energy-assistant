@@ -110,6 +110,7 @@ class HAClient:
         end: datetime | None = None,
         period: str = "hour",
         types: tuple[str, ...] = ("mean", "min", "max"),
+        units: dict[str, str] | None = None,
     ) -> dict[str, list[dict[str, Any]]]:
         """Return long-term statistics from the HA recorder.
 
@@ -119,6 +120,10 @@ class HAClient:
         Returns ``{statistic_id: [row, …]}`` where each row is a dict with a
         timezone-aware ``start`` datetime plus the requested *types*
         (values may be ``None``).  Ids without statistics are absent.
+
+        *units* asks HA to convert per unit class, e.g.
+        ``{"power": "W", "energy": "Wh"}`` (statistics in other classes are
+        returned unchanged).
         """
         body: dict[str, Any] = {
             "statistic_ids": list(statistic_ids),
@@ -128,6 +133,8 @@ class HAClient:
         }
         if end is not None:
             body["end_time"] = end.isoformat()
+        if units:
+            body["units"] = dict(units)
         response = await self.call_service_with_response(
             "recorder", "get_statistics", body, timeout=_STATISTICS_TIMEOUT
         )
@@ -199,6 +206,45 @@ class HAClient:
             if ts is not None and isinstance(temp, (int, float)):
                 points.append((ts, float(temp)))
         return points
+
+    async def get_energy_prefs(self) -> dict[str, Any]:
+        """Return the Energy dashboard configuration (``energy/get_prefs``).
+
+        Only available over the WebSocket API; opens a short-lived connection
+        with the same token.
+        """
+        import json
+
+        import websockets
+
+        base = str(self._client.base_url).rstrip("/")
+        ws_url = "ws" + base[len("http"):] + "/api/websocket"
+        token = self._client.headers["Authorization"].removeprefix("Bearer ")
+        ssl_ctx = None
+        if ws_url.startswith("wss"):
+            # Same CA bundle httpx uses, so a slim image without system CAs
+            # still verifies the certificate.
+            import ssl
+
+            import certifi
+
+            ssl_ctx = ssl.create_default_context(cafile=certifi.where())
+        async with websockets.connect(
+            ws_url, max_size=None, open_timeout=_DEFAULT_TIMEOUT, ssl=ssl_ctx
+        ) as ws:
+            await ws.recv()  # auth_required
+            await ws.send(json.dumps({"type": "auth", "access_token": token}))
+            auth = json.loads(await ws.recv())
+            if auth.get("type") != "auth_ok":
+                raise RuntimeError(f"Home Assistant WebSocket auth failed: {auth.get('type')}")
+            await ws.send(json.dumps({"id": 1, "type": "energy/get_prefs"}))
+            while True:
+                msg = json.loads(await ws.recv())
+                if msg.get("id") == 1:
+                    break
+        if not msg.get("success"):
+            raise RuntimeError(f"energy/get_prefs failed: {msg.get('error')}")
+        return msg.get("result") or {}
 
     async def close(self) -> None:
         await self._client.aclose()
