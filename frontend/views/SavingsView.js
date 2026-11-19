@@ -149,25 +149,110 @@ export default defineComponent({
       ]
     })
 
-    // Cars: energy charged since the start of the window — same energy,
-    // different timing; the shaded gap is energy one car got earlier.
-    const hasCars = computed(() => (slots.value ?? []).some(
-      s => (s.real_ev_kwh ?? 0) > 0.01 || (s.uncontrolled_ev_kwh ?? 0) > 0.01))
-    const carTraces = computed(() => {
+    // One panel per controlled group (batteries, each car, each threshold
+    // device), built from the groups the server reports.  Short windows show
+    // what the group did per slot; longer ones the group's saving per bar.
+    const groups = computed(() => data.value?.groups ?? [])
+    const C_DEVICE = '#2f8f83'
+    const groupSaving = id => totals.value?.components?.[id] ?? 0
+    const breakdown = computed(() => {
+      const comps = totals.value?.components ?? {}
+      const byKind = { batteries: 0, car: 0, device: 0 }
+      for (const g of groups.value) byKind[g.kind] = (byKind[g.kind] ?? 0) + (comps[g.id] ?? 0)
+      return byKind
+    })
+
+    const carSlotTraces = g => {
       const r = slots.value ?? []
+      const realK = r.map(s => s.detail?.evs?.[g.id]?.real_kwh ?? 0)
+      const uncK = r.map(s => s.detail?.evs?.[g.id]?.unc_kwh ?? 0)
+      if (![...realK, ...uncK].some(v => v > 0.01)) return []
       return [
-        { name: 'Uncontrolled car', mode: 'lines', x: slotX.value,
-          y: cumulative(r.map(s => s.uncontrolled_ev_kwh ?? 0)),
+        { name: 'Uncontrolled car', mode: 'lines', x: slotX.value, y: cumulative(uncK),
           line: { shape: 'hv', width: 2, color: C_CAR, dash: 'dash' },
           hovertemplate: '%{x|%H:%M}  %{y:.1f} kWh<extra>Uncontrolled car</extra>' },
-        { name: 'Real car (shaded: difference)', mode: 'lines', x: slotX.value,
-          y: cumulative(r.map(s => s.real_ev_kwh ?? 0)),
+        { name: 'Real car (shaded: difference)', mode: 'lines', x: slotX.value, y: cumulative(realK),
           fill: 'tonexty', fillcolor: 'rgba(208,138,46,.18)',
           line: { shape: 'hv', width: 2.5, color: C_CAR },
           hovertemplate: '%{x|%H:%M}  %{y:.1f} kWh<extra>Real car</extra>' },
         priceTrace(),
       ]
-    })
+    }
+
+    const deviceSlotTraces = g => {
+      const r = slots.value ?? []
+      const d = s => s.detail?.devices?.[g.id] ?? {}
+      if (!r.some(s => d(s).real_value != null || d(s).unc_value != null)) return []
+      const kw = (v, h) => (v == null || !h ? null : v / h)
+      return [
+        { name: 'Running, real', type: 'bar', x: slotX.value, yaxis: 'y2',
+          y: r.map(s => kw(d(s).real_kwh, s.hours)), marker: { color: 'rgba(107,123,181,.30)' },
+          width: 15 * 60000, offset: -15 * 60000,
+          hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra>Running, real</extra>' },
+        { name: 'Running, thermostat', type: 'bar', x: slotX.value, yaxis: 'y2',
+          y: r.map(s => -(kw(d(s).unc_kwh, s.hours) ?? 0)), marker: { color: 'rgba(154,165,160,.35)' },
+          width: 15 * 60000, offset: -15 * 60000,
+          customdata: r.map(s => kw(d(s).unc_kwh, s.hours)),
+          hovertemplate: '%{x|%H:%M}  %{customdata:.2f} kW<extra>Running, thermostat</extra>' },
+        { name: 'Simulated thermostat', mode: 'lines', x: slotX.value, y: r.map(s => d(s).unc_value),
+          line: { shape: 'linear', width: 2, color: C_UNCTRL, dash: 'dash' },
+          hovertemplate: '%{x|%H:%M}  %{y:.2f} ' + (g.unit ?? '') + '<extra>Thermostat</extra>' },
+        { name: 'Measured', mode: 'lines', x: slotX.value, y: r.map(s => d(s).real_value),
+          line: { shape: 'linear', width: 2.5, color: C_DEVICE },
+          hovertemplate: '%{x|%H:%M}  %{y:.2f} ' + (g.unit ?? '') + '<extra>Measured</extra>' },
+      ]
+    }
+
+    const barMax = traces => Math.max(0.01, ...traces.filter(t => t.type === 'bar')
+      .flatMap(t => t.y.map(v => Math.abs(v ?? 0))))
+
+    const groupBarTraces = g => {
+      const y = buckets.value.map(b => b.components?.[g.id] ?? 0)
+      return [{
+        name: 'Saving', type: 'bar', x: x.value, y,
+        marker: { color: y.map(v => (v >= 0 ? C_SAVING : C_LOSS)) }, hovertemplate: HOVER.value,
+      }]
+    }
+
+    const panels = computed(() => groups.value.map(g => {
+      const short = slots.value != null
+      let traces = [], layout_ = null, note = ''
+      if (!short) {
+        traces = groupBarTraces(g)
+        layout_ = layout({ showlegend: false })
+      } else if (g.kind === 'batteries') {
+        traces = batteryTraces.value
+        layout_ = slotLayout('kWh stored')
+        note = 'Shaded: the difference — energy the plan held back for later (real above) or used earlier (real below)'
+      } else if (g.kind === 'car') {
+        traces = carSlotTraces(g)
+        layout_ = slotLayout('kWh charged')
+        note = traces.length ? 'Same energy, different timing; shaded: energy one car got earlier'
+                             : 'Not charged in this window.'
+      } else {
+        traces = deviceSlotTraces(g)
+        const lim = y => ({ type: 'line', xref: 'paper', x0: 0, x1: 1, y0: y, y1: y,
+                            line: { color: C_LOSS, width: 1, dash: 'dot' } })
+        layout_ = {
+          ...layout(),
+          yaxis: { title: g.unit || 'value' },
+          // Running bars in a strip along the bottom: real above its zero line,
+          // thermostat below, scaled to the device's power.
+          yaxis2: { overlaying: 'y', side: 'right', showgrid: false,
+                    range: [-1.2 * barMax(traces), 4 * barMax(traces)],
+                    showticklabels: false, zeroline: true, zerolinecolor: 'rgba(0,0,0,.08)' },
+          shapes: [lim(g.bottom_threshold), lim(g.top_threshold)],
+          barmode: 'overlay',
+          legend: { orientation: 'h', y: -0.22, font: { size: 10 } },
+          margin: { t: 10, r: 30, b: 60, l: 50 },
+        }
+        note = traces.length
+          ? 'Measured value vs. a plain thermostat between the thresholds (dotted). Bars: when each ran — real above, thermostat below.'
+          : 'No readings in this window.'
+      }
+      return { ...g, saving: groupSaving(g.id), traces, layout: layout_, note,
+               height: short ? (g.kind === 'car' ? '240px' : '280px') : '220px' }
+    }))
 
     const cumulativeTraces = computed(() => [{
       name: 'Saving', mode: 'lines', x: x.value,
@@ -207,23 +292,21 @@ export default defineComponent({
       return { title: '€/kWh', overlaying: 'y', side: 'right', showgrid: false,
                tickformat: '.2f', range: [lo - 3 * pad, hi + pad] }
     })
-    const slotLayout = yTitle => computed(() => ({
+    const slotLayout = yTitle => ({
       ...layout(),
       yaxis: { title: yTitle, rangemode: 'tozero' },
       yaxis2: priceAxis.value,
       legend: { orientation: 'h', y: -0.22, font: { size: 10 } },
       margin: { t: 10, r: 60, b: 60, l: 50 },
-    }))
-    const batteryLayout = slotLayout('kWh stored')
-    const carLayout     = slotLayout('kWh charged')
+    })
 
     onMounted(() => load(range.value))
 
     return {
       RANGES, range, pending, data, loaded, error, load, eur, kwh,
       buckets, totals, allTime, pct, stored, bucketLabel,
-      savingTraces, cumulativeTraces, costTraces, batteryTraces, carTraces, hasCars,
-      slots, savingTitle, savingLayout, cumulativeLayout, costLayout, batteryLayout, carLayout,
+      savingTraces, cumulativeTraces, costTraces, panels, breakdown, groups,
+      slots, savingTitle, savingLayout, cumulativeLayout, costLayout,
     }
   },
 
@@ -264,9 +347,12 @@ export default defineComponent({
             <div class="savings-sub">grid bill {{ eur(totals.real_bill) }}</div>
           </div>
           <div class="card">
-            <div class="k">Of which cars</div>
-            <div class="v" :class="totals.ev_saving >= 0 ? 'ok' : 'bad'">{{ eur(totals.ev_saving) }}</div>
-            <div class="savings-sub">smart vs. last-moment charging</div>
+            <div class="k">Breakdown</div>
+            <div class="savings-sub savings-breakdown">
+              <span v-if="groups.some(g => g.kind === 'batteries')">Batteries <b :class="breakdown.batteries >= 0 ? 'ok' : 'bad'">{{ eur(breakdown.batteries) }}</b></span>
+              <span v-if="groups.some(g => g.kind === 'car')">Cars <b :class="breakdown.car >= 0 ? 'ok' : 'bad'">{{ eur(breakdown.car) }}</b></span>
+              <span v-if="groups.some(g => g.kind === 'device')">Devices <b :class="breakdown.device >= 0 ? 'ok' : 'bad'">{{ eur(breakdown.device) }}</b></span>
+            </div>
           </div>
           <div class="card">
             <div class="k">Still stored</div>
@@ -285,19 +371,14 @@ export default defineComponent({
           <PlotlyChart :traces="savingTraces" :layout="savingLayout" height="280px" />
         </div>
 
-        <template v-if="slots && slots.length">
-          <div class="panel" style="margin-bottom:10px">
-            <h2>Batteries — stored energy, real vs. uncontrolled</h2>
-            <p class="savings-sub">Shaded: the difference — energy the plan held back for later
-              (real above) or used earlier (real below)</p>
-            <PlotlyChart :traces="batteryTraces" :layout="batteryLayout" height="280px" />
+        <div class="panel" style="margin-bottom:10px" v-for="p in panels" :key="p.id">
+          <div class="savings-group-head">
+            <h2>{{ p.label }}</h2>
+            <span class="savings-group-saving" :class="p.saving >= 0 ? 'ok' : 'bad'">{{ eur(p.saving, true) }}</span>
           </div>
-          <div class="panel" style="margin-bottom:10px" v-if="hasCars">
-            <h2>Cars — energy charged, real vs. uncontrolled</h2>
-            <p class="savings-sub">Same energy, different timing; shaded: energy one car got earlier</p>
-            <PlotlyChart :traces="carTraces" :layout="carLayout" height="240px" />
-          </div>
-        </template>
+          <p class="savings-sub" v-if="p.note">{{ p.note }}</p>
+          <PlotlyChart v-if="p.traces.length" :traces="p.traces" :layout="p.layout" :height="p.height" />
+        </div>
 
         <div class="row2-eq">
           <div class="panel">

@@ -219,6 +219,10 @@ _SAVINGS_SLOTS_ADDED_COLUMNS = {
     "uncontrolled_stored_kwh": "REAL",
     "import_price": "REAL",
     "stored_detail": "TEXT",
+    # Saving per component ({"batteries": €, "<car>": €, "<device>": €}) and
+    # per-car / per-device detail ({"evs": {...}, "devices": {...}}).
+    "components": "TEXT",
+    "detail": "TEXT",
 }
 
 SAVINGS_KEEP_DAYS = 400
@@ -786,8 +790,9 @@ class SqliteStorageBackend:
             "INSERT OR REPLACE INTO savings_slots (slot_start, hours, real_cost,"
             " uncontrolled_cost, real_bill, uncontrolled_bill, ev_saving,"
             " real_battery_kwh, uncontrolled_battery_kwh, real_ev_kwh, uncontrolled_ev_kwh,"
-            " real_stored_kwh, uncontrolled_stored_kwh, import_price, stored_detail)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " real_stored_kwh, uncontrolled_stored_kwh, import_price, stored_detail,"
+            " components, detail)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 _utc_iso(slot.start), slot.hours, slot.real_cost, slot.uncontrolled_cost,
                 slot.real_bill, slot.uncontrolled_bill, slot.ev_saving,
@@ -796,6 +801,8 @@ class SqliteStorageBackend:
                 sum(slot.real_stored.values()), sum(slot.uncontrolled_stored.values()),
                 slot.import_price,
                 json.dumps({"real": slot.real_stored, "uncontrolled": slot.uncontrolled_stored}),
+                json.dumps(slot.components),
+                json.dumps({"evs": slot.evs, "devices": slot.devices}),
             ),
         )
         await self._db.commit()
@@ -803,23 +810,39 @@ class SqliteStorageBackend:
     async def apply_savings_correction(self, correction: SlotCorrection) -> bool:
         """Add a correction to a stored slot; False if the slot is not stored."""
         assert self._db is not None, "Call start() before apply_savings_correction()"
+        key = _utc_iso(correction.start)
         async with self._db.execute(
+            "SELECT components, detail FROM savings_slots WHERE slot_start = ?", (key,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return False
+        components = json.loads(row[0]) if row[0] else {}
+        components[correction.component] = (
+            components.get(correction.component, 0.0) + correction.ev_saving
+        )
+        detail = json.loads(row[1]) if row[1] else {}
+        ev = detail.setdefault("evs", {}).setdefault(
+            correction.component, {"real_kwh": 0.0, "unc_kwh": 0.0}
+        )
+        ev["unc_kwh"] = ev.get("unc_kwh", 0.0) + correction.uncontrolled_ev_kwh
+        await self._db.execute(
             "UPDATE savings_slots SET"
             " uncontrolled_ev_kwh = COALESCE(uncontrolled_ev_kwh, 0) + ?,"
             " uncontrolled_cost = uncontrolled_cost + ?,"
             " uncontrolled_bill = uncontrolled_bill + ?,"
             " real_cost = real_cost + ?,"
-            " ev_saving = ev_saving + ?"
+            " ev_saving = ev_saving + ?,"
+            " components = ?, detail = ?"
             " WHERE slot_start = ?",
             (
                 correction.uncontrolled_ev_kwh, correction.uncontrolled_cost,
                 correction.uncontrolled_cost, correction.real_cost, correction.ev_saving,
-                _utc_iso(correction.start),
+                json.dumps(components), json.dumps(detail), key,
             ),
-        ) as cursor:
-            changed = cursor.rowcount > 0
+        )
         await self._db.commit()
-        return changed
+        return True
 
     async def query_savings_slots(self, start: datetime, end: datetime) -> list[dict]:
         """Savings slots in ``[start, end)``, oldest first."""
@@ -828,7 +851,7 @@ class SqliteStorageBackend:
             "SELECT slot_start, hours, real_cost, uncontrolled_cost, real_bill,"
             " uncontrolled_bill, ev_saving, real_battery_kwh, uncontrolled_battery_kwh,"
             " real_ev_kwh, uncontrolled_ev_kwh, real_stored_kwh, uncontrolled_stored_kwh,"
-            " import_price, stored_detail FROM savings_slots"
+            " import_price, stored_detail, components, detail FROM savings_slots"
             " WHERE slot_start >= ? AND slot_start < ? ORDER BY slot_start",
             (_utc_iso(start), _utc_iso(end)),
         ) as cursor:
@@ -851,6 +874,8 @@ class SqliteStorageBackend:
                 "uncontrolled_stored_kwh": r[12],
                 "import_price": r[13],
                 "stored_detail": json.loads(r[14]) if r[14] else None,
+                "components": json.loads(r[15]) if r[15] else {},
+                "detail": json.loads(r[16]) if r[16] else {},
             }
             for r in rows
         ]
