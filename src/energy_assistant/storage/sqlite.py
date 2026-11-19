@@ -45,7 +45,7 @@ import aiosqlite
 from ..assets.ev import EvDayOverride, EvWeeklyTarget
 from ..core.execution_log import ExecutionSlot
 from ..core.models import EnergyPlan, Measurement
-from ..core.savings import SavingsSlot
+from ..core.savings import SavingsSlot, SlotCorrection
 
 _log = logging.getLogger(__name__)
 
@@ -799,6 +799,27 @@ class SqliteStorageBackend:
             ),
         )
         await self._db.commit()
+
+    async def apply_savings_correction(self, correction: SlotCorrection) -> bool:
+        """Add a correction to a stored slot; False if the slot is not stored."""
+        assert self._db is not None, "Call start() before apply_savings_correction()"
+        async with self._db.execute(
+            "UPDATE savings_slots SET"
+            " uncontrolled_ev_kwh = COALESCE(uncontrolled_ev_kwh, 0) + ?,"
+            " uncontrolled_cost = uncontrolled_cost + ?,"
+            " uncontrolled_bill = uncontrolled_bill + ?,"
+            " real_cost = real_cost + ?,"
+            " ev_saving = ev_saving + ?"
+            " WHERE slot_start = ?",
+            (
+                correction.uncontrolled_ev_kwh, correction.uncontrolled_cost,
+                correction.uncontrolled_cost, correction.real_cost, correction.ev_saving,
+                _utc_iso(correction.start),
+            ),
+        ) as cursor:
+            changed = cursor.rowcount > 0
+        await self._db.commit()
+        return changed
 
     async def query_savings_slots(self, start: datetime, end: datetime) -> list[dict]:
         """Savings slots in ``[start, end)``, oldest first."""

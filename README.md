@@ -135,7 +135,9 @@ have earned) and using it costs the ledger's average cost. So a charging slot
 saves nothing and the saving shows when stored energy replaces grid power:
 (price at that moment − ledger cost) × kWh. Car energy charged earlier than
 the uncontrolled car would have is held at its cost until the uncontrolled car
-charges it too. The Savings tab and `GET /api/savings?hours=168` show the
+charges it too. A car unplugged before its plan's deadline gets the uncontrolled
+car recalculated backwards from the unplug moment: it charges the same energy as
+late as possible before unplugging, priced at those slots' measured prices. The Savings tab and `GET /api/savings?hours=168` show the
 same numbers; for the 24 h and 3 d ranges the tab also charts, per 15-minute
 slot, the stored energy and battery/car power of both houses next to the
 price. Details in `src/energy_assistant/core/savings.py`.

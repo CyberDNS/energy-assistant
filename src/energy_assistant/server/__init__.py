@@ -1752,6 +1752,18 @@ class Application:
         finished = self._savings.tick(sample)
         for slot in finished:
             await self._save_savings_slot(slot)
+        corrections = self._savings.pop_corrections()
+        for corr in corrections:
+            if not await self._storage.apply_savings_correction(corr):
+                _log.info("Savings: no stored slot %s for a car correction", corr.start.isoformat())
+        if corrections:
+            _log.info(
+                "Savings: car unplugged before its deadline — uncontrolled car recalculated"
+                " back from unplug: %.2f kWh in %d earlier slot(s), %+.3f €",
+                sum(c.uncontrolled_ev_kwh for c in corrections), len(corrections),
+                sum(c.ev_saving for c in corrections),
+            )
+            await self._publish_savings()
 
     async def _save_savings_slot(self, slot: SavingsSlot) -> None:
         await self._storage.save_savings_slot(slot)
