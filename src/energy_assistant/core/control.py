@@ -63,8 +63,10 @@ contributor and records the actual energy flow in ``BatteryCostLedger``:
 The effective charge price passed to the ledger depends on *how* the energy
 arrived:
 - ``grid_fill`` intent → ``live.current_price_eur_per_kwh`` (grid import)
-- ``idle`` / PV overflow → ``live.pv_opportunity_price_eur_per_kwh``
-  (the export rate you forgo by self-consuming; often 0 or feed-in tariff)
+- ``idle`` / PV overflow → the PV opportunity price: the export rate you
+  forgo by self-consuming, or — with separately billed loads (Messkonzept
+  8) — the price those loads would otherwise pay for the surplus (see
+  ``surplus_opportunity_price``)
 
 After all devices are updated, gradual spot-floor decay is applied to every
 ``StorageControlContributor``'s ledger entry using the battery's max charge
@@ -75,12 +77,20 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from .grid_limit import GridLimit, GridLimitGuard
 from .ledger import BatteryCostLedger
-from .models import ControlIntent, DeviceCommand, EnergyPlan, DeviceState, StorageConstraints, ThresholdConstraints, intent_display_mode
+from .models import (
+    ControlIntent,
+    DeviceCommand,
+    DeviceState,
+    EnergyPlan,
+    StorageConstraints,
+    ThresholdConstraints,
+    intent_display_mode,
+)
 from .realtime_slice_optimizer import StorageSliceInput, optimize_storage_slice
 
 if TYPE_CHECKING:
@@ -97,6 +107,54 @@ class _SlotEnergy:
     """(intent timestep, plan created_at) — tracking restarts when it changes."""
     tracked_h: float = 0.0
     delivered_kwh: float = 0.0
+
+
+def surplus_opportunity_price(
+    *,
+    site_grid_w: float,
+    zone_grid_w: float,
+    storage_charge_w: float,
+    export_price: float,
+    secondary_price: float,
+) -> float:
+    """Opportunity price (€/kWh) of the default zone's PV surplus.
+
+    With separately billed loads behind a cascaded meter (Messkonzept 8),
+    PV surplus leaving the default zone (``zone_grid_w < 0``) first feeds
+    those loads and only the rest leaves the site.  So energy the storage
+    keeps inside the zone is worth:
+
+    - ``secondary_price`` for the part the separately billed loads would
+      otherwise have imported (main meter importing), and
+    - ``export_price`` only for the part that would have left the site
+      (main meter exporting).
+
+    This is how the planner's two-zone model values it as well.
+
+    Both meter readings are measured with the storage charging at
+    ``storage_charge_w``; without that charge both would be lower by the
+    same amount.  The charge is split by how much it lowered the main
+    meter's import beyond the default zone meter's own import:
+
+        to_secondary = (M⁺ − (M − B)⁺) − (Z⁺ − (Z − B)⁺)
+        outflow      = (B − Z)⁺ − (−Z)⁺
+
+    With no charge (``B ≈ 0``) the marginal price applies: the secondary
+    price while the zone exports and the main meter imports, else export.
+    """
+    m, z, b = site_grid_w, zone_grid_w, max(0.0, storage_charge_w)
+
+    def pos(x: float) -> float:
+        return max(0.0, x)
+
+    outflow_w = pos(b - z) - pos(-z)
+    if outflow_w <= 1.0:
+        return secondary_price if (z < 0.0 and m > 0.0) else export_price
+    to_secondary_w = (pos(m) - pos(m - b)) - (pos(z) - pos(z - b))
+    to_secondary_w = min(outflow_w, max(0.0, to_secondary_w))
+    return (
+        to_secondary_w * secondary_price + (outflow_w - to_secondary_w) * export_price
+    ) / outflow_w
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -198,13 +256,53 @@ class LiveSituation:
     heatpump is running, even though the household circuit may be fully PV-powered.
     """
 
+    secondary_price_eur_per_kwh: float | None = None
+    """Import price (€/kWh) of the loads billed on another tariff, if any.
+
+    Set when the site has separately billed loads (e.g. a heat pump on its
+    own tariff behind a cascaded meter, Messkonzept 8) and the default zone
+    has its own meter.  Surplus leaving the default zone feeds those loads
+    before it reaches the grid, so it is worth this price, not the export
+    price (see ``pv_opportunity_price_eur_per_kwh_effective``).
+    """
+
+    @property
+    def storage_charge_w(self) -> float:
+        """Measured charging power (W) of the storage devices, ≥ 0."""
+        return sum(
+            state.power_w
+            for dev_id in self.storage_cost_bases
+            if (state := self.device_states.get(dev_id)) is not None
+            and state.power_w is not None
+            and state.power_w > 0.0
+        )
+
+    @property
+    def pv_opportunity_price_eur_per_kwh_effective(self) -> float:
+        """Opportunity price (€/kWh) of PV used inside the default zone.
+
+        ``pv_opportunity_price_eur_per_kwh`` (export) when there are no
+        separately billed loads; otherwise see ``surplus_opportunity_price``.
+        """
+        if self.secondary_price_eur_per_kwh is None or self.default_zone_grid_power_w is None:
+            return self.pv_opportunity_price_eur_per_kwh
+        return surplus_opportunity_price(
+            site_grid_w=self.grid_power_w,
+            zone_grid_w=self.default_zone_grid_power_w,
+            storage_charge_w=self.storage_charge_w,
+            export_price=self.pv_opportunity_price_eur_per_kwh,
+            secondary_price=self.secondary_price_eur_per_kwh,
+        )
+
     @property
     def market_price_eur_per_kwh(self) -> float:
         """Blended market price for the default (household) tariff (€/kWh).
 
         Three supply sources are considered:
 
-        1. **PV** (opportunity cost = feed-in price)
+        1. **PV** (opportunity cost = where the surplus would otherwise go:
+           the separately billed loads first, then the grid — see
+           ``surplus_opportunity_price``)
         2. **Grid import** (cost = default import tariff, e.g. Tibber spot)
         3. **Battery discharge** (cost = weighted-average ledger cost basis)
 
@@ -235,7 +333,7 @@ class LiveSituation:
         bat_basis = bat_cost_total / bat_w_total if bat_w_total > 0.0 else 0.0
 
         return (
-            pv_frac   * self.pv_opportunity_price_eur_per_kwh
+            pv_frac   * self.pv_opportunity_price_eur_per_kwh_effective
             + grid_frac * self.current_price_eur_per_kwh
             + bat_frac  * bat_basis
         )
@@ -487,7 +585,7 @@ class ControlLoop:
         )
         # Log the next 2 upcoming intents per device so the operator can see
         # what the optimizer has decided without digging into the plan object.
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         upcoming = sorted(
             (i for i in plan.intents if i.timestep >= now),
             key=lambda i: i.timestep,
@@ -528,7 +626,7 @@ class ControlLoop:
     async def tick(
         self,
         live: LiveSituation,
-        registry: "DeviceRegistry",
+        registry: DeviceRegistry,
     ) -> None:
         """Execute one control tick.
 
@@ -870,7 +968,7 @@ class ControlLoop:
 
     def _slot_energy_target_w(
         self,
-        contributor: "StorageControlContributor",
+        contributor: StorageControlContributor,
         intent: ControlIntent,
         live: LiveSituation,
         planned_w: float,
