@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Protocol
 from .models import DeviceState, EnergyPlan, ForecastPoint, ForecastQuantity, StorageConstraints, ThresholdConstraints
 
 if TYPE_CHECKING:
+    from .thermal_model import ThermalModel
     from .constraint import Constraint
     from .tariff import TariffModel
     from ..assets.ev import EvChargingGoal
@@ -91,6 +92,11 @@ class OptimizationContext:
     tariffs together — from ``max_import_kw`` on the topology root.  None = no
     limit.  The realtime control loop enforces it per tick as well.
     """
+    thermal_models: dict[str, "ThermalModel"] = field(default_factory=dict)
+    """Thermal model per threshold device (learned, see ``core/thermal_model``).
+    Devices without an entry use the configured constant rates."""
+    ambient_forecasts: dict[str, list[ForecastPoint]] = field(default_factory=dict)
+    """Ambient forecast per threshold device whose model has an ambient term."""
     producer_device_ids: set[str] = field(default_factory=set)
     """Device IDs with role=producer (PV panels).
 
