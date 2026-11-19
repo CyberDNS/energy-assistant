@@ -52,6 +52,22 @@ Device behaviour both houses share
   value, so later uses of that battery's energy cost more — no correction
   needed.
 
+Threshold devices
+-----------------
+A device that keeps a measured value between two thresholds (aquarium
+cooler, fridge, …) runs in the uncontrolled house like a plain thermostat:
+on at one threshold, off at the other (respecting its minimum run and off
+times), on the device's thermal model (``core/thermal_model``, learned or
+configured).  Its energy is ordinary load there, so PV covers it before the
+batteries charge.  Like the cars, both houses' device energy is matched
+FIFO and the price difference is booked once both have used the same kWh.
+The simulated value is set back to the measured one every
+``DEVICE_RESYNC_AFTER`` (and after data gaps); energy still unmatched then is
+neutral.
+
+Every slot also records the saving per component — ``batteries``, each car
+and each device — so the dashboard can explain the total.
+
 Housekeeping
 ------------
 The uncontrolled batteries are set to the real SoC (keeping their own average
@@ -66,7 +82,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 
-from .models import StorageConstraints
+from .models import StorageConstraints, ThresholdConstraints
+from .thermal_model import ThermalModel, device_mode
 
 STATE_VERSION = 2
 
@@ -80,6 +97,13 @@ reality (nothing is booked for the gap)."""
 
 RESYNC_AFTER = timedelta(days=3)
 """The uncontrolled batteries are set to the real SoC at least this often."""
+
+DEVICE_RESYNC_AFTER = timedelta(hours=24)
+"""The simulated value of a threshold device is set back to the measured one
+at least this often; unmatched device energy is neutral at that point."""
+
+BATTERIES = "batteries"
+"""Component key of the battery part of the saving."""
 
 LIMIT_BAND_PCT = 2.0
 """Two batteries within this many % of capacity of the same SoC limit count
@@ -194,6 +218,31 @@ class EvSession:
         return datetime.fromisoformat(self.deadline) if self.deadline else None
 
 
+@dataclass
+class DeviceSim:
+    """A threshold device: the uncontrolled thermostat next to the real one."""
+
+    value: float | None = None
+    """Simulated measured value of the uncontrolled device."""
+    running: bool = False
+    since: str | None = None
+    """ISO time the uncontrolled device last switched (min run/off times)."""
+    real_kwh: float = 0.0
+    unc_kwh: float = 0.0
+    real_queue: list[list[float]] = field(default_factory=list)
+    unc_queue: list[list[float]] = field(default_factory=list)
+    last_resync: str | None = None
+
+    @property
+    def matched_kwh(self) -> float:
+        return min(self.real_kwh, self.unc_kwh)
+
+
+def _dev(device_id: str) -> str:
+    """Key of a threshold device among the consumers in ``_house_costs``."""
+    return f"dev:{device_id}"
+
+
 def _release(queue: list[list[float]], kwh: float) -> float:
     """Remove *kwh* from the front of a FIFO ``[kWh, €]`` queue; return €."""
     cost = 0.0
@@ -220,6 +269,7 @@ class SavingsState:
     """Simulated battery of the uncontrolled house (its state *is* its ledger)."""
     last_resync: dict[str, str] = field(default_factory=dict)
     evs: dict[str, EvSession] = field(default_factory=dict)
+    devices: dict[str, DeviceSim] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {"version": STATE_VERSION, **asdict(self)}
@@ -234,6 +284,7 @@ class SavingsState:
             unc={k: Ledger(**v) for k, v in (data.get("unc") or {}).items()},
             last_resync=dict(data.get("last_resync") or {}),
             evs={k: EvSession(**v) for k, v in (data.get("evs") or {}).items()},
+            devices={k: DeviceSim(**v) for k, v in (data.get("devices") or {}).items()},
         )
 
 
@@ -248,6 +299,14 @@ class EvLive:
     """``None`` = unknown (e.g. connection lost): the session is left as is."""
     power_kw: float
     max_kw: float
+
+
+@dataclass(frozen=True)
+class DeviceLive:
+    """A threshold device right now; ``None`` = no usable reading."""
+
+    power_kw: float | None
+    value: float | None
 
 
 @dataclass(frozen=True)
@@ -273,6 +332,8 @@ class LiveSample:
     the uncontrolled house can store: a household reading below zero without
     PV (e.g. grid meter and wallbox sampled at different moments while a car
     draws 11 kW) is measurement skew, not free energy."""
+    devices: Mapping[str, DeviceLive] = field(default_factory=dict)
+    """Threshold devices (see ``SavingsTracker`` *devices*)."""
 
 
 @dataclass
@@ -300,10 +361,21 @@ class SavingsSlot:
     uncontrolled_stored: dict[str, float] = field(default_factory=dict)
     price_hours: float = 0.0
     """Σ import price × hours; see ``import_price``."""
+    components: dict[str, float] = field(default_factory=dict)
+    """Saving per component: ``batteries``, each car and each threshold
+    device (by device id).  Sums to ``saving``."""
+    evs: dict[str, dict[str, float]] = field(default_factory=dict)
+    """Per car: ``real_kwh`` / ``unc_kwh`` charged in the slot."""
+    devices: dict[str, dict[str, float | None]] = field(default_factory=dict)
+    """Per threshold device: ``real_kwh`` / ``unc_kwh`` used and the measured
+    (``real_value``) and simulated (``unc_value``) value at slot end."""
 
     @property
     def saving(self) -> float:
         return self.uncontrolled_cost - self.real_cost
+
+    def add_component(self, key: str, saving: float) -> None:
+        self.components[key] = self.components.get(key, 0.0) + saving
 
     @property
     def import_price(self) -> float | None:
@@ -319,6 +391,8 @@ class SlotCorrection:
     uncontrolled_ev_kwh: float
     uncontrolled_cost: float
     real_cost: float
+    component: str = "ev"
+    """Component the correction belongs to (the car's device id)."""
 
     @property
     def ev_saving(self) -> float:
@@ -412,8 +486,15 @@ class SavingsTracker:
         batteries: Sequence[StorageConstraints],
         step_minutes: int,
         state: SavingsState | None = None,
+        devices: Sequence[ThresholdConstraints] = (),
     ) -> None:
         self._batteries = {sc.device_id: sc for sc in batteries}
+        self._devices = {tc.device_id: tc for tc in devices}
+        # Thermal model and current ambient per threshold device (the server
+        # updates them from the learned models; configured rates until then).
+        self._thermal: dict[str, tuple[ThermalModel, float | None]] = {
+            tc.device_id: (ThermalModel.from_constraints(tc), None) for tc in devices
+        }
         self._step_minutes = step_minutes
         self.state = state or SavingsState()
         self._slot: SavingsSlot | None = None
@@ -427,6 +508,13 @@ class SavingsTracker:
         """Corrections to already closed slots since the last call."""
         out, self._corrections = self._corrections, []
         return out
+
+    def set_thermal_model(
+        self, device_id: str, model: ThermalModel, ambient: float | None = None
+    ) -> None:
+        """Model (and current ambient) the uncontrolled thermostat runs on."""
+        if device_id in self._devices:
+            self._thermal[device_id] = (model, ambient)
 
     # -- charge plans -------------------------------------------------------
 
@@ -514,20 +602,30 @@ class SavingsTracker:
             if ev.plugged:
                 real_ev[device_id] = max(0.0, ev.power_kw) * hours
                 flex_kwh += real_ev[device_id]
+        real_dev: dict[str, float] = {}
+        for device_id in self._devices:
+            live = sample.devices.get(device_id)
+            if live is not None and live.power_kw is not None:
+                real_dev[device_id] = max(0.0, live.power_kw) * hours
+                flex_kwh += real_dev[device_id]
         household = sample.site_net_kw * hours - flex_kwh - secondary_total
 
         real = _house_costs(
             household, secondary, *prices, self._batteries, self.state.real,
-            charge, discharge, real_ev,
+            charge, discharge, {**real_ev, **{_dev(d): e for d, e in real_dev.items()}},
         )
 
         # ── Uncontrolled house: simulated flows ───────────────────────────
         self._update_sessions(sample, previous)
-        u_charge, u_discharge, u_ev = self._simulate(sample, household, forced, hours)
+        u_dev = self._step_devices(sample, previous, hours)
+        u_charge, u_discharge, u_ev = self._simulate(
+            sample, household, forced, hours, extra_load=sum(u_dev.values())
+        )
         unc = _house_costs(
             household, secondary, *prices, self._batteries, self.state.unc,
-            u_charge, u_discharge, u_ev,
+            u_charge, u_discharge, {**u_ev, **{_dev(d): e for d, e in u_dev.items()}},
         )
+        slot.add_component(BATTERIES, unc.cost - real.cost)
 
         # ── Cars: book matched energy ─────────────────────────────────────
         ev_real_booked = ev_unc_booked = 0.0
@@ -543,13 +641,46 @@ class SavingsTracker:
                 ev.unc_by_slot[key] = ev.unc_by_slot.get(key, 0.0) + u_ev[device_id]
             matched = ev.matched_kwh - before
             if matched > 0:
-                ev_real_booked += _release(ev.real_queue, matched)
-                ev_unc_booked += _release(ev.unc_queue, matched)
+                r = _release(ev.real_queue, matched)
+                u = _release(ev.unc_queue, matched)
+                ev_real_booked += r
+                ev_unc_booked += u
+                slot.add_component(device_id, u - r)
+        for device_id in {*real_ev, *u_ev}:
+            d = slot.evs.setdefault(device_id, {"real_kwh": 0.0, "unc_kwh": 0.0})
+            d["real_kwh"] += real_ev.get(device_id, 0.0)
+            d["unc_kwh"] += u_ev.get(device_id, 0.0)
+
+        # ── Threshold devices: book matched energy ────────────────────────
+        dev_real_booked = dev_unc_booked = 0.0
+        for device_id, sim in self.state.devices.items():
+            if device_id not in self._devices:
+                continue
+            before = sim.matched_kwh
+            if real_dev.get(device_id, 0.0) > 0:
+                sim.real_kwh += real_dev[device_id]
+                sim.real_queue.append([real_dev[device_id], real.ev_cost.get(_dev(device_id), 0.0)])
+            if u_dev.get(device_id, 0.0) > 0:
+                sim.unc_kwh += u_dev[device_id]
+                sim.unc_queue.append([u_dev[device_id], unc.ev_cost.get(_dev(device_id), 0.0)])
+            matched = sim.matched_kwh - before
+            if matched > 0:
+                r = _release(sim.real_queue, matched)
+                u = _release(sim.unc_queue, matched)
+                dev_real_booked += r
+                dev_unc_booked += u
+                slot.add_component(device_id, u - r)
+            live = sample.devices.get(device_id)
+            d = slot.devices.setdefault(device_id, {"real_kwh": 0.0, "unc_kwh": 0.0})
+            d["real_kwh"] += real_dev.get(device_id, 0.0)
+            d["unc_kwh"] += u_dev.get(device_id, 0.0)
+            d["real_value"] = live.value if live is not None else None
+            d["unc_value"] = sim.value
 
         slot.real_bill += real.bill
         slot.uncontrolled_bill += unc.bill
-        slot.real_cost += real.cost + ev_real_booked
-        slot.uncontrolled_cost += unc.cost + ev_unc_booked
+        slot.real_cost += real.cost + ev_real_booked + dev_real_booked
+        slot.uncontrolled_cost += unc.cost + ev_unc_booked + dev_unc_booked
         slot.ev_saving += ev_unc_booked - ev_real_booked
         slot.real_battery_kwh += sum(charge.values()) - sum(discharge.values())
         slot.uncontrolled_battery_kwh += sum(u_charge.values()) - sum(u_discharge.values())
@@ -560,6 +691,7 @@ class SavingsTracker:
         self._housekeeping(
             sample.timestamp, active={*charge, *discharge, *u_charge, *u_discharge}
         )
+        self._resync_devices(sample)
         slot.real_stored = {d: led.stored_kwh for d, led in self.state.real.items()}
         slot.uncontrolled_stored = {d: led.stored_kwh for d, led in self.state.unc.items()}
         return self._roll(sample.timestamp)
@@ -598,10 +730,17 @@ class SavingsTracker:
             elif ev.plugged is False:
                 session = self.state.evs.pop(device_id, None)
                 if session is not None:
-                    self._settle_early_unplug(session, previous, ev.max_kw, sample.import_price)
+                    self._settle_early_unplug(
+                        device_id, session, previous, ev.max_kw, sample.import_price
+                    )
 
     def _settle_early_unplug(
-        self, ev: EvSession, unplugged: datetime, max_kw: float, fallback_price: float
+        self,
+        device_id: str,
+        ev: EvSession,
+        unplugged: datetime,
+        max_kw: float,
+        fallback_price: float,
     ) -> None:
         """Recalculate the uncontrolled car of a session that ended before its
         deadline: it charges the energy the real car got (up to the plan's
@@ -646,11 +785,15 @@ class SavingsTracker:
                 self._slot.uncontrolled_bill += unc_cost
                 self._slot.real_cost += real_cost
                 self._slot.ev_saving += unc_cost - real_cost
+                self._slot.add_component(device_id, unc_cost - real_cost)
+                d = self._slot.evs.setdefault(device_id, {"real_kwh": 0.0, "unc_kwh": 0.0})
+                d["unc_kwh"] += kwh
             else:
                 price = self._prices.get(start, default_price)
                 self._corrections.append(SlotCorrection(
                     start=start, uncontrolled_ev_kwh=kwh,
                     uncontrolled_cost=kwh * price, real_cost=kwh * real_cost_per_kwh,
+                    component=device_id,
                 ))
 
     def _simulate(
@@ -659,8 +802,13 @@ class SavingsTracker:
         household: float,
         forced: Mapping[str, float],
         hours: float,
+        extra_load: float = 0.0,
     ) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
-        """Flows of the uncontrolled house for one interval (AC kWh)."""
+        """Flows of the uncontrolled house for one interval (AC kWh).
+
+        *extra_load*: energy of the uncontrolled threshold devices — ordinary
+        load, covered by PV before the batteries charge.
+        """
         charge: dict[str, float] = {}
         discharge: dict[str, float] = {}
         ev_kwh: dict[str, float] = {}
@@ -683,7 +831,7 @@ class SavingsTracker:
                 charge[device_id] = charge.get(device_id, 0.0) + take
 
         # PV surplus: batteries first (configuration order) …
-        surplus = max(0.0, -household)
+        surplus = max(0.0, -(household + extra_load))
         if sample.pv_kw is not None:
             surplus = min(surplus, max(0.0, sample.pv_kw) * hours)
         for device_id in self._batteries:
@@ -719,7 +867,7 @@ class SavingsTracker:
                 ev_kwh[device_id] = pv + grid
 
         # Deficit of the zone (household + cars): batteries discharge.
-        deficit = household + sum(charge.values()) + sum(ev_kwh.values())
+        deficit = household + extra_load + sum(charge.values()) + sum(ev_kwh.values())
         for device_id, sc in self._batteries.items():
             if device_id not in led or deficit <= 1e-12 or charge.get(device_id, 0.0) > 0:
                 continue
@@ -729,6 +877,72 @@ class SavingsTracker:
                 discharge[device_id] = give
                 deficit -= give
         return charge, discharge, ev_kwh
+
+    def _step_devices(
+        self, sample: LiveSample, previous: datetime, hours: float
+    ) -> dict[str, float]:
+        """Advance each uncontrolled thermostat by one interval; return the
+        energy each device used (kWh)."""
+        used: dict[str, float] = {}
+        for device_id, tc in self._devices.items():
+            sim = self.state.devices.setdefault(device_id, DeviceSim())
+            live = sample.devices.get(device_id)
+            if sim.value is None:
+                if live is None or live.value is None:
+                    continue
+                self._resync_device(device_id, sim, live, sample.timestamp)
+            model, ambient = self._thermal[device_id]
+            mode = device_mode(tc)
+            lo, hi = tc.bottom_threshold, tc.top_threshold
+            if mode == "cool":
+                want = sim.value >= hi or (sim.running and sim.value > lo)
+            else:
+                want = sim.value <= lo or (sim.running and sim.value < hi)
+            if want != sim.running:
+                since = datetime.fromisoformat(sim.since) if sim.since else None
+                held_h = (previous - since).total_seconds() / 3600.0 if since else float("inf")
+                if (sim.running and held_h < tc.min_runtime_h) or (
+                    not sim.running and held_h < tc.min_offtime_h
+                ):
+                    want = sim.running
+            if want != sim.running:
+                sim.running = want
+                sim.since = previous.isoformat()
+            on = {mode: 1.0 if sim.running else 0.0}
+            sim.value += hours * model.rate(sim.value, ambient, on)
+            used[device_id] = tc.rated_power_kw * hours if sim.running else 0.0
+        return used
+
+    def _resync_device(
+        self, device_id: str, sim: DeviceSim, live: DeviceLive, now: datetime
+    ) -> None:
+        """Set the simulated value to the measured one; unmatched energy is
+        dropped (neutral).  The thermostat restarts as a thermostat would be
+        at that value — off inside the band, whatever the planner is doing."""
+        sim.value = live.value
+        tc = self._devices.get(device_id)
+        running = False
+        if tc is not None and sim.value is not None:
+            running = (
+                sim.value >= tc.top_threshold if device_mode(tc) == "cool"
+                else sim.value <= tc.bottom_threshold
+            )
+        if running != sim.running:
+            sim.running, sim.since = running, now.isoformat()
+        sim.real_kwh = sim.unc_kwh = 0.0
+        sim.real_queue.clear()
+        sim.unc_queue.clear()
+        sim.last_resync = now.isoformat()
+
+    def _resync_devices(self, sample: LiveSample, force: bool = False) -> None:
+        """Resync every ``DEVICE_RESYNC_AFTER`` (or always with *force*)."""
+        for device_id, sim in self.state.devices.items():
+            live = sample.devices.get(device_id)
+            if live is None or live.value is None:
+                continue
+            last = datetime.fromisoformat(sim.last_resync) if sim.last_resync else None
+            if force or last is None or sample.timestamp - last >= DEVICE_RESYNC_AFTER:
+                self._resync_device(device_id, sim, live, sample.timestamp)
 
     def _housekeeping(self, now: datetime, active: set[str] | frozenset[str] = frozenset()) -> None:
         """Set uncontrolled batteries to the real SoC at natural resync points
@@ -766,6 +980,7 @@ class SavingsTracker:
             ev.unc_kwh = ev.real_kwh
             ev.real_queue.clear()
             ev.unc_queue.clear()
+        self._resync_devices(sample, force=True)
 
     def _roll(self, now: datetime) -> list[SavingsSlot]:
         """Close the open slot once *now* has left it."""

@@ -31,10 +31,20 @@ RANGES = ["24 h", "3 d", "7 d", "30 d", "90 d", "1 y"]
 MAX_SWITCH_S = 2.0
 
 
+GROUPS = [
+    {"id": "batteries", "kind": "batteries", "label": "Batteries"},
+    {"id": "cp", "kind": "car", "label": "Family car"},
+    {"id": "aq", "kind": "device", "label": "Aquarium", "unit": "°C",
+     "bottom_threshold": 18.0, "top_threshold": 20.5},
+]
+
+
 def _totals(real_cost: float, unc_cost: float, hours: float) -> dict:
+    saving = unc_cost - real_cost
     return {
-        "real": unc_cost - real_cost, "uncontrolled_cost": unc_cost, "real_cost": real_cost,
+        "real": saving, "uncontrolled_cost": unc_cost, "real_cost": real_cost,
         "uncontrolled_bill": unc_cost, "real_bill": real_cost, "ev_saving": 0.0, "hours": hours,
+        "components": {"batteries": saving * 0.6, "cp": saving * 0.3, "aq": saving * 0.1},
     }
 
 
@@ -54,6 +64,14 @@ def _savings(hours: float, n_slots: int) -> dict:
             "uncontrolled_ev_kwh": 0.0, "real_stored_kwh": 3.0 - 0.01 * i,
             "uncontrolled_stored_kwh": max(1.0, 3.0 - 0.05 * i), "import_price": 0.45,
             "stored_detail": {"real": {"bat": 3.0}, "uncontrolled": {"bat": 2.0}},
+            "components": {"batteries": 0.01, "cp": 0.0, "aq": 0.001},
+            "detail": {
+                "evs": {"cp": {"real_kwh": 2.5 if i % 7 == 0 else 0.0, "unc_kwh": 0.0}},
+                "devices": {"aq": {"real_kwh": 0.04 if i % 3 == 0 else 0.0,
+                                   "unc_kwh": 0.04 if i % 4 == 0 else 0.0,
+                                   "real_value": 19.0 + 0.01 * (i % 50),
+                                   "unc_value": 19.2 + 0.01 * (i % 40)}},
+            },
         })
     bucket = "hour" if hours <= 72 else "day" if hours <= 24 * 31 else "week"
     size = {"hour": timedelta(hours=1), "day": timedelta(days=1), "week": timedelta(days=7)}[bucket]
@@ -67,6 +85,7 @@ def _savings(hours: float, n_slots: int) -> dict:
         "stored": {"real": {"bat": {"kwh": 3.0, "value_eur": 0.6}},
                    "uncontrolled": {"bat": {"kwh": 1.0, "value_eur": 0.1}}},
         "slots": slots if hours <= 72 else None,
+        "groups": GROUPS,
     }
 
 
@@ -141,12 +160,12 @@ def test_switching_ranges_is_fast_and_shows_the_right_panels(server, page) -> No
             """short => {
                 const titles = [...document.querySelectorAll('.panel h2')].map(h => h.textContent);
                 const saving = titles.find(t => t.startsWith('Saving per')) ?? '';
-                const detail = titles.some(t => t.startsWith('Batteries'));
+                const groups = ['Batteries', 'Family car', 'Aquarium'].every(g => titles.includes(g));
                 const drawn = [...document.querySelectorAll('.panel .js-plotly-plot')]
                     .every(p => p.querySelector('.main-svg'));
-                const cars = titles.some(t => t.startsWith('Cars'));
-                return saving.includes('15 min') === short && detail === short
-                    && cars === short && drawn;
+                // One chart per group panel plus saving, cumulative and cost.
+                const charts = document.querySelectorAll('.panel .js-plotly-plot').length;
+                return saving.includes('15 min') === short && groups && drawn && charts === 6;
             }""",
             arg=short,
             timeout=30_000,
