@@ -2,18 +2,38 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from energy_assistant.core.ledger import BatteryCostLedger
-from energy_assistant.core.models import DeviceState
+from energy_assistant.core.models import DeviceRole, DeviceState
 from energy_assistant.server import Application, _TariffZone
 
 
-def _app_with_zones(zones: dict[str, _TariffZone], pv_opportunity_price: float) -> Application:
+class _Registry:
+    def __init__(self, roles: dict[str, DeviceRole]) -> None:
+        self._roles = roles
+
+    def get(self, device_id: str):
+        role = self._roles.get(device_id)
+        return None if role is None else SimpleNamespace(device_id=device_id, role=role)
+
+
+def _app_with_zones(
+    zones: dict[str, _TariffZone],
+    pv_opportunity_price: float,
+    devices: dict[str, dict] | None = None,
+    roles: dict[str, DeviceRole] | None = None,
+) -> Application:
     app = Application.__new__(Application)
     app._tariff_zones = zones
     app._pv_opportunity_price = pv_opportunity_price
     app._ledger = BatteryCostLedger()
+    app._cfg = SimpleNamespace(default_tariff_id="household", devices=devices or {})
+    app._registry = _Registry(roles or {})
+    app._tariffs = {tid: object() for tid in ("household", "heatpump")}
+    app._grid_meter_id = "main_grid_meter"
     return app
 
 
@@ -101,3 +121,66 @@ def test_market_breakdown_is_per_zone_not_sitewide() -> None:
     assert hp["pv_frac"] == pytest.approx(0.0)
     assert hp["bat_frac"] == pytest.approx(0.0)
     assert hp["price_eur_per_kwh"] == pytest.approx(0.178)
+
+
+def _mk8_app() -> Application:
+    zones = {
+        "household": _TariffZone(
+            tariff_id="household",
+            meter_ids=["household_meter"],
+            producer_ids=["pv_production"],
+            storage_ids=["bat"],
+        ),
+        "heatpump": _TariffZone(
+            tariff_id="heatpump",
+            diff_minuend_id="main_grid_meter",
+            diff_subtrahend_id="household_meter",
+        ),
+    }
+    return _app_with_zones(
+        zones,
+        pv_opportunity_price=0.082,
+        devices={
+            "heatpump": {"type": "differential", "tariff": "heatpump"},
+            "household_meter": {"tariff": "household"},
+        },
+        roles={"heatpump": DeviceRole.CONSUMER, "household_meter": DeviceRole.METER},
+    )
+
+
+def test_household_pv_feeding_heatpump_is_valued_at_heatpump_tariff() -> None:
+    """Issue #78: household surplus the heat pump would use is not worth export.
+
+    The household meter exports 2.4 kW while the battery charges 1.2 kW, and
+    the main meter imports 2.5 kW for the heat pump.  Without the battery the
+    heat pump would have used those 1.2 kW, so PV in the household zone is
+    worth the heat pump tariff.
+    """
+    app = _mk8_app()
+    device_states = {
+        "main_grid_meter": DeviceState(device_id="main_grid_meter", power_w=2500.0),
+        "household_meter": DeviceState(device_id="household_meter", power_w=-2400.0),
+        "pv_production": DeviceState(device_id="pv_production", power_w=-4000.0),
+        "bat": DeviceState(device_id="bat", power_w=1200.0),
+        "heatpump": DeviceState(device_id="heatpump", power_w=2500.0),
+    }
+    hh = app._compute_zone_market_breakdown(
+        {"household": 0.35, "heatpump": 0.178}, device_states
+    )["household"]
+    assert hh["pv_frac"] == pytest.approx(1.0)
+    assert hh["price_eur_per_kwh"] == pytest.approx(0.178)
+
+
+def test_household_pv_keeps_export_price_when_site_exports() -> None:
+    app = _mk8_app()
+    device_states = {
+        "main_grid_meter": DeviceState(device_id="main_grid_meter", power_w=-1500.0),
+        "household_meter": DeviceState(device_id="household_meter", power_w=-2400.0),
+        "pv_production": DeviceState(device_id="pv_production", power_w=-4000.0),
+        "bat": DeviceState(device_id="bat", power_w=1200.0),
+        "heatpump": DeviceState(device_id="heatpump", power_w=900.0),
+    }
+    hh = app._compute_zone_market_breakdown(
+        {"household": 0.35, "heatpump": 0.178}, device_states
+    )["household"]
+    assert hh["price_eur_per_kwh"] == pytest.approx(0.082)

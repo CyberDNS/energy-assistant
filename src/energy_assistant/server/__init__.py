@@ -77,7 +77,12 @@ from ..assets.threshold import ThresholdControlContributor
 from ..config.yaml import YamlConfigLoader
 from ..core.change_gate import ChangeGate
 from ..core.config import AppConfig
-from ..core.control import ControlLoop, LiveSituation, StorageControlContributor
+from ..core.control import (
+    ControlLoop,
+    LiveSituation,
+    StorageControlContributor,
+    surplus_opportunity_price,
+)
 from ..core.event import DeviceStateEvent, EventBus, PlanUpdatedEvent
 from ..core.execution_log import DeviceTick, ExecutionLog
 from ..core.forecast import ForecastProvider
@@ -1542,6 +1547,8 @@ class Application:
 
         await self._check_force_charge_reset(device_states)
 
+        tariff_prices = await self._fetch_tariff_prices(now)
+
         live = LiveSituation(
             timestamp=now,
             grid_power_w=grid_power_w,
@@ -1552,6 +1559,7 @@ class Application:
             pv_power_w=pv_power_w,
             storage_cost_bases=self._ledger.all_cost_bases(),
             default_zone_grid_power_w=self._default_zone_grid_power_w(device_states),
+            secondary_price_eur_per_kwh=self._secondary_import_price(tariff_prices, device_states),
         )
 
         self._sync_ledger_stored_energy_from_soc()
@@ -1704,6 +1712,31 @@ class Application:
             if tariff_id != primary_id and tariff_id in self._tariffs:
                 out[tariff_id].append(device_id)
         return out
+
+    def _secondary_import_price(
+        self, tariff_prices: dict[str, float], device_states: "dict[str, Any]"
+    ) -> float | None:
+        """Current import price (€/kWh) of the separately billed loads.
+
+        Weighted by their measured power; the plain mean of their tariffs
+        when none is drawing.  ``None`` when the site has no such loads.
+        """
+        weighted = 0.0
+        total_w = 0.0
+        prices: list[float] = []
+        for tariff_id, device_ids in self._secondary_consumers().items():
+            price = tariff_prices.get(tariff_id)
+            if price is None:
+                continue
+            prices.append(price)
+            for did in device_ids:
+                st = device_states.get(did)
+                w = max(0.0, st.power_w) if st is not None and st.power_w is not None else 0.0
+                weighted += w * price
+                total_w += w
+        if not prices:
+            return None
+        return weighted / total_w if total_w > 0.0 else sum(prices) / len(prices)
 
     async def _savings_sample(
         self, now: datetime, import_price: float, device_states: dict[str, Any]
@@ -2001,6 +2034,9 @@ class Application:
                 ),
                 storage_cost_bases=self._ledger.all_cost_bases(),
                 default_zone_grid_power_w=self._default_zone_grid_power_w(device_states_map),
+                secondary_price_eur_per_kwh=self._secondary_import_price(
+                    tariff_prices_status, device_states_map,
+                ),
             )
 
             devices_payload = []
@@ -3283,8 +3319,9 @@ class Application:
                 continue
 
             bat_basis = bat_cost / bat_w if bat_w > 0.0 else 0.0
+            pv_price = self._zone_pv_opportunity_price(tariff_id, zone, tariff_prices, device_states)
             price = (
-                (pv_w  / total_w) * self._pv_opportunity_price
+                (pv_w  / total_w) * pv_price
                 + (grid_w / total_w) * import_price
                 + (bat_w  / total_w) * bat_basis
             )
@@ -3382,6 +3419,46 @@ class Application:
             )
 
         return breakdown
+
+    def _zone_pv_opportunity_price(
+        self,
+        tariff_id: str,
+        zone: "_TariffZone",
+        tariff_prices: dict[str, float],
+        device_states: "dict[str, Any]",
+    ) -> float:
+        """Opportunity price of PV used in *zone* (see ``surplus_opportunity_price``).
+
+        Only the default zone's surplus feeds the separately billed loads;
+        every other zone keeps the export price.
+        """
+        export_price = self._pv_opportunity_price
+        if tariff_id != (self._cfg.default_tariff_id or ""):
+            return export_price
+        secondary_price = self._secondary_import_price(tariff_prices, device_states)
+        zone_grid_w = self._default_zone_grid_power_w(device_states)
+        site = device_states.get(self._grid_meter_id) if self._grid_meter_id else None
+        if (
+            secondary_price is None
+            or zone_grid_w is None
+            or site is None
+            or site.power_w is None
+        ):
+            return export_price
+        charge_w = sum(
+            s.power_w
+            for did in zone.storage_ids
+            if (s := device_states.get(did)) is not None
+            and s.power_w is not None
+            and s.power_w > 0.0
+        )
+        return surplus_opportunity_price(
+            site_grid_w=site.power_w,
+            zone_grid_w=zone_grid_w,
+            storage_charge_w=charge_w,
+            export_price=export_price,
+            secondary_price=secondary_price,
+        )
 
     def _default_zone_grid_power_w(self, device_states: "dict[str, Any]") -> float | None:
         """Return grid import power (W) for the default tariff zone's sub-meter.
