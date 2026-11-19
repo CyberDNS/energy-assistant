@@ -141,10 +141,12 @@ def test_switching_ranges_is_fast_and_shows_the_right_panels(server, page) -> No
             """short => {
                 const titles = [...document.querySelectorAll('.panel h2')].map(h => h.textContent);
                 const saving = titles.find(t => t.startsWith('Saving per')) ?? '';
-                const detail = titles.some(t => t.startsWith('Batteries and cars'));
+                const detail = titles.some(t => t.startsWith('Batteries'));
                 const drawn = [...document.querySelectorAll('.panel .js-plotly-plot')]
                     .every(p => p.querySelector('.main-svg'));
-                return saving.includes('15 min') === short && detail === short && drawn;
+                const cars = titles.some(t => t.startsWith('Cars'));
+                return saving.includes('15 min') === short && detail === short
+                    && cars === short && drawn;
             }""",
             arg=short,
             timeout=30_000,

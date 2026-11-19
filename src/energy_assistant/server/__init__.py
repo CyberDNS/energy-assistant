@@ -1738,6 +1738,8 @@ class Application:
             import_price=import_price,
             export_price=self._pv_opportunity_price,
             cost_basis=self._ledger.all_cost_bases(),
+            pv_kw=abs(pv) if self._pv_device_id and (pv := power_kw(self._pv_device_id)) is not None
+            else None,
         )
 
     async def _track_savings(
