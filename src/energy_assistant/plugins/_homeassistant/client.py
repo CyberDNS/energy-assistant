@@ -141,6 +141,46 @@ class HAClient:
             out[stat_id] = parsed
         return out
 
+    async def get_history(
+        self,
+        entity_ids: list[str],
+        start: datetime,
+        end: datetime | None = None,
+    ) -> dict[str, list[tuple[datetime, str]]]:
+        """Return the recorded state changes of *entity_ids* in ``[start, end]``.
+
+        Uses ``/api/history/period`` (full resolution, kept as long as the
+        recorder keeps states — 10 days by default).  Returns
+        ``{entity_id: [(changed_at, state), …]}`` with timezone-aware
+        timestamps; the first entry is the state at *start*.
+        """
+        params: dict[str, Any] = {
+            "filter_entity_id": ",".join(entity_ids),
+            "minimal_response": "",
+            "no_attributes": "",
+        }
+        if end is not None:
+            params["end_time"] = end.isoformat()
+        resp = await self._client.get(
+            f"/api/history/period/{start.isoformat()}",
+            params=params,
+            timeout=_STATISTICS_TIMEOUT,
+        )
+        resp.raise_for_status()
+        out: dict[str, list[tuple[datetime, str]]] = {}
+        for series in resp.json() or []:
+            if not series:
+                continue
+            entity_id = series[0].get("entity_id")
+            rows: list[tuple[datetime, str]] = []
+            for item in series:
+                ts = _parse_ts(item.get("last_changed") or item.get("last_updated"))
+                if ts is not None:
+                    rows.append((ts, str(item.get("state"))))
+            if entity_id:
+                out[entity_id] = rows
+        return out
+
     async def get_weather_forecast(
         self, entity_id: str, forecast_type: str = "hourly"
     ) -> list[tuple[datetime, float]]:

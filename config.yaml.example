@@ -242,3 +242,34 @@ integrations:
   #       type: generic_iobroker
   #       power: "sma.0.pv_power"
 
+
+# ── Threshold devices (assets) ────────────────────────────────────────────────
+# An on/off device that keeps a measured value between two thresholds
+# (aquarium cooler, fridge, AC, water heater, dehumidifier).  The planner
+# schedules its runtime in cheap or PV hours.  How fast the value moves is
+# learned from Home Assistant's history (the Learning tab shows the model);
+# the rates below are used until a model is learned, and with model: fixed.
+#
+# assets:
+#   aquarium_cooler:
+#     type: threshold
+#     device: aquarium_cooler          # a threshold_homeassistant device
+#     label: "Aquarium Cooler"
+#     bottom_threshold: 18.0
+#     top_threshold: 20.5
+#     unit: "°C"
+#     direction: reduces               # reduces (cooler) | increases (heater)
+#     drift_rate_per_h: 0.185          # change per hour while off
+#     active_rate_per_h: 0.417         # net change per hour while running
+#     min_runtime_h: 0.5
+#     min_offtime_h: 0.5
+#     model: learned                   # learned (default) | fixed
+#     learning:                        # all optional
+#       # value_entity / switch_entity default to the device's
+#       # entity_sensor / entity_switch.
+#       ambient_entity: sensor.living_room_temperature   # learn the pull towards ambient
+#       ambient_weather_entity: weather.home             # ambient forecast (else last value held)
+#       history_days: 10               # HA keeps state history 10 days by default
+#       refit_interval_h: 6
+#       # Two-mode devices (AC) name one switch per mode instead of switch_entity:
+#       # modes: { cool: switch.ac_cooling, heat: switch.ac_heating }

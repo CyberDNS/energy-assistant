@@ -569,6 +569,7 @@ class Application:
         self._ev_assets: list[EvChargingAsset] = []
         self._ev_contributors: list[EvChargerContributor] = []
         self._threshold_constraints: list[ThresholdConstraints] = []
+        self._thermal_learners: dict[str, Any] = {}
         self._threshold_contributors: list[ThresholdControlContributor] = []
         self._ev_weekly_plans: dict[str, dict[int, EvWeeklyTarget]] = {}
         self._ev_day_overrides: dict[str, dict[date, EvDayOverride]] = {}
@@ -726,6 +727,14 @@ class Application:
         for contrib in self._threshold_contributors:
             self._control_loop.register_contributor(contrib)
         _log.info("Loaded %d threshold assets", len(self._threshold_constraints))
+        # Learned thermal model per threshold device (plugins/learned/thermal).
+        from ..plugins.learned.thermal import build_thermal_learners  # noqa: PLC0415
+        self._thermal_learners = build_thermal_learners(
+            self._threshold_constraints, self._cfg.assets, self._cfg.devices,
+            self._build_ctx.ha_client, self._build_ctx.data_dir,
+        )
+        if self._thermal_learners:
+            _log.info("Learning thermal models for %s", ", ".join(self._thermal_learners))
 
         # 7d — MQTT publisher (optional — only started when mqtt: is configured)
         if self._cfg.backends.mqtt:
@@ -1278,10 +1287,13 @@ class Application:
                 ],
             )
 
+        thermal_models, ambient_forecasts = await self._thermal_inputs(effective_horizon)
         context = OptimizationContext(
             device_states=device_states,
             storage_constraints=self._storage_constraints,
             threshold_constraints=self._threshold_constraints,
+            thermal_models=thermal_models,
+            ambient_forecasts=ambient_forecasts,
             tariffs=self._tariffs,
             forecasts=forecasts,
             horizon=effective_horizon,
@@ -1840,6 +1852,23 @@ class Application:
                     goal.target_by,
                 )
 
+    async def _thermal_inputs(self, horizon: timedelta) -> tuple[dict, dict]:
+        """Current thermal model and ambient forecast per threshold device.
+
+        Refits run in the background when due, so planning never waits for
+        Home Assistant's history; the next plan picks up the new model.
+        """
+        models: dict[str, Any] = {}
+        ambients: dict[str, Any] = {}
+        for device_id, learner in self._thermal_learners.items():
+            learner.schedule_refit()
+            models[device_id] = learner.model()
+            try:
+                ambients[device_id] = await learner.ambient_forecast(horizon)
+            except Exception as exc:  # noqa: BLE001 — planning must not fail on it
+                _log.debug("thermal:%s: ambient forecast failed: %s", device_id, exc)
+        return models, ambients
+
     def _is_day_ahead_plan(self, plan: EnergyPlan) -> bool:
         """True for the first plan made shortly before local midnight — the
         plan the coming day starts with (flagged in the plan snapshots)."""
@@ -2293,16 +2322,31 @@ class Application:
 
         @api.get("/api/learned")
         async def get_learned() -> list[dict]:
-            """Diagnostics of every learned forecast: model, training days, forecast."""
+            """Diagnostics of every learned model: consumption forecasts (model,
+            training days, forecast) and thermal models of threshold devices
+            (``kind: "thermal"``: parameters, fit quality, measured vs. model)."""
             out = []
             for provider in self._forecast_providers:
                 if hasattr(provider, "diagnostics"):
                     out.append(await provider.diagnostics(self._horizon))
+            for learner in self._thermal_learners.values():
+                out.append(await learner.diagnostics())
             return out
 
         @api.post("/api/learned/{forecast_id}/refit")
         async def refit_learned(forecast_id: str) -> dict:
-            """Refit one learned forecast from fresh history right now."""
+            """Refit one learned forecast or thermal model from fresh history now."""
+            learner = next(
+                (lr for lr in self._thermal_learners.values() if lr.id == forecast_id), None
+            )
+            if learner is not None:
+                thermal = await learner.refit()
+                if thermal is None:
+                    raise HTTPException(
+                        409, f"No thermal model fitted: {learner.diagnostics_reason()}"
+                    )
+                asyncio.create_task(self._run_plan())
+                return {"ok": True, "fitted_at": thermal.fitted_at}
             provider = next(
                 (p for p in self._forecast_providers
                  if hasattr(p, "diagnostics") and p.forecast_id == forecast_id),

@@ -10,6 +10,9 @@ const C = {
   excluded: '#8d9891',  // days removed by exclude / exclude_when
   active:   '#6250d6',  // hourly shape on days the temperature term is active
   idle:     '#008300',  // hourly shape on the other days
+  running:  'rgba(42,120,214,.16)',  // thermal: share of a window the device ran
+  ambient:  '#8d9891',  // thermal: ambient input
+  limit:    '#b8574a',  // thermal: thresholds
 }
 
 const RANGES = [
@@ -25,6 +28,13 @@ function toPlotlyDate(iso) {
   const d = new Date(iso)
   const p = n => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:00:00`
+}
+
+// Thermal series are 15-minute points: keep the minutes.
+function toPlotlyMinute(iso) {
+  const d = new Date(iso)
+  const p = n => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:00`
 }
 
 function hinge(model, t) {
@@ -48,6 +58,8 @@ export default defineComponent({
     const item  = computed(() => items.value.find(i => i.id === selected.value) ?? items.value[0] ?? null)
     const model = computed(() => item.value?.model ?? null)
     const isTemp = computed(() => model.value?.mode === 'temperature')
+    const isThermal = computed(() => item.value?.kind === 'thermal')
+    const itemLabel = i => (i.kind === 'thermal' ? i.label : i.id.replace(/_forecast$/, ''))
 
     async function load() {
       try {
@@ -102,6 +114,11 @@ export default defineComponent({
 
     const statusPill = computed(() => {
       const s = item.value?.status
+      if (isThermal.value) {
+        return s === 'learned'
+          ? { cls: 'pill-ok', text: 'Learned model active' }
+          : { cls: 'pill-warn', text: 'Using configured rates' }
+      }
       if (s === 'fitted')   return { cls: 'pill-ok',   text: 'Model active' }
       if (s === 'fallback') return { cls: 'pill-warn', text: 'Using fallback profile' }
       return { cls: 'pill-off', text: 'No model' }
@@ -204,11 +221,73 @@ export default defineComponent({
     })
     const forecastDays = computed(() => item.value?.forecast?.days ?? [])
 
+    // ── thermal models (threshold devices) ───────────────────────────────
+    const tUnit = computed(() => item.value?.unit ?? '')
+    const rate = v => (v == null ? '—' : `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(3)} ${tUnit.value}/h`)
+    const thermalModes = computed(() => Object.keys(item.value?.rates?.running_per_h ?? {}))
+    const modeName = m => ({ cool: 'Cooling', heat: 'Heating' }[m] ?? m)
+    const thermalForm = computed(() => {
+      const m = model.value
+      if (!m) return '—'
+      if (m.form === 'ambient') {
+        return `Pulled towards ambient at ${fmt(m.a * 100, 1)} %/h of the gap`
+          + (m.ambient_mean != null ? ` (rates at ${fmt(m.ambient_mean)} ${tUnit.value} ambient)` : '')
+      }
+      return 'Constant rates (no ambient input)'
+    })
+    const thermalTraces = computed(() => {
+      // Break the lines where history has a gap (missing windows).
+      const rows = []
+      let prev = null
+      for (const r of item.value?.series ?? []) {
+        const t = new Date(r.t).getTime()
+        if (prev != null && t - prev > 16 * 60000) {
+          rows.push({ t: new Date(prev + 60000).toISOString(), value: null, model: null, on: {}, ambient: null })
+        }
+        rows.push(r)
+        prev = t
+      }
+      if (!rows.length) return []
+      const x = rows.map(r => toPlotlyMinute(r.t))
+      const on = rows.map(r => Object.values(r.on ?? {}).reduce((a, b) => a + b, 0))
+      const traces = [
+        // Each point ends its 15-minute window: draw the bar over that window.
+        { name: 'Device running', type: 'bar', x, y: on, yaxis: 'y2', marker: { color: C.running },
+          width: 15 * 60000, offset: -15 * 60000,
+          hovertemplate: '%{x|%d.%m. %H:%M} · ran %{y:.0%} of 15 min<extra></extra>' },
+        { name: 'Measured', type: 'scatter', mode: 'lines', x, y: rows.map(r => r.value),
+          line: { color: C.actual, width: 2, shape: 'hv' },
+          hovertemplate: '%{x|%d.%m. %H:%M} · %{y:.2f} ' + tUnit.value + '<extra>Measured</extra>' },
+        { name: 'Model', type: 'scatter', mode: 'lines', x, y: rows.map(r => r.model),
+          line: { color: C.model, width: 2, dash: 'dot' },
+          hovertemplate: '%{x|%d.%m. %H:%M} · %{y:.2f} ' + tUnit.value + '<extra>Model</extra>' },
+      ]
+      if (rows.some(r => r.ambient != null)) {
+        traces.push({ name: 'Ambient', type: 'scatter', mode: 'lines', x, y: rows.map(r => r.ambient),
+          line: { color: C.ambient, width: 1.5 },
+          hovertemplate: '%{x|%d.%m. %H:%M} · %{y:.2f} ' + tUnit.value + '<extra>Ambient</extra>' })
+      }
+      return traces
+    })
+    const thermalLayout = computed(() => {
+      const it = item.value ?? {}
+      const line = y => ({ type: 'line', xref: 'paper', x0: 0, x1: 1, y0: y, y1: y,
+                           line: { color: C.limit, width: 1, dash: 'dash' } })
+      return {
+        xaxis: { type: 'date', tickformat: '%d.%m. %H:%M' },
+        yaxis: { title: it.unit || 'value' },
+        yaxis2: { overlaying: 'y', side: 'right', range: [0, 4], showgrid: false, showticklabels: false },
+        shapes: [line(it.bottom_threshold), line(it.top_threshold)],
+        barmode: 'overlay', bargap: 0,
+      }
+    })
+
     const excludedDays = computed(() =>
       (item.value?.days ?? []).filter(d => d.status === 'excluded' || d.status === 'outlier').reverse())
 
     return {
-      items, selected, item, model, isTemp, loading, error, busy, refit, load,
+      items, selected, item, model, isTemp, isThermal, itemLabel, loading, error, busy, refit, load,
+      tUnit, rate, thermalModes, modeName, thermalForm, thermalTraces, thermalLayout,
       counts, formula, fittedAt, statusPill, fmt,
       scatterTraces, shapeTraces, seriesTraces, forecastTraces, forecastDays, excludedDays,
       rangeDays, RANGES,
@@ -219,8 +298,9 @@ export default defineComponent({
     <div>
       <div v-if="loading" class="panel">Loading…</div>
       <div v-else-if="!items.length" class="panel">
-        No learned forecasts configured. Give a consumer device a
-        <code>forecast:</code> section with <code>type: learned</code> to see it here.
+        No learned models configured. Give a consumer device a
+        <code>forecast:</code> section with <code>type: learned</code>, or add a threshold
+        device (aquarium cooler, AC, …), to see it here.
       </div>
 
       <template v-else-if="item">
@@ -228,7 +308,7 @@ export default defineComponent({
           <div class="range-btns" style="margin-bottom:0">
             <button v-for="i in items" :key="i.id"
               :class="['range-btn', item.id === i.id ? 'active' : '']"
-              @click="selected = i.id">{{ i.id.replace(/_forecast$/, '') }}</button>
+              @click="selected = i.id">{{ itemLabel(i) }}</button>
           </div>
           <span :class="['pill', statusPill.cls]">{{ statusPill.text }}</span>
           <span class="learn-spacer"></span>
@@ -242,6 +322,51 @@ export default defineComponent({
           ⚠ {{ error || item.last_error }}
         </div>
 
+        <template v-if="isThermal">
+          <div class="kpis">
+            <div class="card">
+              <div class="k">Idle (drift)</div>
+              <div class="v">{{ rate(item.rates.drift_per_h) }}</div>
+              <div class="savings-sub">configured {{ rate(item.configured.drift_per_h) }}</div>
+            </div>
+            <div class="card" v-for="m in thermalModes" :key="m">
+              <div class="k">{{ modeName(m) }} (net)</div>
+              <div class="v">{{ rate(item.rates.running_per_h[m]) }}</div>
+              <div class="savings-sub" v-if="item.configured.running_per_h[m] != null">
+                configured {{ rate(item.configured.running_per_h[m]) }}</div>
+            </div>
+            <div class="card">
+              <div class="k">Typical error</div>
+              <div class="v">{{ model.rmse == null ? '—' : fmt(model.rmse, 3) + ' ' + tUnit + '/h' }}</div>
+              <div class="savings-sub">per 15-min step</div>
+            </div>
+            <div class="card">
+              <div class="k">Windows used</div>
+              <div class="v">{{ model.windows || '—' }}</div>
+              <div class="savings-sub" v-if="model.windows">
+                {{ model.off_windows }} idle · {{ Object.values(model.on_windows ?? {}).reduce((a, b) => a + b, 0) }} running · {{ model.outliers }} outliers</div>
+            </div>
+            <div class="card learn-wide">
+              <div class="k">Form</div>
+              <div class="v learn-formula">{{ thermalForm }}</div>
+            </div>
+          </div>
+          <div class="panel full">
+            <h2>Measured and model — {{ item.label }}</h2>
+            <PlotlyChart :traces="thermalTraces" :layout="thermalLayout" height="340px" />
+            <div class="footnote">
+              The model line runs on its own from the measured value, restarted every 6 hours, so it
+              shows how far the learned rates drift from reality. Shaded: share of each 15 minutes the
+              device ran. Dashed lines: thresholds {{ item.bottom_threshold }}–{{ item.top_threshold }} {{ tUnit }}.
+              Learned from <code>{{ item.entities.value }}</code>
+              and <code>{{ Object.values(item.entities.modes).join(', ') }}</code>
+              <template v-if="item.entities.ambient"> with ambient <code>{{ item.entities.ambient }}</code></template>.
+              The planner uses these rates; until a model is learned it uses the configured ones.
+            </div>
+          </div>
+        </template>
+
+        <template v-else>
         <div v-if="model" class="kpis">
           <div class="card learn-wide">
             <div class="k">Daily energy</div>
@@ -353,6 +478,7 @@ export default defineComponent({
             </table>
           </div>
         </div>
+        </template>
       </template>
     </div>
   `,

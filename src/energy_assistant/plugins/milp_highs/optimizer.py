@@ -101,6 +101,7 @@ from ...core.models import (
     ThresholdConstraints,
 )
 from ...core.optimizer import OptimizationContext
+from ...core.thermal_model import ThermalModel, device_mode
 
 _log = logging.getLogger(__name__)
 
@@ -349,6 +350,15 @@ class MilpHigsOptimizer:
         threshold_devices = context.threshold_constraints
         initial_threshold_values = self._initial_threshold_values(threshold_devices, context)
         initial_threshold_running = self._initial_threshold_running(threshold_devices, context)
+        thermal_models = {
+            tc.device_id: context.thermal_models.get(tc.device_id) or ThermalModel.from_constraints(tc)
+            for tc in threshold_devices
+        }
+        ambient_series = {
+            device_id: _interpolate_kw(points, timestamps)
+            for device_id, points in context.ambient_forecasts.items()
+            if points
+        }
 
         # ── Build and solve the MILP model ─────────────────────────────
         prob, variables = self._build_model(
@@ -358,6 +368,7 @@ class MilpHigsOptimizer:
             threshold_devices=threshold_devices,
             initial_threshold_values=initial_threshold_values,
             initial_threshold_running=initial_threshold_running,
+            thermal_models=thermal_models, ambient_series=ambient_series,
             dur_h=dur_h, slot_starts=slot_starts,
             secondary_load=secondary_load, secondary_prices=secondary_prices,
             max_import_w=(
@@ -561,6 +572,8 @@ class MilpHigsOptimizer:
         threshold_devices: list[ThresholdConstraints] | None = None,
         initial_threshold_values: dict[str, float] | None = None,
         initial_threshold_running: dict[str, bool] | None = None,
+        thermal_models: dict[str, ThermalModel] | None = None,
+        ambient_series: dict[str, list[float]] | None = None,
         dur_h: list[float] | None = None,
         slot_starts: list[datetime] | None = None,
         secondary_load: list[list[float]] | None = None,
@@ -1026,34 +1039,29 @@ class MilpHigsOptimizer:
                 )
 
         # ── Threshold device value dynamics ───────────────────────────
-        # v[d, t] = v[d, t-1]  ± drift × dt  ∓ (active + drift) × dt × run[d, t]
-        #
-        # For "reduces" (cooler/dehumidifier): value drifts UP when off,
-        #   drops DOWN when running.
-        # For "increases" (heater/humidifier): value drifts DOWN when off,
-        #   rises UP when running.
+        # First-order thermal model (core/thermal_model.py), explicit Euler:
+        #   v[t] = v[t-1] + dur × (offset + a × (ambient[t] − v[t-1]) + gain × run[t])
+        # gain < 0 for a cooling device ("reduces"), > 0 for heating.  Without
+        # an ambient term (a = 0) this is the configured pair of constant
+        # rates: +drift when off, −active when on (for "reduces").
+        models = thermal_models or {}
+        ambients = ambient_series or {}
         for tc in active_threshold_devices:
             td_id = tc.device_id
+            model = models.get(td_id) or ThermalModel.from_constraints(tc)
+            gain = model.gains.get(device_mode(tc), 0.0)
+            amb = ambients.get(td_id)
+            use_ambient = model.form == "ambient" and model.a > 0 and amb is not None
             v_init = initial_vals.get(td_id, (tc.bottom_threshold + tc.top_threshold) / 2.0)
             for t in T:
-                combined_rate = (tc.active_rate_per_h + tc.drift_rate_per_h) * dur[t]
                 v_prev = v_init if t == 0 else val[(td_id, t - 1)]
-                if tc.direction == "reduces":
-                    # off: +drift, on: +drift − combined = −active
-                    prob += (
-                        val[(td_id, t)] == v_prev
-                        + tc.drift_rate_per_h * dur[t]
-                        - combined_rate * run[(td_id, t)],
-                        f"val_dynamics__{td_id}__{t}",
-                    )
-                else:  # "increases"
-                    # off: −drift, on: −drift + combined = +active
-                    prob += (
-                        val[(td_id, t)] == v_prev
-                        - tc.drift_rate_per_h * dur[t]
-                        + combined_rate * run[(td_id, t)],
-                        f"val_dynamics__{td_id}__{t}",
-                    )
+                drift = model.offset * dur[t]
+                if use_ambient:
+                    drift += model.a * dur[t] * (amb[t] - v_prev)
+                prob += (
+                    val[(td_id, t)] == v_prev + drift + gain * dur[t] * run[(td_id, t)],
+                    f"val_dynamics__{td_id}__{t}",
+                )
 
         # ── Threshold min-runtime / min-offtime ────────────────────────
         # Compressor protection at the plan level (mirrors the live

@@ -113,6 +113,18 @@ discovery as configuration entities on the EV device — per weekday a `number`
 Changes are written straight to the weekly plan and trigger a re-plan; edits
 made in the Energy Assistant UI are mirrored back to the entities.
 
+### Learned thermal models
+
+Threshold devices (aquarium cooler, fridge, AC, …) are planned with a model of
+how their measured value moves: `rate = offset + a · (ambient − value) + gain ·
+running`, with the ambient term only when an ambient sensor is configured.
+Energy Assistant learns it from Home Assistant's state history of the value
+sensor and the device switch (refitted every 6 h, last 10 days) and uses it in
+the planner; until a fit succeeds it uses the configured rates. The Learning tab
+shows the learned rates next to the configured ones, the fit quality and the
+measured vs. modelled value. Configuration: see the threshold example at the end
+of `config.yaml.example`.
+
 ### Savings KPIs in Home Assistant
 
 With `backends.mqtt` configured, an "Energy Assistant" device exposes the
