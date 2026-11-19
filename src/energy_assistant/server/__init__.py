@@ -117,6 +117,8 @@ from ..core.savings import (
 from ..core.tariff import TariffModel
 from ..core.topology import TopologyNode
 from ..core.grid_limit import GridLimit
+from ..loader.energy_dashboard import import_energy_dashboard
+from ..loader.forecast_config import effective_forecast_configs
 from ..loader.device_loader import (
     build,
     build_device_forecast_map,
@@ -479,20 +481,14 @@ async def _collect_forecasts(
     }
 
 
-async def _virtual_forecast_power_w(device_cfg: dict) -> float | None:
-    """Return forecast power in watts for virtual generic consumers."""
-    if device_cfg.get("type") != "generic_consumer":
-        return None
-    forecast_cfg = device_cfg.get("forecast")
-    if not isinstance(forecast_cfg, dict):
-        return None
-    if forecast_cfg.get("type") != "static_profile":
-        return None
+async def _virtual_forecast_power_w(device_cfg: dict, provider: Any) -> float | None:
+    """Return forecast power in watts for virtual generic consumers.
 
+    *provider* is the device's forecast provider (static profile, learned …).
+    """
+    if device_cfg.get("type") != "generic_consumer" or provider is None:
+        return None
     try:
-        from ..plugins.static_profile.forecast import StaticProfileForecast
-
-        provider = StaticProfileForecast(profile=forecast_cfg.get("profile", {}))
         pts = await provider.get_forecast(timedelta(hours=1))
         if not pts:
             return None
@@ -663,6 +659,9 @@ class Application:
         # store it next to the database.
         ctx.data_dir = self._db_path.parent
         self._build_ctx = ctx
+        # Consumers of the HA Energy dashboard (opt-in) join the configured
+        # devices before anything is built from them.
+        await import_energy_dashboard(self._cfg, ctx.ha_client, ctx.data_dir)
         self._registry, self._tariffs, self._topology = build(self._cfg, ctx=ctx)
         _log.info("Loaded %d devices, %d tariffs", len(self._registry), len(self._tariffs))
 
@@ -2052,7 +2051,9 @@ class Application:
                         "available": s.available,
                         "timestamp": s.timestamp.isoformat(),
                         "is_virtual": cfg.get("type") == "generic_consumer",
-                        "forecast_power_w": await _virtual_forecast_power_w(cfg),
+                        "forecast_power_w": await _virtual_forecast_power_w(
+                            cfg, getattr(self, "_device_forecast_providers", {}).get(s.device_id)
+                        ),
                     }
                 )
 
@@ -3657,12 +3658,13 @@ class Application:
 
         # Forecast load of consumers billed on any other tariff, per tariff.
         load_by_tariff: dict[str, dict[datetime, float]] = defaultdict(dict)
+        forecast_cfgs = effective_forecast_configs(self._cfg)
         for device_id, cfg in self._cfg.devices.items():
             device = self._registry.get(device_id)
             if device is None or device.role != DeviceRole.CONSUMER:
                 continue
-            fc_cfg = cfg.get("forecast")
-            if not isinstance(fc_cfg, dict):
+            fc_cfg = forecast_cfgs.get(device_id)
+            if fc_cfg is None:
                 continue
             tariff_id = cfg.get("tariff") or primary_id
             if tariff_id == primary_id or tariff_id not in self._tariffs:

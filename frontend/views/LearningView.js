@@ -455,6 +455,9 @@ export default defineComponent({
             </div>
             <div class="footnote">
               Trained on <code>{{ item.history_entity }}</code>
+              <template v-if="item.subtract?.length"> minus
+                <template v-for="(e, i) in item.subtract" :key="e"><code>{{ e }}</code><template v-if="i < item.subtract.length - 1">, </template></template>
+                (consumers with their own forecast)</template>
               <template v-if="item.temperature_entity"> with <code>{{ item.temperature_entity }}</code></template>
               <template v-if="item.weather_entity">, forecast from <code>{{ item.weather_entity }}</code></template>.
             </div>

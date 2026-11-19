@@ -9,7 +9,7 @@ Registers the ``learned`` forecast type.  Devices declare it in their
       ...
       forecast:
         type: learned
-        history_entity: sensor.power_consumption_heatpump   # power sensor, W
+        history_entity: sensor.power_consumption_heatpump   # power sensor or energy meter
         temperature_entity: sensor.outdoor_temperature      # optional
         weather_entity: weather.home                        # optional
         history_days: 730          # default
@@ -27,6 +27,25 @@ Registers the ``learned`` forecast type.  Devices declare it in their
 Without ``temperature_entity`` the model learns a plain daily level and
 hourly shape per day type, which suits habitual loads such as a household
 baseline.  See ``core/learned_model.py`` for the model itself.
+
+Residual baseline
+-----------------
+``subtract:`` lists sensors whose hourly values are taken off
+``history_entity`` before fitting, so the model learns what is left::
+
+    - id: baseline
+      role: consumer
+      type: generic_consumer
+      forecast:
+        type: learned
+        history_entity: sensor.power_consumption_household
+        subtract: [auto]            # every consumer with its own forecast
+        fallback: { type: static_profile, profile: ... }
+
+``auto`` is resolved by the device loader (``loader/forecast_config.py``):
+it stands for the history entity of every other consumer on the same tariff
+whose forecast is learned.  Adding or removing such a consumer changes the
+residual on the next refit.
 """
 
 from __future__ import annotations
@@ -68,7 +87,8 @@ def _build(forecast_id: str, cfg: dict[str, Any], ctx: BuildContext) -> object:
         forecast_id,
         ctx.ha_client,
         history_entity=cfg["history_entity"],
-        history_unit=cfg.get("history_unit", "W"),
+        history_unit=cfg.get("history_unit"),
+        subtract=[str(e) for e in cfg.get("subtract") or [] if e != "auto"],
         temperature_entity=cfg.get("temperature_entity"),
         weather_entity=cfg.get("weather_entity"),
         history_days=int(cfg.get("history_days", 730)),
