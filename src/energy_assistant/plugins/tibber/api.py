@@ -169,9 +169,11 @@ class TibberApi:
         token: str,
         *,
         resolution: str = "QUARTER_HOURLY",
+        api_url: str | None = None,
         http: httpx.AsyncClient | None = None,
     ) -> None:
         self._token = token
+        self._api_url = api_url or API_URL
         self._resolution = resolution
         self._http = http or httpx.AsyncClient(
             timeout=20.0,
@@ -191,7 +193,7 @@ class TibberApi:
     # ------------------------------------------------------------------
 
     async def query(self, query: str) -> dict[str, Any]:
-        resp = await self._http.post(API_URL, json={"query": query})
+        resp = await self._http.post(self._api_url, json={"query": query})
         if resp.status_code != 200:
             raise TibberApiError(f"Tibber API HTTP {resp.status_code}: {resp.text[:200]}")
         body = resp.json()
@@ -417,13 +419,15 @@ class LiveStream:
 # Shared instances
 # ---------------------------------------------------------------------------
 
-_apis: dict[tuple[str, str], TibberApi] = {}
+_apis: dict[tuple[str, str, str], TibberApi] = {}
 
 
-def get_api(token: str, resolution: str = "QUARTER_HOURLY") -> TibberApi:
-    key = (token, resolution)
+def get_api(
+    token: str, resolution: str = "QUARTER_HOURLY", api_url: str | None = None
+) -> TibberApi:
+    key = (token, resolution, api_url or API_URL)
     api = _apis.get(key)
     if api is None:
-        api = TibberApi(token, resolution=resolution)
+        api = TibberApi(token, resolution=resolution, api_url=api_url)
         _apis[key] = api
     return api

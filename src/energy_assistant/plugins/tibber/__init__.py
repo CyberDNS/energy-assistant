@@ -12,6 +12,7 @@ Example config::
         token: !secret tibber_token
         home_id: "<home-id>"        # optional — defaults to the account's first home
         resolution: QUARTER_HOURLY  # or HOURLY
+        # api_url: https://api.tibber.com/v1-beta/gql  # optional, e.g. a local replay server for tests
         default: true
 
     devices:
@@ -49,6 +50,10 @@ def _token(kind: str, item_id: str, cfg: dict[str, Any]) -> str | None:
     return token
 
 
+def _api_url(cfg: dict[str, Any]) -> str | None:
+    return str(cfg.get("api_url") or "").strip() or None
+
+
 def _build_tariff(tariff_id: str, cfg: dict[str, Any], ctx: BuildContext) -> object | None:
     from .api import get_api
     from .tariff import TibberTariff
@@ -64,7 +69,7 @@ def _build_tariff(tariff_id: str, cfg: dict[str, Any], ctx: BuildContext) -> obj
         resolution = "QUARTER_HOURLY"
     return TibberTariff(
         tariff_id=tariff_id,
-        api=get_api(token, resolution),
+        api=get_api(token, resolution, _api_url(cfg)),
         home_id=cfg.get("home_id") or None,
     )
 
@@ -79,5 +84,5 @@ def _build_device(device_id: str, cfg: dict[str, Any], ctx: BuildContext) -> obj
     return TibberDevice(
         device_id=device_id,
         role=parse_device_role(cfg.get("role"), default=parse_device_role("meter")),
-        stream=get_api(token).live_stream(cfg.get("home_id") or None),
+        stream=get_api(token, api_url=_api_url(cfg)).live_stream(cfg.get("home_id") or None),
     )

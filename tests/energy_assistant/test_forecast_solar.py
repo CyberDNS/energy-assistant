@@ -161,3 +161,18 @@ def test_build_from_config() -> None:
     assert registry.build_forecast("pv", {
         "type": "forecast_solar", "latitude": 1, "longitude": 2, "planes": [{"kwp": 5}],
     }, ctx) is None
+
+
+async def test_api_url_override() -> None:
+    server = _Server(httpx.Response(200, json=_body(_future_periods(), tz="UTC")))
+    prov = _provider(server, [Plane(20, 50, 7.4)], api_url="http://sim:8000/forecast/")
+    await prov.get_forecast(timedelta(hours=2))
+    assert server.urls[0].startswith("http://sim:8000/forecast/estimate/52.5/6.4/20/50/7.4")
+
+    ctx = BuildContext(backends=None)  # type: ignore[arg-type]
+    built = registry.build_forecast("pv", {
+        "type": "forecast_solar", "latitude": 1, "longitude": 2,
+        "declination": 20, "azimuth": 0, "kwp": 5,
+        "api_url": "http://sim:8000/forecast",
+    }, ctx)
+    assert built._api_url == "http://sim:8000/forecast"

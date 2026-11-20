@@ -249,3 +249,19 @@ async def test_live_backoff_grows_without_data_and_resets_after_data(monkeypatch
         await stream._run()
 
     assert delays == [10.0, 20.0, 40.0, 5.0, 10.0]
+
+
+async def test_api_url_override() -> None:
+    urls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        urls.append(str(request.url))
+        return httpx.Response(200, json={"data": {}})
+
+    api = TibberApi(
+        "tok", api_url="http://sim:8000/tibber/gql",
+        http=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    await api.query("{ viewer { homes { id } } }")
+    assert urls == ["http://sim:8000/tibber/gql"]
+    assert tibber_api.get_api("tok", api_url="http://sim:8000/tibber/gql") is not tibber_api.get_api("tok")

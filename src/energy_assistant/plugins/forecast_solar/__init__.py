@@ -19,6 +19,7 @@ Example config::
         # damping_morning: 0    # 0..1, optional (ioBroker "dampm")
         # damping_evening: 0    # 0..1, optional (ioBroker "dampe")
         # api_key: !secret forecast_solar_key   # optional, paid plans only
+        # api_url: https://api.forecast.solar   # optional, e.g. a local replay server for tests
         # refresh_minutes: 60   # per plane; keep plane count × 60 / refresh ≤ 12
 
 A single plane can also be written without ``planes:``, with ``declination``,
@@ -100,5 +101,6 @@ def _build(forecast_id: str, cfg: dict[str, Any], ctx: BuildContext) -> object |
         damping_morning=_num(cfg.get("damping_morning", 0)),
         damping_evening=_num(cfg.get("damping_evening", 0)),
         api_key=str(cfg.get("api_key") or "").strip() or None,
+        api_url=str(cfg.get("api_url") or "").strip() or None,
         refresh_s=refresh_min * 60.0,
     )
