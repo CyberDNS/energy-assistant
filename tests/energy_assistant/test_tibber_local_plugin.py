@@ -424,3 +424,13 @@ def test_config_with_token_adds_cloud_fallback() -> None:
 @pytest.mark.parametrize("cfg", [{"host": "bridge.lan"}, {"password": "x"}])
 def test_missing_host_or_password_skips_device(cfg: dict) -> None:
     assert registry.build_device("m", {"type": "tibber_local", **cfg}, _ctx()) is None
+
+
+def test_config_api_url_reaches_cloud_fallback() -> None:
+    dev = registry.build_device(
+        "household_meter",
+        {"type": "tibber_local", "host": "bridge.lan", "password": "x", "token": "tok-url",
+         "api_url": "http://sim:8000/tibber/gql"},
+        _ctx(),
+    )
+    assert dev._fallback._stream._api._api_url == "http://sim:8000/tibber/gql"

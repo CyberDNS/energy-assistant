@@ -39,6 +39,7 @@ Example config::
         stale_after_s: 30              # optional: unavailable after this long without a valid telegram
         # Optional fallback to the Tibber cloud live stream while the bridge has no data:
         token: !secret tibber_token
+        # api_url: https://api.tibber.com/v1-beta/gql  # optional, e.g. a local replay server for tests
         home_id: "<home-id>"           # optional
 
 Readings
@@ -108,7 +109,9 @@ def _build_device(device_id: str, cfg: dict[str, Any], ctx: BuildContext) -> obj
         fallback = TibberDevice(
             device_id=device_id,
             role=role,
-            stream=get_api(token).live_stream(cfg.get("home_id") or None),
+            stream=get_api(
+                token, api_url=str(cfg.get("api_url") or "").strip() or None
+            ).live_stream(cfg.get("home_id") or None),
         )
 
     return TibberLocalDevice(device_id=device_id, role=role, poller=poller, fallback=fallback)
