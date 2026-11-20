@@ -1,0 +1,9 @@
+name: DZG DWS7410 / DVS7420 (SML)
+description: >
+  Script from the Tasmota docs, Smart Meter Interface: "DZG DWS7410.2V.G2 (SML) and DZG
+  DVS7420.2 (SML)", first script.
+sensor: DWS7410
+fields:
+  power_w: power
+  energy_in_kwh: energy
+  energy_out_kwh: en_out

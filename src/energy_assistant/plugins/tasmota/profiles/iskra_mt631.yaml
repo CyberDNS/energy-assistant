@@ -1,0 +1,9 @@
+name: Iskra MT631 (SML)
+description: >
+  Script from the Tasmota docs, Smart Meter Interface: "Iskra MT 631 (SML)".  Needs the
+  meter PIN for the current power.
+sensor: MT631
+fields:
+  power_w: Power_cur
+  energy_in_kwh: Total_in
+  energy_out_kwh: Total_out

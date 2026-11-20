@@ -1,0 +1,13 @@
+name: Logarex LK13BE (SML)
+description: >
+  Script from the Tasmota docs, Smart Meter Interface: "Logarex LK13BE (SML) (e.g. LK13BE6067x9)".
+sensor: LK13BE
+fields:
+  power_w: Power_curr
+  energy_in_kwh: Power_total_in
+  energy_out_kwh: Power_total_out
+  phase_power_w: [Power_L1_curr, Power_L2_curr, Power_L3_curr]
+  phase_voltage_v: [Volt_L1_curr, Volt_L2_curr, Volt_L3_curr]
+  phase_current_a: [Amperage_L1_curr, Amperage_L2_curr, Amperage_L3_curr]
+  extra:
+    frequency_hz: HZ
