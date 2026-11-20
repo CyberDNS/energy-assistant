@@ -150,6 +150,7 @@ class ForecastSolarForecast:
         damping_morning: float = 0.0,
         damping_evening: float = 0.0,
         api_key: str | None = None,
+        api_url: str | None = None,
         refresh_s: float = 3600.0,
         http: httpx.AsyncClient | None = None,
     ) -> None:
@@ -159,6 +160,7 @@ class ForecastSolarForecast:
         self._planes = list(planes)
         self._damping = (damping_morning, damping_evening)
         self._api_key = api_key
+        self._api_url = (api_url or API_URL).rstrip("/")
         self._refresh_s = refresh_s
         self._http = http or httpx.AsyncClient(
             timeout=20.0, headers={"User-Agent": _user_agent(), "Accept": "application/json"}
@@ -176,7 +178,7 @@ class ForecastSolarForecast:
     # ------------------------------------------------------------------
 
     def _url(self, plane: Plane) -> str:
-        prefix = f"{API_URL}/{self._api_key}" if self._api_key else API_URL
+        prefix = f"{self._api_url}/{self._api_key}" if self._api_key else self._api_url
         return (
             f"{prefix}/estimate/{_fmt(self._latitude)}/{_fmt(self._longitude)}"
             f"/{_fmt(plane.declination)}/{_fmt(plane.azimuth)}/{_fmt(plane.kwp)}"
