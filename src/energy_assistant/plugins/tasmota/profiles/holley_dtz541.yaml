@@ -1,0 +1,13 @@
+name: Holley DTZ541 (SML)
+description: >
+  Script from the Tasmota docs, Smart Meter Interface: "Holley DTZ541 (SML)".  Enable "info"
+  on the meter for voltages and currents.
+sensor: SML
+fields:
+  power_w: curr_w
+  energy_in_kwh: total_kwh
+  energy_out_kwh: export_total_kwh
+  phase_voltage_v: [volt_p1, volt_p2, volt_p3]
+  phase_current_a: [amp_p1, amp_p2, amp_p3]
+  extra:
+    frequency_hz: freq

@@ -113,6 +113,85 @@ discovery as configuration entities on the EV device — per weekday a `number`
 Changes are written straight to the weekly plan and trigger a re-plan; edits
 made in the Energy Assistant UI are mirrored back to the entities.
 
+### Tasmota meters and plugs
+
+`type: tasmota` reads a Tasmota device straight over the LAN
+(`GET http://<host>/cm?cmnd=Status%2010`), with no cloud and no MQTT broker. Use it
+for IR reading heads on smart meters (Hichi, bitShake, … running an SML
+script) and for plugs/relays with energy monitoring. Open the URL above in a
+browser to see what your device reports.
+
+The value names come from the device, so a **profile** maps them to readings:
+
+| Profile | Device / script (Tasmota docs, Smart Meter Interface) |
+|---|---|
+| `energy` | Standard `ENERGY` sensor of plugs, relays, power monitors |
+| `iskra_mt175` | Iskra MT175 script (`E_in`, `E_out`, `P`, `L1..L3`), also used in many adapted scripts |
+| `iskra_mt631` | Iskra MT631 script (`Total_in`, `Total_out`, `Power_cur`) |
+| `iskra_mt681` | Iskra MT681 script (as MT631, plus `Power_p1..p3`) |
+| `easymeter_q3a` | EasyMeter Q3A / Apator APOX+ |
+| `ebz_dd3` | eBZ DD3 (counters in Wh, converted) |
+| `holley_dtz541` | Holley DTZ541 |
+| `logarex_lk13be` | Logarex LK13BE (SML) |
+| `dzg_dws7410` | DZG DWS7410 / DVS7420 |
+| `landis_gyr_e320` | Landis+Gyr E320 |
+
+Profiles describe a *script*, not the meter: pick the one whose value names
+your device reports. `profile:` also takes a path to your own YAML file (same
+format as `plugins/tasmota/profiles/*.yaml`). Only `energy` and `iskra_mt175`
+are tested against real devices; the others follow the scripts in the docs.
+
+```yaml
+devices:
+  # Main grid meter (Z1) via a Tasmota IR head
+  - id: main_grid_meter
+    role: meter
+    type: tasmota
+    tariff: grid
+    host: 192.168.3.46
+    profile: iskra_mt175
+    # password: !secret tasmota_password   # web password, if set (user: admin)
+    # poll_interval_s: 2                   # default: 2 for meters, 10 otherwise
+
+  # The same meter mapped by hand: paths below StatusSNS
+  - id: main_grid_meter
+    role: meter
+    type: tasmota
+    host: 192.168.3.46
+    fields:
+      power_w: MT631.P                     # net, import +, export −
+      energy_in_kwh: MT631.E_in
+      energy_out_kwh: MT631.E_out
+      phase_power_w: [MT631.L1, MT631.L2, MT631.L3]
+    # invert_sign: true                    # if the script reports export as positive
+
+  # Smart plug with standard Tasmota energy monitoring
+  - id: dishwasher
+    role: consumer
+    type: tasmota
+    host: 192.168.3.60
+    profile: energy
+```
+
+- **Sensor name.** A profile's paths are relative to its sensor object (`MT175`,
+  `ENERGY`). If your script names the meter differently, the one sensor object
+  holding the power value is used. With several meters on one head, set
+  `sensor: <name>` to pick one.
+- **Overrides.** `fields` next to a profile replace the profile's, field by
+  field, relative to the sensor; `null` removes one. A field is a path or
+  `{path: …, scale: …}` (e.g. `scale: 1000` for kW). Quote paths that look like
+  numbers (`"1_8_0"`). `voltage_v`, `current_a`, `phase_voltage_v`,
+  `phase_current_a` and `extra: {name: path}` are optional and land in the
+  device's `extra` (`l1_power_w` …, `meter_production_kwh` for `energy_out_kwh`).
+- **Timestamps.** Readings are stamped with the receive time in UTC. The
+  device's `Time` has no UTC offset and is ignored.
+- **Robustness.** Timeouts, missing keys and the zeros an SML script reports
+  right after a reboot are skipped, and the last good value is kept. The device
+  only becomes unavailable after `stale_after_s` (default 30 s) without a valid
+  reading.
+- **Wrong mapping.** If the power value isn't found, the log names the bundled
+  profiles that match the payload and the power-like values in it.
+
 ### Learned consumption forecasts
 
 Consumers are forecast from Home Assistant's long-term statistics (`type:

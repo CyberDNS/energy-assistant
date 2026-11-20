@@ -1,0 +1,11 @@
+name: eBZ DD3 (OBIS)
+description: >
+  Script from the Tasmota docs, Smart Meter Interface: "eBZ DD3 (OBIS/SML)".  The script
+  reports the counters in Wh; they are converted to kWh.
+sensor: SM
+fields:
+  power_w: "16_7_0"
+  energy_in_kwh: {path: "1_8_0", scale: 0.001}
+  energy_out_kwh: {path: "2_8_0", scale: 0.001}
+  phase_power_w: ["36_7_0", "56_7_0", "76_7_0"]
+  phase_voltage_v: ["32_7_0", "52_7_0", "72_7_0"]

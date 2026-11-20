@@ -93,6 +93,48 @@ home_power_iobroker:
   # oid_pv_w: "hass.0.entities.sensor.power_production_pv.state"
 
 # ---------------------------------------------------------------------------
+# Tasmota devices on the LAN (type: tasmota)
+# Polls http://<host>/cm?cmnd=Status%2010 directly — no cloud, no MQTT broker.
+# Open that URL in a browser to see the value names your device reports.
+# ---------------------------------------------------------------------------
+
+# devices:
+#   # Main grid meter via a Tasmota IR reading head (Hichi, bitShake, …).
+#   # A profile maps the value names of a known meter script; bundled ones are
+#   # in plugins/tasmota/profiles/ (energy, iskra_mt175, iskra_mt631, ebz_dd3, …).
+#   - id: main_grid_meter
+#     role: meter
+#     type: tasmota
+#     tariff: grid
+#     host: 192.168.x.x                    # IP or hostname of the IR head
+#     profile: iskra_mt175                 # or a path to your own profile .yaml
+#     # sensor: MT631                      # only to pick one of several meters on one head
+#     # password: !secret tasmota_password # web password, if set (user: admin)
+#     # poll_interval_s: 2                 # default 2 s for meters, 10 s otherwise
+#     # stale_after_s: 30                  # unavailable after this long without a valid reading
+#     # fields:                            # override profile fields (relative to the sensor)
+#     #   power_w: { path: P, scale: 1000 }  # e.g. script reports kW
+#     # invert_sign: true                  # if the script reports export as positive
+#
+#   # Without a profile: map by hand, paths below StatusSNS
+#   - id: heatpump_meter
+#     role: meter
+#     type: tasmota
+#     host: 192.168.x.x
+#     fields:
+#       power_w: MT631.P                   # net power, import +, export −
+#       energy_in_kwh: MT631.E_in
+#       energy_out_kwh: MT631.E_out
+#       phase_power_w: [MT631.L1, MT631.L2, MT631.L3]
+#
+#   # Smart plug with standard Tasmota energy monitoring (ENERGY sensor)
+#   - id: dishwasher
+#     role: consumer
+#     type: tasmota
+#     host: 192.168.x.x
+#     profile: energy
+
+# ---------------------------------------------------------------------------
 # Home Assistant Energy dashboard
 # ---------------------------------------------------------------------------
 

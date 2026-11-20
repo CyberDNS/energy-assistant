@@ -36,6 +36,7 @@ from . import (  # noqa: E402
     pvforecast_iobroker,
     sma_modbus_iobroker,
     static_profile,
+    tasmota,
     threshold_homeassistant,
     tibber,
     tibber_iobroker,
@@ -57,6 +58,7 @@ openwb_mqtt.register(registry)
 pvforecast_iobroker.register(registry)
 sma_modbus_iobroker.register(registry)
 static_profile.register(registry)
+tasmota.register(registry)
 threshold_homeassistant.register(registry)
 tibber.register(registry)
 tibber_iobroker.register(registry)

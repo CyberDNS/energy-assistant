@@ -1,0 +1,8 @@
+name: Landis+Gyr E320 (SML)
+description: >
+  Script from the Tasmota docs, Smart Meter Interface: "Landis + Gyr E320 (SML)".
+sensor: E320
+fields:
+  power_w: Power_in
+  energy_in_kwh: Total_in
+  energy_out_kwh: Total_out
