@@ -8,7 +8,8 @@ from types import SimpleNamespace
 import pytest
 
 from energy_assistant.core.config import AppConfig
-from energy_assistant.core.models import DeviceRole, ForecastPoint, ForecastQuantity, TariffPoint
+from energy_assistant.core.device_model import DeviceCategory, parse_devices
+from energy_assistant.core.models import ForecastPoint, ForecastQuantity, TariffPoint
 from energy_assistant.plugins.flat_rate.tariff import FlatRateTariff
 from energy_assistant.server import Application
 
@@ -40,13 +41,13 @@ class _Forecast:
 def _app(devices: dict[str, dict], providers: dict[str, _Forecast],
          default_tariff: str | None = "household") -> Application:
     app = Application.__new__(Application)
-    app._cfg = AppConfig(devices=devices, default_tariff_id=default_tariff)
+    app._cfg = AppConfig(devices=parse_devices(devices), default_tariff_id=default_tariff)
     app._tariffs = {
         "household": _SpotTariff(),
         "heatpump": FlatRateTariff("heatpump", import_price_eur_per_kwh=0.178),
     }
     app._registry = SimpleNamespace(
-        get=lambda device_id: SimpleNamespace(role=DeviceRole.CONSUMER)
+        get=lambda device_id: SimpleNamespace(category=DeviceCategory.CONSUMER)
         if device_id in devices else None
     )
     app._horizon = timedelta(hours=len(SPOT) - 1)
@@ -63,8 +64,8 @@ async def test_primary_price_is_the_default_tariff_not_a_load_weighted_blend() -
     the optimizer's price towards that tariff, hiding the spot price spread."""
     providers = {"baseline": _Forecast(0.5), "heatpump_meter": _Forecast(3.0)}
     app = _app(
-        {"baseline": {"role": "consumer", "forecast": _FC},
-         "heatpump_meter": {"role": "consumer", "tariff": "heatpump", "forecast": _FC}},
+        {"baseline": {"category": "consumer", "type": "generic_consumer", "forecast": _FC},
+         "heatpump_meter": {"category": "consumer", "type": "generic_consumer", "tariff": "heatpump", "forecast": _FC}},
         providers,
     )
     prices, estimated, secondary = await app._build_tariff_zone_inputs()
@@ -83,7 +84,7 @@ async def test_primary_price_is_the_default_tariff_not_a_load_weighted_blend() -
 async def test_reuses_the_planning_forecast_instance() -> None:
     providers = {"heatpump_meter": _Forecast(3.0)}
     app = _app(
-        {"heatpump_meter": {"role": "consumer", "tariff": "heatpump", "forecast": _FC}},
+        {"heatpump_meter": {"category": "consumer", "type": "generic_consumer", "tariff": "heatpump", "forecast": _FC}},
         providers,
     )
     await app._build_tariff_zone_inputs()
@@ -92,8 +93,8 @@ async def test_reuses_the_planning_forecast_instance() -> None:
 
 async def test_consumers_on_the_default_tariff_are_not_secondary() -> None:
     app = _app(
-        {"baseline": {"role": "consumer", "forecast": _FC},
-         "climate": {"role": "consumer", "tariff": "household", "forecast": _FC}},
+        {"baseline": {"category": "consumer", "type": "generic_consumer", "forecast": _FC},
+         "climate": {"category": "consumer", "type": "generic_consumer", "tariff": "household", "forecast": _FC}},
         {"baseline": _Forecast(0.5), "climate": _Forecast(0.3)},
     )
     prices, _, secondary = await app._build_tariff_zone_inputs()
@@ -102,7 +103,7 @@ async def test_consumers_on_the_default_tariff_are_not_secondary() -> None:
 
 async def test_no_default_tariff_yields_nothing() -> None:
     app = _app(
-        {"heatpump_meter": {"role": "consumer", "tariff": "heatpump", "forecast": _FC}},
+        {"heatpump_meter": {"category": "consumer", "type": "generic_consumer", "tariff": "heatpump", "forecast": _FC}},
         {"heatpump_meter": _Forecast(3.0)},
         default_tariff=None,
     )

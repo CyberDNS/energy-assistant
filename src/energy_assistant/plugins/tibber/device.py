@@ -12,16 +12,17 @@ device reports ``available=False``.
 
 from __future__ import annotations
 
-from ...core.models import DeviceCommand, DeviceRole, DeviceState
+from ...core.device_model import DeviceCategory
+from ...core.models import DeviceCommand, DeviceState
 from .api import LiveStream
 
 
 class TibberDevice:
     """A read-only meter ``Device`` backed by the Tibber live stream."""
 
-    def __init__(self, device_id: str, role: DeviceRole, stream: LiveStream) -> None:
+    def __init__(self, device_id: str, category: DeviceCategory, stream: LiveStream) -> None:
         self._device_id = device_id
-        self._role = role
+        self._category = category
         self._stream = stream
 
     @property
@@ -29,8 +30,8 @@ class TibberDevice:
         return self._device_id
 
     @property
-    def role(self) -> DeviceRole:
-        return self._role
+    def category(self) -> DeviceCategory:
+        return self._category
 
     async def get_state(self) -> DeviceState:
         self._stream.ensure_started()

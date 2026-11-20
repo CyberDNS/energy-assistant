@@ -5,13 +5,19 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from ...core.device_model import Capability as Cap
+from ...core.device_model import DeviceCategory as C
 from ...core.plugin_registry import BuildContext, PluginRegistry
 
 _log = logging.getLogger(__name__)
 
 
 def register(registry: PluginRegistry) -> None:
-    registry.register_device("sma_modbus_iobroker", _build)
+    registry.register_device(
+        "sma_modbus_iobroker", _build,
+        categories={C.BATTERY},
+        provides={Cap.POWER_W, Cap.SOC_PCT, Cap.POWER_SETPOINT},
+    )
 
 
 def _build(device_id: str, cfg: dict[str, Any], ctx: BuildContext) -> object | None:

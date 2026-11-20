@@ -1,14 +1,13 @@
 """Tests for EV MQTT Discovery: availability semantics and weekly-plan entities."""
 
+import json
 from datetime import datetime, timedelta, timezone
 
 from energy_assistant.assets.ev import EvChargingAsset, EvWeeklyTarget
-import json
-
+from energy_assistant.core.device_model import DeviceCategory, DeviceSpec
 from energy_assistant.core.models import (
     EV_DISPLAY_MODES,
     ControlIntent,
-    DeviceRole,
     DeviceState,
     EnergyPlan,
     ev_current_mode,
@@ -18,14 +17,14 @@ from energy_assistant.plugins.mqtt_publisher import (
     CHARGING_MODES,
     DiscoveryDevice,
     EvMqttPublisher,
-    select_discovery_devices,
-    charging_mode_from_setpoint,
     _build_state_messages,
     _discovery_configs,
     _parse_weekly_command,
     _reading_messages,
     _weekly_discovery_configs,
     _weekly_state_messages,
+    charging_mode_from_setpoint,
+    select_discovery_devices,
 )
 
 
@@ -285,23 +284,25 @@ async def test_readings_are_published_only_on_change() -> None:
 # ── Device sub-devices ────────────────────────────────────────────────────────
 
 def test_select_discovery_devices_skips_ha_and_virtual_devices() -> None:
+    def spec(device_id: str, type_name: str, category=DeviceCategory.METER, **kw) -> DeviceSpec:
+        return DeviceSpec(id=device_id, category=category, type=type_name, **kw)
+
     cfg = {
-        "main_grid_meter": {"type": "generic_homeassistant"},
-        "cooler": {"type": "threshold_homeassistant"},
-        "baseline": {"type": "generic_consumer"},
-        "sma_battery": {"type": "modbus", "name": "SMA Speicher"},
-        "household_meter": {"type": "tibber_local"},
-        "hidden": {"type": "zendure", "ha_discovery": False},
-        "broken": {"type": "modbus"},  # failed to build → not in roles
+        "main_grid_meter": spec("main_grid_meter", "generic_homeassistant"),
+        "cooler": spec("cooler", "threshold_homeassistant", DeviceCategory.THERMAL_LOAD),
+        "baseline": spec("baseline", "generic_consumer", DeviceCategory.CONSUMER),
+        "sma_battery": spec("sma_battery", "modbus", DeviceCategory.BATTERY, label="SMA Speicher"),
+        "household_meter": spec("household_meter", "tibber_local"),
+        "hidden": spec("hidden", "zendure", DeviceCategory.BATTERY, ha_discovery=False),
+        "broken": spec("broken", "modbus", DeviceCategory.BATTERY),  # failed to build
     }
-    roles = {k: DeviceRole.METER for k in cfg if k != "broken"}
-    roles["sma_battery"] = DeviceRole.STORAGE
-    picked = select_discovery_devices(cfg, roles)
+    built = {k for k in cfg if k != "broken"}
+    picked = select_discovery_devices(cfg, built)
     assert [(d.device_id, d.name, d.model) for d in picked] == [
         ("sma_battery", "SMA Speicher", "modbus"),
         ("household_meter", "Household Meter", "tibber_local"),
     ]
-    assert picked[0].role is DeviceRole.STORAGE
+    assert picked[0].category is DeviceCategory.BATTERY
 
 
 def _noop_pub(devices: list[DiscoveryDevice]) -> EvMqttPublisher:
@@ -319,7 +320,7 @@ def _drain(pub: EvMqttPublisher) -> list[tuple[str, str]]:
 
 
 async def test_device_sensors_are_discovered_lazily_as_subdevices() -> None:
-    bat = DiscoveryDevice("sma_battery", "SMA Battery", DeviceRole.STORAGE, "modbus")
+    bat = DiscoveryDevice("sma_battery", "SMA Battery", DeviceCategory.BATTERY, "modbus")
     pub = _noop_pub([bat])
     await pub.publish_readings({"sma_battery": DeviceState(
         device_id="sma_battery", power_w=-1234.4, soc_pct=55.25,
@@ -360,7 +361,7 @@ async def test_device_sensors_are_discovered_lazily_as_subdevices() -> None:
 
 
 async def test_chargepoint_stays_available_without_car_and_skips_soc() -> None:
-    cp = DiscoveryDevice("cp5", "Chargepoint 5", DeviceRole.EV_CHARGER, "openwb_mqtt")
+    cp = DiscoveryDevice("cp5", "Chargepoint 5", DeviceCategory.CHARGER, "openwb_mqtt")
     pub = _noop_pub([cp])
     await pub.publish_readings({"cp5": DeviceState(
         device_id="cp5", power_w=0.0, soc_pct=80.0, available=False,

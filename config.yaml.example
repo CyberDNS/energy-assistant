@@ -98,12 +98,12 @@ home_power_iobroker:
 # Open that URL in a browser to see the value names your device reports.
 # ---------------------------------------------------------------------------
 
-# devices:
+# (entries for the devices: list below)
 #   # Main grid meter via a Tasmota IR reading head (Hichi, bitShake, …).
 #   # A profile maps the value names of a known meter script; bundled ones are
 #   # in plugins/tasmota/profiles/ (energy, iskra_mt175, iskra_mt631, ebz_dd3, …).
 #   - id: main_grid_meter
-#     role: meter
+#     category: grid_meter
 #     type: tasmota
 #     tariff: grid
 #     host: 192.168.x.x                    # IP or hostname of the IR head
@@ -118,8 +118,9 @@ home_power_iobroker:
 #
 #   # Without a profile: map by hand, paths below StatusSNS
 #   - id: heatpump_meter
-#     role: meter
+#     category: meter
 #     type: tasmota
+#     metered_by: main_grid_meter
 #     host: 192.168.x.x
 #     fields:
 #       power_w: MT631.P                   # net power, import +, export −
@@ -129,7 +130,7 @@ home_power_iobroker:
 #
 #   # Smart plug with standard Tasmota energy monitoring (ENERGY sensor)
 #   - id: dishwasher
-#     role: consumer
+#     category: consumer
 #     type: tasmota
 #     host: 192.168.x.x
 #     profile: energy
@@ -209,120 +210,123 @@ server:
   # trusted_hosts: ["172.30.32.2", "127.0.0.1", "::1"]
 
 # ---------------------------------------------------------------------------
-# Integrations
+# Devices
 #
-# Config-driven devices across a spectrum of complexity:
+# One flat list of everything in the house.  Each device has:
 #
-#   role:     what the device fundamentally is in the energy system
-#             source | grid | storage | consumer | ev_charger | meter
+#   category:      what it is — grid_meter | meter | pv | battery | charger |
+#                  thermal_load | switch | consumer | vehicle | sensor
+#   type:          the plugin, i.e. how to talk to it (tasmota, modbus,
+#                  generic_homeassistant, openwb_mqtt, zendure, …), followed
+#                  by the plugin's own settings (host, profile, …)
+#   capabilities:  bindings for Home Assistant backed devices, e.g.
+#                  power_w: { entity: sensor.… }
+#   params:        model parameters of the category (battery capacity, grid
+#                  connection limit, rated power, …)
+#   metered_by:    the meter the device sits behind.  Builds the metering
+#                  tree; its root is the one grid_meter.
+#   tariff:        tariff id the device is billed on (default: the default tariff)
 #
-#   source:   how to read power (required)
-#             type: generic_iobroker | generic_homeassistant | template
-#
-#   control:  how to send commands (optional — omit for read-only devices)
-#             type: homeassistant_switch | iobroker_switch
-#
-#   strategy: how the optimizer should use this device (optional — requires control)
-#             type: overflow
-#
-#   tariff:   price data source (optional — reserved for future use)
+# The config is checked at startup: unknown categories, params or
+# capabilities, missing required ones and broken metered_by chains stop the
+# start with a list of what to fix.
 # ---------------------------------------------------------------------------
 
-integrations:
+devices:
 
-  # --- Grid connection with dynamic tariff ---
-  - tibber:
-      role: grid
-      source:
-        type: generic_iobroker
-        power: "tibberlink.0.Homes.<home-id>.LiveMeasurement.power"
-        # Use import/export instead of net power if your meter exposes both legs:
-        # power_import: "tibberlink.0.Homes.<home-id>.LiveMeasurement.powerImport"
-        # power_export: "tibberlink.0.Homes.<home-id>.LiveMeasurement.powerExport"
-      tariff:
-        type: tibber_iobroker
-        home_id: "<home-id>"
+  # --- Grid connection (Z1) ---
+  - id: main_grid_meter
+    category: grid_meter
+    type: generic_homeassistant
+    tariff: export_tariff
+    capabilities:
+      power_w: { entity: sensor.mt175_mt175_p }       # net: import +, export −
+      # Or two entities for the import and export legs:
+      # power_w: { import_entity: sensor.grid_import_w, export_entity: sensor.grid_export_w }
+    # params:                    # optional grid connection limit (main fuse)
+    #   max_import_kw: 24
+    #   curtail_order: [home_battery, wallbox]   # curtailed first → last
+    #   limit_hysteresis_kw: 1.0                 # release this far below (default 5 %)
 
-  # --- Physical grid meter (direct HA sensor) ---
-  - grid_meter:
-      role: grid
-      source:
-        type: generic_homeassistant
-        power: "sensor.mt175_mt175_p"
-        # Or use import/export legs if your meter exposes both:
-        # power_import: "sensor.energy_import_w"
-        # power_export: "sensor.energy_export_w"
+  # --- Household meter (Z2), behind the grid meter ---
+  - id: household_meter
+    category: meter
+    type: tibber_local                    # Tibber Pulse Bridge on the LAN
+    metered_by: main_grid_meter
+    host: 192.168.x.x
+    password: !secret tibber_pulse_password
+    tariff: household
 
-  # --- Household consumption meter ---
-  - household_meter:
-      role: meter
-      source:
-        type: generic_iobroker
-        power: "tibberlink.0.Homes.<home-id>.LiveMeasurement.power"
+  # --- Heat pump leg derived from the meter difference (Messkonzept 8) ---
+  - id: heatpump_meter
+    category: consumer
+    type: differential
+    tariff: heatpump
+    minuend: main_grid_meter
+    minuend_field: "extra.import_w"
+    subtrahend: household_meter
+    min_w: 0.0
 
-  # --- Derived consumer: heatpump consumption calculated from meter difference ---
-  # (Wärmepumpentarif pattern: grid_meter − household_meter = heatpump leg)
-  - heatpump_meter:
-      role: consumer
-      source:
-        type: template
-        power: |
-          {% set grid = states("grid_meter.power") | float %}
-          {% set house = states("household_meter.power") | float %}
-          {% set diff = (grid - house) | round(1) %}
-          {{ [diff, 10] | max }}
+  # --- PV inverter (read-only) ---
+  - id: pv
+    category: pv
+    type: generic_homeassistant
+    metered_by: household_meter
+    capabilities:
+      power_w: { entity: sensor.power_production_pv, invert_sign: true }
 
-  # --- Controllable consumer: heat pump switched on PV overflow ---
-  # - heatpump:
-  #     role: consumer
-  #     source:
-  #       type: generic_homeassistant
-  #       power: "sensor.heatpump_power"
-  #     control:
-  #       type: homeassistant_switch
-  #       entity: "switch.heatpump_main"
-  #     strategy:
-  #       type: overflow
-  #       threshold_w: 300      # turn on when PV surplus ≥ 300 W
-  #       hysteresis_w: 50      # turn off when surplus < 250 W
+  # --- Battery (native Modbus TCP) ---
+  - id: home_battery
+    category: battery
+    type: modbus
+    metered_by: household_meter
+    profile: sma_sunny_boy_storage
+    host: 192.168.x.x
+    params:
+      capacity_kwh: 7.4
+      max_charge_kw: 3.0
+      max_discharge_kw: 3.0
+      min_soc_pct: 10
+      # charge_efficiency: 0.95       # per direction; defaults 0.95
+      # discharge_efficiency: 0.95
+      # efficiency: learned           # plan with the learned round trip (default: configured)
+      # purchase_price_eur: 3500      # with cycle_life: wear cost per kWh cycled
+      # cycle_life: 6000
+      # no_grid_charge: true          # charge from PV surplus only
 
-  # --- Controllable consumer: boiler via ioBroker boolean OID ---
-  # - boiler:
-  #     role: consumer
-  #     source:
-  #       type: generic_iobroker
-  #       power: "shelly.0.boiler.power"
-  #     control:
-  #       type: iobroker_switch
-  #       oid: "shelly.0.boiler.switch"
-  #     strategy:
-  #       type: overflow
-  #       threshold_w: 500
-  #       hysteresis_w: 100
+  # --- EV charger (openWB, MQTT simpleAPI on backends.mqtt) ---
+  - id: wallbox
+    category: charger
+    type: openwb_mqtt
+    chargepoint_id: 1
+    # root_topic: openWB
 
   # --- Household baseline learned as a residual ---
   # The household meter minus every consumer that has its own (learned)
   # forecast on the same tariff.  Consumers that read one HA power sensor
   # learn their forecast by default (learning: false turns that off).
-  # - baseline:
-  #     role: consumer
-  #     type: generic_consumer
-  #     forecast:
-  #       type: learned
-  #       history_entity: sensor.power_consumption_household
-  #       subtract: [auto]          # plus any further sensors to take off
-  #       fallback:                 # until the first fit
-  #         type: static_profile
-  #         profile:
-  #           weekdays: [{ hour: 0, consumed_kwh: 10.0 }]
-  #           weekends: [{ hour: 0, consumed_kwh: 10.0 }]
+  - id: baseline
+    category: consumer
+    type: generic_consumer
+    forecast:
+      type: learned
+      history_entity: sensor.power_consumption_household
+      subtract: [auto]          # plus any further sensors to take off
+      fallback:                 # until the first fit
+        type: static_profile
+        profile:
+          weekdays: [{ hour: 0, consumed_kwh: 10.0 }]
+          weekends: [{ hour: 0, consumed_kwh: 10.0 }]
 
-  # --- PV inverter (read-only source) ---
-  # - pv:
-  #     role: source
-  #     source:
-  #       type: generic_iobroker
-  #       power: "sma.0.pv_power"
+  # --- Aquarium cooler: kept between two temperatures (see assets below) ---
+  # - id: aquarium_cooler
+  #   category: thermal_load
+  #   type: threshold_homeassistant
+  #   capabilities:
+  #     temperature_c: { entity: sensor.aquarium_temperature }
+  #     switch: { entity: switch.aquarium_cooler }
+  #   params:
+  #     rated_power_w: 150
 
 
 # ── Threshold devices (assets) ────────────────────────────────────────────────
@@ -335,7 +339,7 @@ integrations:
 # assets:
 #   aquarium_cooler:
 #     type: threshold
-#     device: aquarium_cooler          # a threshold_homeassistant device
+#     device: aquarium_cooler          # a thermal_load device (see devices above)
 #     label: "Aquarium Cooler"
 #     bottom_threshold: 18.0
 #     top_threshold: 20.5
@@ -348,7 +352,7 @@ integrations:
 #     model: learned                   # learned (default) | fixed
 #     learning:                        # all optional
 #       # value_entity / switch_entity default to the device's
-#       # entity_sensor / entity_switch.
+#       # temperature_c / switch capability entities.
 #       ambient_entity: sensor.living_room_temperature   # learn the pull towards ambient
 #       ambient_weather_entity: weather.home             # ambient forecast (else last value held)
 #       history_days: 10               # HA keeps state history 10 days by default

@@ -12,7 +12,7 @@ same broker and root topic share one MQTT connection.
 Example config::
 
     - id: openwb_chargepoint_5
-      role: ev_charger
+      category: charger
       type: openwb_mqtt
       chargepoint_id: 5
       root_topic: openwbmaster   # default: openWB
@@ -22,12 +22,18 @@ The mode-encoding convention is documented in ``assets/ev.py``.
 
 from __future__ import annotations
 
+from ...core.device_model import Capability as Cap
+from ...core.device_model import DeviceCategory as C
 from ...core.plugin_registry import PluginRegistry
 from .device import OpenWBMqttDevice, get_bridge
 
 
 def register(registry: PluginRegistry) -> None:
-    registry.register_device("openwb_mqtt", _build)
+    registry.register_device(
+        "openwb_mqtt", _build,
+        categories={C.CHARGER},
+        provides={Cap.POWER_W, Cap.PLUGGED, Cap.POWER_SETPOINT, Cap.SOC_PCT},
+    )
 
 
 def _build(device_id: str, cfg: dict, ctx) -> OpenWBMqttDevice:  # type: ignore[type-arg]

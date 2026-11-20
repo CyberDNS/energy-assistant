@@ -25,7 +25,8 @@ from __future__ import annotations
 
 import logging
 
-from ...core.models import DeviceCommand, DeviceRole, DeviceState
+from ...core.device_model import DeviceCategory
+from ...core.models import DeviceCommand, DeviceState
 from .._homeassistant.client import HAClientProtocol
 
 _log = logging.getLogger(__name__)
@@ -47,8 +48,8 @@ class GenericHADevice:
     ----------
     device_id:
         Stable, unique identifier for this device.
-    role:
-        Semantic role (``METER``, ``CONSUMER``, ``PRODUCER``, …).
+    category:
+        Device category (``METER``, ``CONSUMER``, ``PV``, …).
     client:
         An open HA client.
     entity_power:
@@ -62,7 +63,7 @@ class GenericHADevice:
     def __init__(
         self,
         device_id: str,
-        role: DeviceRole,
+        category: DeviceCategory,
         client: HAClientProtocol,
         *,
         entity_power: str | None = None,
@@ -78,7 +79,7 @@ class GenericHADevice:
                 "both 'entity_power_import' and 'entity_power_export'."
             )
         self._device_id = device_id
-        self._role = role
+        self._category = category
         self._client = client
         self._entity_power = entity_power
         self._entity_power_import = entity_power_import
@@ -90,8 +91,8 @@ class GenericHADevice:
         return self._device_id
 
     @property
-    def role(self) -> DeviceRole:
-        return self._role
+    def category(self) -> DeviceCategory:
+        return self._category
 
     async def get_state(self) -> DeviceState:
         """Read power from Home Assistant and return a ``DeviceState``."""

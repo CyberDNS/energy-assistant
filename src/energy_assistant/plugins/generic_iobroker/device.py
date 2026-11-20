@@ -26,7 +26,8 @@ from __future__ import annotations
 
 import logging
 
-from ...core.models import DeviceCommand, DeviceRole, DeviceState
+from ...core.device_model import DeviceCategory
+from ...core.models import DeviceCommand, DeviceState
 from .._iobroker.client import IoBrokerClientProtocol
 
 _log = logging.getLogger(__name__)
@@ -48,8 +49,8 @@ class GenericIoBrokerDevice:
     ----------
     device_id:
         Stable, unique identifier for this device.
-    role:
-        Semantic role (``METER``, ``CONSUMER``, ``PRODUCER``, …).
+    category:
+        Device category (``METER``, ``CONSUMER``, ``PV``, …).
     client:
         An open ioBroker client (e.g. from ``IoBrokerConnectionPool``).
     oid_power:
@@ -64,7 +65,7 @@ class GenericIoBrokerDevice:
     def __init__(
         self,
         device_id: str,
-        role: DeviceRole,
+        category: DeviceCategory,
         client: IoBrokerClientProtocol,
         *,
         oid_power: str | None = None,
@@ -79,7 +80,7 @@ class GenericIoBrokerDevice:
                 "both 'oid_power_import' and 'oid_power_export'."
             )
         self._device_id = device_id
-        self._role = role
+        self._category = category
         self._client = client
         self._oid_power = oid_power
         self._oid_power_import = oid_power_import
@@ -90,8 +91,8 @@ class GenericIoBrokerDevice:
         return self._device_id
 
     @property
-    def role(self) -> DeviceRole:
-        return self._role
+    def category(self) -> DeviceCategory:
+        return self._category
 
     async def get_state(self) -> DeviceState:
         """Read power from ioBroker and return a ``DeviceState``."""

@@ -66,7 +66,8 @@ from typing import Any
 import aiomqtt
 
 from ...core.config import MqttConfig
-from ...core.models import DeviceCommand, DeviceRole, DeviceState
+from ...core.device_model import DeviceCategory
+from ...core.models import DeviceCommand, DeviceState
 
 _log = logging.getLogger(__name__)
 
@@ -340,8 +341,8 @@ class OpenWBMqttDevice:
         return self._device_id
 
     @property
-    def role(self) -> DeviceRole:
-        return DeviceRole.EV_CHARGER
+    def category(self) -> DeviceCategory:
+        return DeviceCategory.CHARGER
 
     def update_target_soc(self, soc_pct: float | None) -> None:
         """Store the active goal's target SoC — written as the instant

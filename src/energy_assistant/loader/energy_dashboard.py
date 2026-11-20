@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core.config import AppConfig
+from ..core.device_model import Capability, DeviceCategory, DeviceSpec
 
 _log = logging.getLogger(__name__)
 
@@ -78,11 +79,11 @@ def add_dashboard_consumers(
     tariff = options.get("tariff")
 
     used: dict[str, str] = {}
-    for device_id, cfg in app_config.devices.items():
-        for s in _strings(cfg):
+    for device_id, spec in app_config.devices.items():
+        for s in _strings(spec.to_dict()):
             used.setdefault(s, device_id)
 
-    added: dict[str, dict[str, Any]] = {}   # device id → cfg
+    added: dict[str, DeviceSpec] = {}        # device id → spec
     by_stat: dict[str, str] = {}             # stat_consumption → device id
     entries: list[dict[str, Any]] = []
     for entry in prefs.get("device_consumption") or []:
@@ -110,18 +111,21 @@ def add_dashboard_consumers(
             device_id = f"{slug}_{n}"
             n += 1
 
-        cfg: dict[str, Any] = {"role": "consumer", "label": name, "energy_dashboard": stat}
-        if tariff:
-            cfg["tariff"] = tariff
+        spec = DeviceSpec(
+            id=device_id,
+            category=DeviceCategory.CONSUMER,
+            type="generic_consumer",
+            label=name,
+            tariff=tariff or None,
+            energy_dashboard=stat,
+        )
         if rate is not None:
-            cfg.update(type="generic_homeassistant", oid_power=rate)
-            cfg["learning"] = dict(learn_opts) if learning is not False else False
+            spec.type = "generic_homeassistant"
+            spec.capabilities = {Capability.POWER_W: {"entity": rate}}
+            spec.learning = dict(learn_opts) if learning is not False else False
         else:
-            cfg.update(
-                type="generic_consumer",
-                forecast={"type": "learned", "history_entity": stat, **learn_opts},
-            )
-        added[device_id] = cfg
+            spec.forecast = {"type": "learned", "history_entity": stat, **learn_opts}
+        added[device_id] = spec
         by_stat[stat] = device_id
         entries.append(entry)
 
@@ -140,9 +144,11 @@ def add_dashboard_consumers(
                 )
             continue
         child, parent = added[child_id], added[parent_id]
-        child["included_in"] = parent_id
-        child_entity = child.get("oid_power") or child["forecast"]["history_entity"]
-        target = parent.get("forecast") or parent.get("learning")
+        child.included_in = parent_id
+        child_entity = (
+            child.bound_entity(Capability.POWER_W) or (child.forecast or {})["history_entity"]
+        )
+        target = parent.forecast or parent.learning
         if isinstance(target, dict):
             target.setdefault("subtract", []).append(child_entity)
 

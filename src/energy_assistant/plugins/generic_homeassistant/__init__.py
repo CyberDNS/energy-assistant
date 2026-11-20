@@ -1,46 +1,89 @@
-"""generic_homeassistant plugin — reads a power entity from Home Assistant."""
+"""generic_homeassistant plugin — reads a power entity from Home Assistant.
+
+The entity is bound to the ``power_w`` capability::
+
+    - id: pv_production
+      category: pv
+      type: generic_homeassistant
+      capabilities:
+        power_w: { entity: sensor.power_production_pv, invert_sign: true }
+
+    - id: grid
+      category: grid_meter
+      type: generic_homeassistant
+      capabilities:
+        power_w: { import_entity: sensor.grid_import_w, export_entity: sensor.grid_export_w }
+"""
 
 from __future__ import annotations
 
 import logging
 from typing import Any
 
-from ...core.models import parse_device_role
+from ...core.device_model import Capability as Cap
+from ...core.device_model import DeviceCategory, DeviceConfigError
+from ...core.device_model import DeviceCategory as C
 from ...core.plugin_registry import BuildContext, PluginRegistry
 
 _log = logging.getLogger(__name__)
 
 
 def register(registry: PluginRegistry) -> None:
-    registry.register_device("generic_homeassistant", _build)
+    registry.register_device(
+        "generic_homeassistant", _build,
+        categories={C.GRID_METER, C.METER, C.PV, C.CONSUMER},
+        bindable={Cap.POWER_W},
+    )
 
 
-def _get(cfg: dict[str, Any], *keys: str) -> Any:
-    """Return the first non-None value found under any of *keys*."""
-    for k in keys:
-        if (v := cfg.get(k)) is not None:
-            return v
-    return None
+_OLD_KEYS = ("oid_power", "power", "oid_power_import", "power_import",
+             "oid_power_export", "power_export", "invert_sign")
+
+
+def power_binding(cfg: dict[str, Any]) -> dict[str, Any]:
+    """The ``capabilities.power_w`` binding of a device config (may be empty)."""
+    return dict((cfg.get("capabilities") or {}).get("power_w") or {})
 
 
 def _build(device_id: str, cfg: dict[str, Any], ctx: BuildContext) -> object | None:
     from .device import GenericHADevice
+
+    old = [k for k in _OLD_KEYS if k in cfg]
+    if old:
+        raise DeviceConfigError([(
+            f"device {device_id!r} (generic_homeassistant): {', '.join(old)} moved to "
+            "'capabilities: {power_w: {entity: …, invert_sign: …}}' "
+            "(or {import_entity: …, export_entity: …})"
+        )])
+    binding = power_binding(cfg)
+    if not binding:
+        raise DeviceConfigError([(
+            f"device {device_id!r} (generic_homeassistant) needs "
+            "'capabilities: {power_w: {entity: …}}' (a consumer without a power sensor "
+            "is type: generic_consumer)"
+        )])
+    unknown = set(binding) - {"entity", "import_entity", "export_entity", "invert_sign"}
+    if unknown:
+        raise DeviceConfigError([(
+            f"device {device_id!r}: capabilities.power_w: unknown key(s) "
+            f"{', '.join(sorted(unknown))} (entity, import_entity, export_entity, invert_sign)"
+        )])
     if ctx.ha_client is None:
         _log.warning(
             "Device %r (generic_homeassistant) requires Home Assistant backend — skipping",
             device_id,
         )
         return None
+
     try:
         return GenericHADevice(
             device_id=device_id,
-            role=parse_device_role(cfg.get("role")),
+            category=DeviceCategory(cfg["category"]),
             client=ctx.ha_client,
-            entity_power=_get(cfg, "oid_power", "power"),
-            entity_power_import=_get(cfg, "oid_power_import", "power_import"),
-            entity_power_export=_get(cfg, "oid_power_export", "power_export"),
-            invert_sign=bool(cfg.get("invert_sign", False)),
+            entity_power=binding.get("entity"),
+            entity_power_import=binding.get("import_entity"),
+            entity_power_export=binding.get("export_entity"),
+            invert_sign=bool(binding.get("invert_sign", False)),
         )
     except ValueError as exc:
-        _log.warning("Device %r: %s — skipping", device_id, exc)
-        return None
+        raise DeviceConfigError([f"device {device_id!r}: {exc}"]) from exc

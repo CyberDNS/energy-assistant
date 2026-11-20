@@ -7,7 +7,12 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from energy_assistant.assets.ev import EvChargerContributor, EvChargingAsset
-from energy_assistant.core.control import ControlLoop, LiveSituation, StorageControlContributor
+from energy_assistant.core.control import (
+    ControlLoop,
+    LiveSituation,
+    StorageControlContributor,
+)
+from energy_assistant.core.device_model import DeviceConfigError, parse_devices
 from energy_assistant.core.grid_limit import GridLimit
 from energy_assistant.core.ledger import BatteryCostLedger
 from energy_assistant.core.models import (
@@ -92,11 +97,23 @@ def _sp(loop: ControlLoop, base_w: float, measured: dict[str, float]) -> dict[st
 # ── Topology config ───────────────────────────────────────────────────────────
 
 
+def _grid_devices(**params):
+    entry = {"category": "grid_meter", "type": "tasmota", "host": "h"}
+    if params:
+        entry["params"] = params
+    return parse_devices({
+        "grid": entry,
+        "house": {"category": "meter", "type": "tasmota", "host": "h", "metered_by": "grid"},
+        "wb": {"category": "charger", "type": "openwb_mqtt", "chargepoint_id": 1},
+        "bat": {"category": "battery", "type": "zendure", "params": {
+            "capacity_kwh": 5, "max_charge_kw": 1, "max_discharge_kw": 1}},
+    })
+
+
 def test_topology_parses_connection_limit() -> None:
-    root = build_topology([{"grid": {
-        "max_import_kw": 24, "curtail_order": ["wb", "bat"], "limit_hysteresis_kw": 0.5,
-        "children": ["house"],
-    }}])
+    root = build_topology(_grid_devices(
+        max_import_kw=24, curtail_order=["wb", "bat"], limit_hysteresis_kw=0.5,
+    ))
     assert root is not None
     assert root.max_import_kw == 24.0
     assert root.curtail_order == ["wb", "bat"]
@@ -105,13 +122,18 @@ def test_topology_parses_connection_limit() -> None:
 
 
 def test_topology_without_limit_has_none() -> None:
-    root = build_topology([{"grid": {"children": ["house"]}}])
+    root = build_topology(_grid_devices())
     assert root is not None and root.max_import_kw is None and root.curtail_order == []
 
 
 def test_topology_rejects_non_positive_limit() -> None:
-    with pytest.raises(ValueError):
-        build_topology([{"grid": {"max_import_kw": 0}}])
+    with pytest.raises(DeviceConfigError, match="max_import_kw must be > 0"):
+        _grid_devices(max_import_kw=0)
+
+
+def test_curtail_order_must_name_devices() -> None:
+    with pytest.raises(DeviceConfigError, match="curtail_order names unknown device 'nope'"):
+        _grid_devices(max_import_kw=24, curtail_order=["nope"])
 
 
 def test_default_hysteresis_is_five_percent() -> None:

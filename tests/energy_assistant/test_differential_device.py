@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from energy_assistant.core.models import DeviceCommand, DeviceRole, DeviceState
+from energy_assistant.core.device_model import DeviceCategory
+from energy_assistant.core.models import DeviceCommand, DeviceState
 from energy_assistant.plugins.differential.device import DifferentialDevice
-
 
 # ---------------------------------------------------------------------------
 # Fake Device stub
@@ -36,8 +36,8 @@ class _FakeDevice:
         return self._device_id
 
     @property
-    def role(self) -> DeviceRole:
-        return DeviceRole.METER
+    def category(self) -> DeviceCategory:
+        return DeviceCategory.METER
 
     async def get_state(self) -> DeviceState:
         return self._state
@@ -59,7 +59,7 @@ class TestDifferentialDevice:
 
         hp = DifferentialDevice(
             device_id="heatpump",
-            role=DeviceRole.CONSUMER,
+            category=DeviceCategory.CONSUMER,
             minuend=minuend,
             subtrahend=subtrahend,
         )
@@ -76,7 +76,7 @@ class TestDifferentialDevice:
 
         hp = DifferentialDevice(
             device_id="hp",
-            role=DeviceRole.CONSUMER,
+            category=DeviceCategory.CONSUMER,
             minuend=minuend,
             subtrahend=subtrahend,
             min_power_w=0.0,
@@ -90,7 +90,7 @@ class TestDifferentialDevice:
 
         hp = DifferentialDevice(
             device_id="hp",
-            role=DeviceRole.CONSUMER,
+            category=DeviceCategory.CONSUMER,
             minuend=minuend,
             subtrahend=subtrahend,
             max_power_w=5000.0,
@@ -104,7 +104,7 @@ class TestDifferentialDevice:
 
         hp = DifferentialDevice(
             device_id="hp",
-            role=DeviceRole.CONSUMER,
+            category=DeviceCategory.CONSUMER,
             minuend=minuend,
             subtrahend=subtrahend,
         )
@@ -117,7 +117,7 @@ class TestDifferentialDevice:
 
         hp = DifferentialDevice(
             device_id="hp",
-            role=DeviceRole.CONSUMER,
+            category=DeviceCategory.CONSUMER,
             minuend=minuend,
             subtrahend=subtrahend,
         )
@@ -130,7 +130,7 @@ class TestDifferentialDevice:
 
         hp = DifferentialDevice(
             device_id="hp",
-            role=DeviceRole.CONSUMER,
+            category=DeviceCategory.CONSUMER,
             minuend=minuend,
             subtrahend=subtrahend,
         )
@@ -156,7 +156,7 @@ class TestDifferentialDevice:
 
         hp = DifferentialDevice(
             device_id="heatpump",
-            role=DeviceRole.CONSUMER,
+            category=DeviceCategory.CONSUMER,
             minuend=minuend,
             subtrahend=subtrahend,
             minuend_field="extra.import_w",  # use gross import, not net
@@ -180,7 +180,7 @@ class TestDifferentialDevice:
 
         hp = DifferentialDevice(
             device_id="heatpump",
-            role=DeviceRole.CONSUMER,
+            category=DeviceCategory.CONSUMER,
             minuend=minuend,
             subtrahend=subtrahend,
             minuend_field="extra.import_w",
@@ -195,7 +195,7 @@ class TestDifferentialDevice:
 
         hp = DifferentialDevice(
             device_id="hp",
-            role=DeviceRole.CONSUMER,
+            category=DeviceCategory.CONSUMER,
             minuend=minuend,
             subtrahend=subtrahend,
             minuend_field="extra.import_w",
@@ -209,7 +209,7 @@ class TestDifferentialDevice:
 
         hp = DifferentialDevice(
             device_id="hp",
-            role=DeviceRole.CONSUMER,
+            category=DeviceCategory.CONSUMER,
             minuend=minuend,
             subtrahend=subtrahend,
         )
@@ -222,9 +222,9 @@ class TestDifferentialDevice:
 
         hp = DifferentialDevice(
             device_id="heatpump",
-            role=DeviceRole.CONSUMER,
+            category=DeviceCategory.CONSUMER,
             minuend=minuend,
             subtrahend=subtrahend,
         )
         assert hp.device_id == "heatpump"
-        assert hp.role == DeviceRole.CONSUMER
+        assert hp.category == DeviceCategory.CONSUMER

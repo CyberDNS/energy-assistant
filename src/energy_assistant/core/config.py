@@ -6,13 +6,15 @@ Phase 1 — YAML config
 
     backends:    connection parameters for ioBroker and Home Assistant
     tariffs:     pricing models, keyed by name
-    devices:     device declarations, keyed by device_id
-    topology:    physical meter wiring as a tree
-    assets:      managed objects (EVs, heat stores) with targets
+    devices:     device declarations (``DeviceSpec``), keyed by device_id;
+                 their ``metered_by`` connections form the metering tree
+    assets:      managed objects (EVs, threshold loads) with targets
     optimizer:   algorithm, horizon, schedule
 
-The ``tariffs``, ``devices``, ``topology``, ``assets``, and ``optimizer``
-sections are kept as raw dicts so each plugin can validate its own slice.
+``devices`` is parsed into typed ``DeviceSpec`` objects and validated against
+the category schemas (``core/device_model``).  The ``tariffs``, ``assets``
+and ``optimizer`` sections are kept as raw dicts so each plugin can validate
+its own slice.
 
 Phase 2 — JSON files (future)
 ------------------------------
@@ -25,8 +27,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from .device_model import DeviceSpec
 from .models import ConfigEntry
-
 
 # ---------------------------------------------------------------------------
 # Protocol
@@ -98,16 +100,15 @@ class BackendsConfig:
 class AppConfig:
     """Fully-parsed application configuration from the YAML file.
 
-    The raw dicts in ``tariffs``, ``devices``, ``topology``, ``assets``,
-    and ``optimizer`` are validated by the relevant plugins / loaders —
-    not here.
+    ``devices`` holds validated ``DeviceSpec`` objects.  The raw dicts in
+    ``tariffs``, ``assets`` and ``optimizer`` are validated by the relevant
+    plugins / loaders — not here.
     """
 
     backends: BackendsConfig = field(default_factory=BackendsConfig)
     tariffs: dict[str, dict[str, Any]] = field(default_factory=dict)
-    devices: dict[str, dict[str, Any]] = field(default_factory=dict)
+    devices: dict[str, DeviceSpec] = field(default_factory=dict)
     forecasts: dict[str, dict[str, Any]] = field(default_factory=dict)
-    topology: dict[str, Any] = field(default_factory=dict)
     assets: dict[str, Any] = field(default_factory=dict)
     optimizer: dict[str, Any] = field(default_factory=dict)
     controller: dict[str, Any] = field(default_factory=dict)

@@ -8,7 +8,8 @@ triggering additional API calls.
 from __future__ import annotations
 
 from .device import Device
-from .models import DeviceRole, DeviceState
+from .device_model import DeviceCategory
+from .models import DeviceState
 
 
 class DeviceRegistry:
@@ -48,9 +49,9 @@ class DeviceRegistry:
         """Return all registered devices."""
         return list(self._devices.values())
 
-    def by_role(self, role: DeviceRole) -> list[Device]:
-        """Return all devices with the given *role*."""
-        return [d for d in self._devices.values() if d.role == role]
+    def by_category(self, *categories: DeviceCategory) -> list[Device]:
+        """Return all devices of the given *categories*, in registration order."""
+        return [d for d in self._devices.values() if d.category in categories]
 
     def __len__(self) -> int:
         return len(self._devices)

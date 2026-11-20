@@ -18,6 +18,18 @@ needed to construct a device or tariff:
     ctx.data_dir        — writable directory for persistent plugin state
                           (e.g. fitted forecast models), or None
 
+Device plugin metadata
+----------------------
+``register_device`` also declares what a plugin type can be used for, so the
+loader can check the ``devices:`` section at startup:
+
+``categories``  device categories the plugin can serve (empty = any).
+``provides``    capabilities the plugin always provides natively, from its
+                own settings (e.g. an openWB chargepoint has ``power_w``).
+``bindable``    capabilities that can be bound in the device's
+                ``capabilities:`` config (e.g. ``{entity: sensor.…}`` for
+                Home Assistant backed plugins).
+
 Deferred factories
 ------------------
 Some devices (e.g. ``differential``) depend on other devices having been
@@ -28,11 +40,13 @@ in a second pass after the registry has been fully populated.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .config import BackendsConfig
+from .device_model import Capability, DeviceCategory
 
 _log = logging.getLogger(__name__)
 
@@ -40,6 +54,18 @@ _log = logging.getLogger(__name__)
 DeviceFactory = Callable[[str, dict[str, Any], "BuildContext"], Any]
 TariffFactory = Callable[[str, dict[str, Any], "BuildContext"], Any]
 ForecastFactory = Callable[[str, dict[str, Any], "BuildContext"], Any]
+
+
+@dataclass(frozen=True)
+class DevicePluginInfo:
+    """What a device plugin type can be used for (see module docstring)."""
+
+    type_name: str
+    factory: DeviceFactory
+    deferred: bool = False
+    categories: frozenset[DeviceCategory] = frozenset()
+    provides: frozenset[Capability] = frozenset()
+    bindable: frozenset[Capability] = frozenset()
 
 
 @dataclass
@@ -58,8 +84,7 @@ class PluginRegistry:
     """Registry of device and tariff factory functions, keyed by type name."""
 
     def __init__(self) -> None:
-        # value: (factory, is_deferred)
-        self._device: dict[str, tuple[DeviceFactory, bool]] = {}
+        self._device: dict[str, DevicePluginInfo] = {}
         self._tariff: dict[str, TariffFactory] = {}
         self._forecast: dict[str, ForecastFactory] = {}
 
@@ -69,6 +94,9 @@ class PluginRegistry:
         factory: DeviceFactory,
         *,
         deferred: bool = False,
+        categories: frozenset[DeviceCategory] | set[DeviceCategory] = frozenset(),
+        provides: frozenset[Capability] | set[Capability] = frozenset(),
+        bindable: frozenset[Capability] | set[Capability] = frozenset(),
     ) -> None:
         """Register *factory* for devices with ``type: <type_name>``.
 
@@ -78,8 +106,25 @@ class PluginRegistry:
             When ``True`` the factory will be called in the second pass,
             after all non-deferred devices have been built and added to
             ``BuildContext.device_registry``.
+        categories, provides, bindable:
+            Plugin metadata, see the module docstring.
         """
-        self._device[type_name] = (factory, deferred)
+        self._device[type_name] = DevicePluginInfo(
+            type_name=type_name,
+            factory=factory,
+            deferred=deferred,
+            categories=frozenset(categories),
+            provides=frozenset(provides),
+            bindable=frozenset(bindable),
+        )
+
+    def device_info(self, type_name: str) -> DevicePluginInfo | None:
+        """Metadata of the device plugin *type_name*, or None if unknown."""
+        return self._device.get(type_name)
+
+    def device_types(self) -> list[str]:
+        """All registered device plugin type names."""
+        return sorted(self._device)
 
     def register_tariff(self, type_name: str, factory: TariffFactory) -> None:
         """Register *factory* for tariffs with ``type: <type_name>``."""
@@ -92,7 +137,7 @@ class PluginRegistry:
     def is_deferred(self, type_name: str) -> bool:
         """Return ``True`` when the given device type requires a second pass."""
         entry = self._device.get(type_name)
-        return entry[1] if entry else False
+        return entry.deferred if entry else False
 
     def build_device(
         self, device_id: str, cfg: dict[str, Any], ctx: BuildContext
@@ -105,8 +150,7 @@ class PluginRegistry:
                 type_name, device_id,
             )
             return None
-        factory, _ = entry
-        return factory(device_id, cfg, ctx)
+        return entry.factory(device_id, cfg, ctx)
 
     def build_tariff(
         self, tariff_id: str, cfg: dict[str, Any], ctx: BuildContext

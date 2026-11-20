@@ -4,22 +4,23 @@ from __future__ import annotations
 
 import pytest
 
-from energy_assistant.core.models import DeviceCommand, DeviceRole, DeviceState
+from energy_assistant.core.device_model import DeviceCategory
+from energy_assistant.core.models import DeviceCommand, DeviceState
 from energy_assistant.core.registry import DeviceRegistry
 
 
 class _FakeDevice:
-    def __init__(self, device_id: str, role: DeviceRole = DeviceRole.METER) -> None:
+    def __init__(self, device_id: str, category: DeviceCategory = DeviceCategory.METER) -> None:
         self._device_id = device_id
-        self._role = role
+        self._category = category
 
     @property
     def device_id(self) -> str:
         return self._device_id
 
     @property
-    def role(self) -> DeviceRole:
-        return self._role
+    def category(self) -> DeviceCategory:
+        return self._category
 
     async def get_state(self) -> DeviceState:
         return DeviceState(device_id=self._device_id)
@@ -59,25 +60,25 @@ class TestDeviceRegistry:
 
     def test_all_returns_all_registered(self) -> None:
         registry = DeviceRegistry()
-        d1 = _FakeDevice("m1", DeviceRole.METER)
-        d2 = _FakeDevice("m2", DeviceRole.CONSUMER)
-        d3 = _FakeDevice("m3", DeviceRole.PRODUCER)
+        d1 = _FakeDevice("m1", DeviceCategory.METER)
+        d2 = _FakeDevice("m2", DeviceCategory.CONSUMER)
+        d3 = _FakeDevice("m3", DeviceCategory.PV)
         registry.register(d1)
         registry.register(d2)
         registry.register(d3)
         assert set(d.device_id for d in registry.all()) == {"m1", "m2", "m3"}
 
-    def test_by_role_filters_correctly(self) -> None:
+    def test_by_category_filters_correctly(self) -> None:
         registry = DeviceRegistry()
-        registry.register(_FakeDevice("meter1", DeviceRole.METER))
-        registry.register(_FakeDevice("meter2", DeviceRole.METER))
-        registry.register(_FakeDevice("consumer1", DeviceRole.CONSUMER))
+        registry.register(_FakeDevice("meter1", DeviceCategory.METER))
+        registry.register(_FakeDevice("meter2", DeviceCategory.METER))
+        registry.register(_FakeDevice("consumer1", DeviceCategory.CONSUMER))
 
-        meters = registry.by_role(DeviceRole.METER)
+        meters = registry.by_category(DeviceCategory.METER)
         assert len(meters) == 2
-        assert all(d.role == DeviceRole.METER for d in meters)
+        assert all(d.category == DeviceCategory.METER for d in meters)
 
-        consumers = registry.by_role(DeviceRole.CONSUMER)
+        consumers = registry.by_category(DeviceCategory.CONSUMER)
         assert len(consumers) == 1
 
     def test_len(self) -> None:

@@ -6,32 +6,33 @@ from types import SimpleNamespace
 
 import pytest
 
+from energy_assistant.core.device_model import DeviceCategory, DeviceSpec
 from energy_assistant.core.ledger import BatteryCostLedger
-from energy_assistant.core.models import DeviceRole, DeviceState
+from energy_assistant.core.models import DeviceState
 from energy_assistant.server import Application, _TariffZone
 
 
 class _Registry:
-    def __init__(self, roles: dict[str, DeviceRole]) -> None:
-        self._roles = roles
+    def __init__(self, categories: dict[str, DeviceCategory]) -> None:
+        self._categories = categories
 
     def get(self, device_id: str):
-        role = self._roles.get(device_id)
-        return None if role is None else SimpleNamespace(device_id=device_id, role=role)
+        category = self._categories.get(device_id)
+        return None if category is None else SimpleNamespace(device_id=device_id, category=category)
 
 
 def _app_with_zones(
     zones: dict[str, _TariffZone],
     pv_opportunity_price: float,
-    devices: dict[str, dict] | None = None,
-    roles: dict[str, DeviceRole] | None = None,
+    devices: dict[str, DeviceSpec] | None = None,
+    categories: dict[str, DeviceCategory] | None = None,
 ) -> Application:
     app = Application.__new__(Application)
     app._tariff_zones = zones
     app._pv_opportunity_price = pv_opportunity_price
     app._ledger = BatteryCostLedger()
     app._cfg = SimpleNamespace(default_tariff_id="household", devices=devices or {})
-    app._registry = _Registry(roles or {})
+    app._registry = _Registry(categories or {})
     app._tariffs = {tid: object() for tid in ("household", "heatpump")}
     app._grid_meter_id = "main_grid_meter"
     return app
@@ -141,10 +142,12 @@ def _mk8_app() -> Application:
         zones,
         pv_opportunity_price=0.082,
         devices={
-            "heatpump": {"type": "differential", "tariff": "heatpump"},
-            "household_meter": {"tariff": "household"},
+            "heatpump": DeviceSpec(id="heatpump", category=DeviceCategory.CONSUMER,
+                                   type="differential", tariff="heatpump"),
+            "household_meter": DeviceSpec(id="household_meter", category=DeviceCategory.METER,
+                                          type="tibber_local", tariff="household"),
         },
-        roles={"heatpump": DeviceRole.CONSUMER, "household_meter": DeviceRole.METER},
+        categories={"heatpump": DeviceCategory.CONSUMER, "household_meter": DeviceCategory.METER},
     )
 
 

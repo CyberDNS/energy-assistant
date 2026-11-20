@@ -1,28 +1,28 @@
 # Domain Model
 
 This document describes the conceptual model used to represent an energy
-installation in the configuration. It defines the six top-level sections of
-`config.yaml`, their purpose, and how they relate to each other.
+installation in the configuration. It defines the main top-level sections of
+`config.yaml`, their purpose, and how they relate to each other.  The device
+model (categories, capabilities, connections) is designed in issue #97.
 
 ---
 
 ## Overview
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                          config.yaml                         │
-├────────────┬──────────┬─────────┬────────┬──────────────────┤
-│  backends  │ tariffs  │devices  │topology│ assets │ optimizer│
-└────────────┴──────────┴─────────┴────────┴────────┴──────────┘
+┌─────────────────────────────────────────────────────┐
+│                     config.yaml                     │
+├────────────┬──────────┬──────────┬────────┬─────────┤
+│  backends  │ tariffs  │ devices  │ assets │optimizer│
+└────────────┴──────────┴──────────┴────────┴─────────┘
 ```
 
 | Section     | Purpose |
 |-------------|---------|
 | `backends`  | Connection parameters for ioBroker and Home Assistant |
 | `tariffs`   | Pricing models defined once, referenced by name from devices |
-| `devices`   | Every piece of hardware — meters, consumers, producers, storage |
-| `topology`  | The structural wiring of meters (tree, children, residuals) |
-| `assets`    | Managed objects (EVs, heat stores) with their own targets |
+| `devices`   | Everything in the house — meters, PV, batteries, chargers, consumers — with category, capabilities, params and connections; `metered_by` forms the metering tree |
+| `assets`    | EV charging targets and threshold loads (until they become devices, #97) |
 | `optimizer` | Single holistic solver: algorithm, horizon, schedule |
 
 For a complete annotated example covering all sections, see [`config.yaml.example`](config.yaml.example).
@@ -46,83 +46,63 @@ This keeps pricing configuration in one place.
 
 ## Layer 3 — `devices`
 
-Every hardware component is defined here — physical meters, consuming devices,
-producing devices, and storage. This is the central registry of everything
-the system knows about.
+One flat list of everything in the house: meters, PV, batteries, chargers,
+thermal loads, switches, consumers.  Parsed into `DeviceSpec`
+(`core/device_model.py`) and validated at startup.
 
-### Common fields
+### Fields
 
-| Field      | Required | Description |
-|------------|----------|-------------|
-| `role`     | yes      | Semantic label — what this device *is* (see roles below) |
-| `source`   | yes*     | How to read the current power value |
-| `tariff`   | no       | Reference to a tariff name from `tariffs:` |
-| `control`  | no       | How to actuate the device |
+| Field           | Required | Description |
+|-----------------|----------|-------------|
+| `id`            | yes      | Stable id (config key, DB key, MQTT key) |
+| `category`      | yes      | What the device *is* (see categories below) |
+| `type`          | yes      | The plugin — *how* to talk to the device; all keys not listed here are that plugin's settings (host, profile, …) |
+| `label`         | no       | Display name |
+| `tariff`        | no       | Tariff id from `tariffs:` (default: the default tariff) |
+| `capabilities`  | no       | Bindings for capabilities the plugin doesn't provide itself, e.g. `power_w: {entity: sensor.…}` |
+| `params`        | depends  | Model parameters of the category (battery capacity, grid limit, rated power) |
+| `metered_by`    | no       | The meter this device sits behind |
+| `controlled_by` | no       | The switch that executes this device's plan |
+| `included_in`   | no       | A consumer whose meter already contains this consumer's load |
+| `forecast`, `learning` | no | Consumption forecast (consumers) |
 
-\* Not required for `role: consumer` devices that are pure residuals with no
-direct sensor — they derive their power from `topology` position.
+### Categories
 
-### Roles
+| Category       | Required capabilities | Params | Connections |
+|----------------|-----------------------|--------|-------------|
+| `grid_meter`   | `power_w` | `max_import_kw`, `curtail_order`, `limit_hysteresis_kw` | — (root of the metering tree) |
+| `meter`        | `power_w` | — | `metered_by` |
+| `pv`           | `power_w` | — | `metered_by` |
+| `battery`      | `power_w`, `soc_pct` | `capacity_kwh`, `max_charge_kw`, `max_discharge_kw` (required), SoC limits, efficiencies, wear cost, … | `metered_by` |
+| `charger`      | `power_w` | — (still under `assets:`) | `metered_by` |
+| `thermal_load` | `temperature_c` | `rated_power_w` | `metered_by`, `controlled_by` → switch (or a `switch` capability binding for now) |
+| `switch`       | `switch` | `rated_power_w` | `metered_by` |
+| `consumer`     | — | — | `metered_by`, `controlled_by` → switch, `included_in` → consumer |
+| `vehicle`      | `soc_pct` | — | (sessions with a charger, #97 phase 3) |
+| `sensor`       | — | — | — |
 
-| Role         | Meaning |
-|--------------|---------|
-| `meter`      | A physical energy meter. May be a grid connection point or a sub-meter. |
-| `producer`   | A generation source (PV inverter, CHP, etc.) |
-| `consumer`   | A load device (heatpump, appliance, circuit) |
-| `storage`    | A battery or thermal store that can charge and discharge |
-| `ev_charger` | An EV charging point — specialisation of consumer with asset association |
-
-`tariff:` can be set on any role, not just `meter`. A consumer with a
-special tariff (e.g. a heatpump on a heating tariff) declares it directly.
-
-### Source types
-
-| Type                 | Description |
-|----------------------|-------------|
-| `generic_iobroker`   | Reads a single power OID, or derives `import - export` from two OIDs |
-| `generic_ha`         | Reads a single HA entity, or derives from import/export entities |
-| `differential`       | Derives power as `minuend - subtrahend` (two device names) |
-
-### Control types
-
-| Type         | Description |
-|--------------|-------------|
-| `ha_switch`  | Calls `homeassistant.turn_on/off` on a HA entity |
-| `iobroker`   | Writes a boolean OID in ioBroker |
+Plugins declare which categories they can serve and which capabilities they
+provide or can bind (`register_device(..., categories=, provides=, bindable=)`);
+the loader checks every device against them before anything is built.
 
 ---
 
-## Layer 4 — `topology`
+## Metering tree (`metered_by`)
 
-The topology describes the physical wiring of meters as a tree. It is purely
-structural — device capabilities and sources are declared in `devices:`, not
-here. The topology tree is used for:
+`metered_by` describes the physical wiring of meters as a tree; the
+`grid_meter` (the meter that sees the full imported/exported power) is the
+root, children keep the order of the `devices:` list.  It is used for:
 
+- **Cost attribution**: each `meter` below the root defines a tariff zone,
+  owning the PV and batteries in its subtree.
 - **Residual derivation**: a device whose power is not directly measured can
-  be calculated as the parent meter minus all explicitly metered children.
-- **Cost attribution**: energy costs are computed per sub-branch using the
-  tariff declared on the corresponding device.
-- **Power flow visualisation**: the dashboard renders the tree to show where
-  energy is flowing.
+  be calculated as the parent meter minus all explicitly metered children
+  (in practice: `type: differential` with explicit operands).
+- **Power flow visualisation**.
 
-The root of the tree is the grid connection point (the meter that sees the
-full imported/exported power). Each node may have `children` that are meters
-or devices with their own power readings.
-
-Any device listed in `topology` must also be defined in `devices`. Devices
-not listed in `topology` are still known to the system but are not part of
-the structural tree.
-
-### Residual derivation
-
-If a device has no `source` of type `generic_*` but appears as a child in
-the topology, its power is derived automatically: parent power minus the sum
-of all directly-measured children at the same level. Only one un-measured
-device may exist per parent node (otherwise the residual is ambiguous).
-
-In the `devices:` example above, `heatpump` has `type: differential` and
-names its operands explicitly (preferred). The topology residual mechanism
-handles the case where no sensor exists at all.
+Devices without `metered_by` (other than the grid meter) are known to the
+system but are not part of the tree.  The tree must end at the grid meter:
+a `metered_by` chain to a meter without its own `metered_by` is an error.
 
 ---
 
@@ -158,10 +138,10 @@ rule-based scheduler, an ML model, or an LLM-driven planner in the future.
 
 ```
 tariffs:          ←── referenced by name from devices[*].tariff
-devices:          ←── referenced by name from topology nodes
-                  ←── referenced by name from assets[*].managed_by
-                  ←── source.type:differential references two device names
-topology:         ←── references device names as tree nodes
+devices:          ←── referenced by id from devices[*].metered_by /
+                      controlled_by / included_in
+                  ←── referenced by id from assets[*].device
+                  ←── type:differential references two device ids
 assets:           ←── optimizer discovers constraints from active assets
 optimizer:        ←── reads all devices + active asset constraints at runtime
 ```

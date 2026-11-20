@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import logging
 
-from ...core.models import DeviceCommand, DeviceRole, DeviceState
+from ...core.device_model import DeviceCategory
+from ...core.models import DeviceCommand, DeviceState
 from .._iobroker.client import IoBrokerClientProtocol
 
 _log = logging.getLogger(__name__)
@@ -35,8 +36,8 @@ class TibberIoBrokerDevice:
     ----------
     device_id:
         Stable, unique identifier for this device.
-    role:
-        Semantic role (typically ``DeviceRole.METER``).
+    category:
+        Device category (typically ``DeviceCategory.METER``).
     client:
         An open ioBroker client (e.g. from ``IoBrokerConnectionPool``).
     home_id:
@@ -46,12 +47,12 @@ class TibberIoBrokerDevice:
     def __init__(
         self,
         device_id: str,
-        role: DeviceRole,
+        category: DeviceCategory,
         client: IoBrokerClientProtocol,
         home_id: str,
     ) -> None:
         self._device_id = device_id
-        self._role = role
+        self._category = category
         self._client = client
         self._home_id = home_id
         self._oid = _POWER_OID.format(home_id=home_id)
@@ -61,8 +62,8 @@ class TibberIoBrokerDevice:
         return self._device_id
 
     @property
-    def role(self) -> DeviceRole:
-        return self._role
+    def category(self) -> DeviceCategory:
+        return self._category
 
     @property
     def home_id(self) -> str:

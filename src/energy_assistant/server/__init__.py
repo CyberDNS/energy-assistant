@@ -36,26 +36,22 @@ Usage (programmatic)::
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import json
-from collections import defaultdict
-import contextlib
 import logging
 import os
 import time
+from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-import uvicorn
-
 from pydantic import BaseModel
-
-from .mcp_tools import mount_mcp_server
-from .remote_access import DEFAULT_TRUSTED_HOSTS, ApiAccessMiddleware
 
 from ..assets.ev import (
     _FEASIBILITY_MARGIN,
@@ -76,6 +72,7 @@ from ..assets.loader import (
 from ..assets.threshold import ThresholdControlContributor
 from ..config.yaml import YamlConfigLoader
 from ..core.change_gate import ChangeGate
+from ..core.composition import compose
 from ..core.config import AppConfig
 from ..core.control import (
     ControlLoop,
@@ -83,12 +80,13 @@ from ..core.control import (
     StorageControlContributor,
     surplus_opportunity_price,
 )
+from ..core.device_model import DeviceCategory, DeviceSpec
 from ..core.event import DeviceStateEvent, EventBus, PlanUpdatedEvent
 from ..core.execution_log import DeviceTick, ExecutionLog
 from ..core.forecast import ForecastProvider
+from ..core.grid_limit import GridLimit
 from ..core.ledger import BatteryCostLedger
 from ..core.models import (
-    DeviceRole,
     EnergyPlan,
     ForecastPoint,
     ForecastQuantity,
@@ -102,8 +100,8 @@ from ..core.models import (
 )
 from ..core.optimizer import OptimizationContext, SecondaryTariffLoad
 from ..core.plan_schedule import aligned_plan_period, next_plan_run
-from ..core.price_curve import PriceCurveHistory, build_price_slots
 from ..core.plugin_registry import BuildContext
+from ..core.price_curve import PriceCurveHistory, build_price_slots
 from ..core.registry import DeviceRegistry
 from ..core.savings import (
     DeviceLive,
@@ -116,15 +114,14 @@ from ..core.savings import (
 )
 from ..core.tariff import TariffModel
 from ..core.topology import TopologyNode
-from ..core.grid_limit import GridLimit
-from ..loader.energy_dashboard import import_energy_dashboard
-from ..loader.forecast_config import effective_forecast_configs
 from ..loader.device_loader import (
     build,
     build_device_forecast_map,
     build_top_level_forecasts,
     make_build_context,
 )
+from ..loader.energy_dashboard import import_energy_dashboard
+from ..loader.forecast_config import effective_forecast_configs
 from ..plugins import registry as plugin_registry
 from ..plugins.milp_highs import MilpHigsOptimizer
 from ..plugins.mqtt_publisher import (
@@ -133,6 +130,8 @@ from ..plugins.mqtt_publisher import (
     select_discovery_devices,
 )
 from ..storage.sqlite import SqliteStorageBackend
+from .mcp_tools import mount_mcp_server
+from .remote_access import DEFAULT_TRUSTED_HOSTS, ApiAccessMiddleware
 
 _log = logging.getLogger(__name__)
 
@@ -199,11 +198,11 @@ class _TariffZone:
 
     tariff_id: str
     meter_ids: list[str] = dataclasses.field(default_factory=list)
-    """``role=meter`` devices that measure grid import for this circuit."""
+    """``meter`` devices that measure grid import for this circuit."""
     producer_ids: list[str] = dataclasses.field(default_factory=list)
-    """``role=producer`` (PV) devices physically on this circuit."""
+    """``pv`` devices physically on this circuit."""
     storage_ids: list[str] = dataclasses.field(default_factory=list)
-    """``role=storage`` devices (batteries) physically on this circuit."""
+    """``battery`` devices physically on this circuit."""
     diff_minuend_id: str | None = None
     """For differential zones (e.g. heatpump = Z1 − Z2): the Z1 (minuend) device."""
     diff_subtrahend_id: str | None = None
@@ -224,36 +223,6 @@ def _learning_category(item: dict[str, Any]) -> str:
     kept between a min and a max: aquarium, fridge, AC) and ``storage``
     (battery round-trip efficiency from closed charge/discharge cycles)."""
     return {"thermal": "thermal", "efficiency": "storage"}.get(item.get("kind", ""), "consumption")
-
-
-def _storage_constraints_from_config(cfg: AppConfig) -> list[StorageConstraints]:
-    """Extract ``StorageConstraints`` for every device with ``role: storage``."""
-    result: list[StorageConstraints] = []
-    for device_id, dcfg in cfg.devices.items():
-        if dcfg.get("role") != "storage":
-            continue
-        try:
-            purchase_price = dcfg.get("purchase_price_eur")
-            cycle_life = dcfg.get("cycle_life") or dcfg.get("cycle_lifetime")
-            result.append(
-                StorageConstraints(
-                    device_id=device_id,
-                    capacity_kwh=float(dcfg.get("capacity_kwh", 0.0)),
-                    max_charge_kw=float(dcfg.get("max_charge_kw", 0.0)),
-                    max_discharge_kw=float(dcfg.get("max_discharge_kw", 0.0)),
-                    charge_efficiency=float(dcfg.get("charge_efficiency", 0.95)),
-                    discharge_efficiency=float(dcfg.get("discharge_efficiency", 0.95)),
-                    min_soc_pct=float(dcfg.get("min_soc_pct", 0.0)),
-                    max_soc_pct=float(dcfg.get("max_soc_pct", 100.0)),
-                    purchase_price_eur=float(purchase_price) if purchase_price is not None else None,
-                    cycle_life=int(cycle_life) if cycle_life is not None else None,
-                    no_grid_charge=bool(dcfg.get("no_grid_charge", False)),
-                    standby_w=float(dcfg.get("standby_w", 50.0)),
-                )
-            )
-        except Exception as exc:  # noqa: BLE001
-            _log.warning("Could not build StorageConstraints for %r: %s", device_id, exc)
-    return result
 
 
 async def _current_export_price(tariffs: dict[str, TariffModel]) -> float:
@@ -490,12 +459,12 @@ async def _collect_forecasts(
     }
 
 
-async def _virtual_forecast_power_w(device_cfg: dict, provider: Any) -> float | None:
+async def _virtual_forecast_power_w(spec: DeviceSpec | None, provider: Any) -> float | None:
     """Return forecast power in watts for virtual generic consumers.
 
     *provider* is the device's forecast provider (static profile, learned …).
     """
-    if device_cfg.get("type") != "generic_consumer" or provider is None:
+    if spec is None or spec.type != "generic_consumer" or provider is None:
         return None
     try:
         pts = await provider.get_forecast(timedelta(hours=1))
@@ -693,7 +662,8 @@ class Application:
         self._bus = EventBus()
 
         # 6 — Storage constraints + optimizer
-        self._storage_constraints = _storage_constraints_from_config(self._cfg)
+        # Composition: optimizer / control inputs from the device list.
+        self._storage_constraints = compose(self._cfg.devices).storage_constraints
         self._optimizer = MilpHigsOptimizer(
             step_minutes=int(opt.get("step_minutes", 60)),
             precision=float(opt.get("precision", 0.5)),
@@ -785,7 +755,7 @@ class Application:
                 # Every device not already fed from HA, as a sub-device.
                 devices=select_discovery_devices(
                     self._cfg.devices,
-                    {d.device_id: d.role for d in self._registry.all()},
+                    {d.device_id for d in self._registry.all()},
                 ),
             )
             await self._mqtt_publisher.publish_weekly_plans(self._ev_weekly_plans)
@@ -819,7 +789,7 @@ class Application:
         )
         self._grid_meter_id = self._topology.device_id if self._topology else None
         self._pv_device_id: str | None = next(
-            (d.device_id for d in self._registry.all() if d.role == DeviceRole.PRODUCER),
+            (d.device_id for d in self._registry.by_category(DeviceCategory.PV)),
             None,
         )
         self._pv_opportunity_price = 0.0  # refreshed on first planning cycle
@@ -1336,8 +1306,7 @@ class Application:
             secondary_loads=secondary_loads,
             max_import_kw=self._topology.max_import_kw if self._topology else None,
             producer_device_ids={
-                d.device_id for d in self._registry.all()
-                if d.role == DeviceRole.PRODUCER
+                d.device_id for d in self._registry.by_category(DeviceCategory.PV)
             },
         )
 
@@ -1719,17 +1688,17 @@ class Application:
         keyed by tariff id (e.g. the heat pump on its own tariff)."""
         primary_id = self._cfg.default_tariff_id
         out: dict[str, list[str]] = defaultdict(list)
-        for device_id, cfg in self._cfg.devices.items():
+        for device_id, spec in self._cfg.devices.items():
             device = self._registry.get(device_id)
-            if device is None or device.role != DeviceRole.CONSUMER:
+            if device is None or device.category is not DeviceCategory.CONSUMER:
                 continue
-            tariff_id = cfg.get("tariff") or primary_id
+            tariff_id = spec.tariff or primary_id
             if tariff_id != primary_id and tariff_id in self._tariffs:
                 out[tariff_id].append(device_id)
         return out
 
     def _secondary_import_price(
-        self, tariff_prices: dict[str, float], device_states: "dict[str, Any]"
+        self, tariff_prices: dict[str, float], device_states: dict[str, Any]
     ) -> float | None:
         """Current import price (€/kWh) of the separately billed loads.
 
@@ -2072,19 +2041,22 @@ class Application:
 
             devices_payload = []
             for s in device_states_map.values():
-                cfg = self._cfg.devices.get(s.device_id, {})
+                spec = self._cfg.devices.get(s.device_id)
                 devices_payload.append(
                     {
                         "device_id": s.device_id,
-                        "label": cfg.get("label") or s.device_id.replace("_", " ").title(),
-                        "role": cfg.get("role"),
+                        "label": (
+                            spec.display_name if spec is not None
+                            else s.device_id.replace("_", " ").title()
+                        ),
+                        "category": spec.category.value if spec is not None else None,
                         "power_w": s.power_w,
                         "soc_pct": s.soc_pct,
                         "available": s.available,
                         "timestamp": s.timestamp.isoformat(),
-                        "is_virtual": cfg.get("type") == "generic_consumer",
+                        "is_virtual": spec is not None and spec.type == "generic_consumer",
                         "forecast_power_w": await _virtual_forecast_power_w(
-                            cfg, getattr(self, "_device_forecast_providers", {}).get(s.device_id)
+                            spec, getattr(self, "_device_forecast_providers", {}).get(s.device_id)
                         ),
                     }
                 )
@@ -2104,8 +2076,8 @@ class Application:
                         "mode": mode,
                         "grid_allowed": intent.grid_allowed if intent is not None else None,
                         "export_allowed": intent.export_allowed if intent is not None else None,
-                        "role": (
-                            dev.role.value
+                        "category": (
+                            dev.category.value
                             if (dev := self._registry.get(did)) is not None
                             else None
                         ),
@@ -2506,7 +2478,7 @@ class Application:
             ----------------
             hours:       look-back window (default 24).
             device_ids:  comma-separated device IDs.  Defaults to all storage
-                         devices + the topology root meter + PV producers.
+                         devices + the meters + PV producers.
             start, end:  explicit window instead of *hours* (naive = UTC; *end*
                          defaults to now).  At most 7 days either way.
             """
@@ -2519,11 +2491,12 @@ class Application:
             if device_ids.strip():
                 ids = [d.strip() for d in device_ids.split(",") if d.strip()]
             else:
-                # Default: storage + meter + producer devices
+                # Default: storage + meter + PV devices
                 ids = [sc.device_id for sc in self._storage_constraints]
-                for device in self._registry.all():
-                    if device.role in (DeviceRole.METER, DeviceRole.PRODUCER):
-                        ids.append(device.device_id)
+                for device in self._registry.by_category(
+                    DeviceCategory.GRID_METER, DeviceCategory.METER, DeviceCategory.PV
+                ):
+                    ids.append(device.device_id)
                 ids = list(dict.fromkeys(ids))  # deduplicate preserving order
 
             result: dict[str, list] = {}
@@ -2549,12 +2522,21 @@ class Application:
 
         @api.get("/api/config")
         async def get_config() -> dict:
-            """Static device configuration: roles + storage parameters."""
+            """Static device configuration: categories, connections + storage parameters."""
             devices = []
             for device in self._registry.all():
+                spec = self._cfg.devices.get(device.device_id)
                 devices.append({
                     "device_id": device.device_id,
-                    "role": device.role.value if hasattr(device.role, "value") else str(device.role),
+                    "category": device.category.value,
+                    "type": spec.type if spec is not None else None,
+                    "label": spec.display_name if spec is not None else device.device_id,
+                    "capabilities": (
+                        sorted(c.value for c in spec.capabilities) if spec is not None else []
+                    ),
+                    "metered_by": spec.metered_by if spec is not None else None,
+                    "controlled_by": spec.controlled_by if spec is not None else None,
+                    "included_in": spec.included_in if spec is not None else None,
                 })
             return {
                 "devices": devices,
@@ -3148,15 +3130,15 @@ class Application:
     # Tariff-zone helpers
     # ------------------------------------------------------------------
 
-    def _build_tariff_zones(self) -> "dict[str, _TariffZone]":
+    def _build_tariff_zones(self) -> dict[str, _TariffZone]:
         """Build per-zone circuit maps driven by the topology tree.
 
         The topology is the authoritative source for zone meters: only
-        METER-role devices that appear as *non-root* topology nodes become
-        zone meters.  Their subtrees define which PRODUCER and STORAGE
+        ``meter`` devices that appear as *non-root* topology nodes become
+        zone meters.  Their subtrees define which ``pv`` and ``battery``
         devices belong to that zone.
 
-        Any PRODUCER or STORAGE device that does not appear in the topology
+        Any ``pv`` or ``battery`` device that does not appear in the topology
         falls back to its ``tariff`` config key (or the site-wide default
         tariff) so that devices wired outside the explicitly modelled tree
         are still attributed correctly.
@@ -3174,35 +3156,32 @@ class Application:
             for child_node in self._topology.children:
                 self._collect_zone_from_node(child_node, zones, claimed, default_tariff)
 
-        # Fallback: PRODUCER/STORAGE devices not captured by topology subtrees
+        # Fallback: pv / battery devices not captured by topology subtrees
         for device in self._registry.all():
             if device.device_id in claimed:
                 continue
-            dev_cfg = self._cfg.devices.get(device.device_id, {})
-            tariff_id = dev_cfg.get("tariff") or default_tariff
+            tariff_id = self._device_tariff(device.device_id) or default_tariff
             if not tariff_id:
                 continue
             zone = zones.setdefault(tariff_id, _TariffZone(tariff_id))
-            if device.role == DeviceRole.PRODUCER:
+            if device.category is DeviceCategory.PV:
                 zone.producer_ids.append(device.device_id)
-            elif device.role == DeviceRole.STORAGE:
+            elif device.category is DeviceCategory.BATTERY:
                 zone.storage_ids.append(device.device_id)
 
         # Differential consumers: heatpump = Z1 − Z2.
         # Build a zone that knows its minuend (Z1) and subtrahend (Z2) so
         # _compute_zone_market_prices can blend the flat grid rate with any
         # Z2 feedback (household PV/battery surplus flowing into heatpump).
-        for device in self._registry.all():
-            if device.role != DeviceRole.CONSUMER:
+        for device in self._registry.by_category(DeviceCategory.CONSUMER):
+            spec = self._cfg.devices.get(device.device_id)
+            if spec is None or spec.type != "differential":
                 continue
-            dev_cfg = self._cfg.devices.get(device.device_id, {})
-            if dev_cfg.get("type") != "differential":
-                continue
-            tariff_id = dev_cfg.get("tariff") or default_tariff
+            tariff_id = spec.tariff or default_tariff
             if not tariff_id:
                 continue
-            minuend_id = dev_cfg.get("minuend")
-            subtrahend_id = dev_cfg.get("subtrahend")
+            minuend_id = spec.settings.get("minuend")
+            subtrahend_id = spec.settings.get("subtrahend")
             if not minuend_id or not subtrahend_id:
                 continue
             zone = zones.setdefault(tariff_id, _TariffZone(tariff_id))
@@ -3211,16 +3190,21 @@ class Application:
 
         return zones
 
+    def _device_tariff(self, device_id: str) -> str | None:
+        """The ``tariff:`` configured on a device, if any."""
+        spec = self._cfg.devices.get(device_id)
+        return spec.tariff if spec is not None else None
+
     def _collect_zone_from_node(
         self,
         node: TopologyNode,
-        zones: "dict[str, _TariffZone]",
-        claimed: "set[str]",
+        zones: dict[str, _TariffZone],
+        claimed: set[str],
         default_tariff: str,
     ) -> None:
         """Recursively walk a topology sub-tree and assign devices to zones.
 
-        A METER-role node defines the zone: it becomes that zone's grid
+        A ``meter`` node defines the zone: it becomes that zone's grid
         reference and owns all PRODUCER/STORAGE devices in its subtree.
         A non-METER node (e.g. a derived consumer) is skipped but its
         children are still traversed so nested sub-circuits are found.
@@ -3233,9 +3217,8 @@ class Application:
 
         claimed.add(node.device_id)
 
-        if device.role == DeviceRole.METER:
-            dev_cfg = self._cfg.devices.get(device.device_id, {})
-            tariff_id = dev_cfg.get("tariff") or default_tariff
+        if device.category is DeviceCategory.METER:
+            tariff_id = self._device_tariff(device.device_id) or default_tariff
             if tariff_id:
                 zone = zones.setdefault(tariff_id, _TariffZone(tariff_id))
                 zone.meter_ids.append(device.device_id)
@@ -3249,21 +3232,21 @@ class Application:
     def _collect_subtree_for_zone(
         self,
         node: TopologyNode,
-        zone: "_TariffZone",
-        claimed: "set[str]",
+        zone: _TariffZone,
+        claimed: set[str],
     ) -> None:
         """Add all PRODUCER/STORAGE devices in *node*'s subtree to *zone*.
 
-        Stops recursing into nested METER nodes — those define their own zones.
+        Stops recursing into nested ``meter`` nodes — those define their own zones.
         """
         device = self._registry.get(node.device_id)
         claimed.add(node.device_id)
         if device is not None:
-            if device.role == DeviceRole.PRODUCER:
+            if device.category is DeviceCategory.PV:
                 zone.producer_ids.append(device.device_id)
-            elif device.role == DeviceRole.STORAGE:
+            elif device.category is DeviceCategory.BATTERY:
                 zone.storage_ids.append(device.device_id)
-            elif device.role == DeviceRole.METER:
+            elif device.category is DeviceCategory.METER:
                 # Nested meter — will be its own zone; don't claim for parent
                 claimed.discard(node.device_id)
                 return
@@ -3273,7 +3256,7 @@ class Application:
     def _compute_zone_market_prices(
         self,
         tariff_prices: dict[str, float],
-        device_states: "dict[str, Any]",
+        device_states: dict[str, Any],
     ) -> dict[str, float]:
         """Compute blended market price per tariff zone (€/kWh)."""
         breakdown = self._compute_zone_market_breakdown(tariff_prices, device_states)
@@ -3285,7 +3268,7 @@ class Application:
     def _compute_zone_market_breakdown(
         self,
         tariff_prices: dict[str, float],
-        device_states: "dict[str, Any]",
+        device_states: dict[str, Any],
     ) -> dict[str, dict[str, float]]:
         """Compute per-zone market-price components for UI diagnostics.
 
@@ -3476,9 +3459,9 @@ class Application:
     def _zone_pv_opportunity_price(
         self,
         tariff_id: str,
-        zone: "_TariffZone",
+        zone: _TariffZone,
         tariff_prices: dict[str, float],
-        device_states: "dict[str, Any]",
+        device_states: dict[str, Any],
     ) -> float:
         """Opportunity price of PV used in *zone* (see ``surplus_opportunity_price``).
 
@@ -3513,7 +3496,7 @@ class Application:
             secondary_price=secondary_price,
         )
 
-    def _default_zone_grid_power_w(self, device_states: "dict[str, Any]") -> float | None:
+    def _default_zone_grid_power_w(self, device_states: dict[str, Any]) -> float | None:
         """Return grid import power (W) for the default tariff zone's sub-meter.
 
         In Messkonzept 8 this is the household meter (Z2, Tibber), which
@@ -3711,14 +3694,14 @@ class Application:
         # Forecast load of consumers billed on any other tariff, per tariff.
         load_by_tariff: dict[str, dict[datetime, float]] = defaultdict(dict)
         forecast_cfgs = effective_forecast_configs(self._cfg)
-        for device_id, cfg in self._cfg.devices.items():
+        for device_id, spec in self._cfg.devices.items():
             device = self._registry.get(device_id)
-            if device is None or device.role != DeviceRole.CONSUMER:
+            if device is None or device.category is not DeviceCategory.CONSUMER:
                 continue
             fc_cfg = forecast_cfgs.get(device_id)
             if fc_cfg is None:
                 continue
-            tariff_id = cfg.get("tariff") or primary_id
+            tariff_id = spec.tariff or primary_id
             if tariff_id == primary_id or tariff_id not in self._tariffs:
                 continue
 

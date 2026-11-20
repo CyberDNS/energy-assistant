@@ -6,8 +6,10 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from helpers.fake_ha_client import FakeHAClient
 
 from energy_assistant.core.config import BackendsConfig
+from energy_assistant.core.device_model import parse_devices
 from energy_assistant.core.models import ForecastPoint, ForecastQuantity
 from energy_assistant.core.plugin_registry import BuildContext
 from energy_assistant.plugins import registry
@@ -17,7 +19,6 @@ from energy_assistant.plugins.learned.forecast import (
     parse_exclude,
     parse_exclude_when,
 )
-from helpers.fake_ha_client import FakeHAClient
 
 POWER = "sensor.heatpump_power"
 TEMP = "sensor.outdoor_temperature"
@@ -392,10 +393,10 @@ def test_device_forecast_map_is_keyed_by_device_and_matches_the_list():
         build_device_forecasts,
     )
 
-    cfg = AppConfig(devices={
-        "heatpump": {"type": "generic_consumer", "role": "consumer", "forecast": _cfg()},
-        "plain": {"type": "generic_consumer", "role": "consumer"},
-    })
+    cfg = AppConfig(devices=parse_devices({
+        "heatpump": {"type": "generic_consumer", "category": "consumer", "forecast": _cfg()},
+        "plain": {"type": "generic_consumer", "category": "consumer"},
+    }))
     ctx = BuildContext(backends=BackendsConfig(), ha_client=FakeHAClient())
     by_device = build_device_forecast_map(cfg, ctx)
     assert list(by_device) == ["heatpump"]

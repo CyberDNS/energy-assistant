@@ -145,7 +145,7 @@ def build_mcp_server(api: FastAPI) -> MCPServer:
 
     @mcp.tool(annotations=_READ_ONLY)
     async def get_config() -> dict[str, Any]:
-        """Device ids and roles, and the storage constraints (capacity, SoC
+        """Device ids, categories and connections, and the storage constraints (capacity, SoC
         limits, efficiencies, power limits). Contains no secrets."""
         return await get("/api/config")
 

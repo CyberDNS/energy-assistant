@@ -10,12 +10,18 @@ The mode-encoding convention is documented in ``assets/ev.py``.
 
 from __future__ import annotations
 
+from ...core.device_model import Capability as Cap
+from ...core.device_model import DeviceCategory as C
 from ...core.plugin_registry import PluginRegistry
 from .device import OpenWBDevice
 
 
 def register(registry: PluginRegistry) -> None:
-    registry.register_device("openwb_homeassistant", _build)
+    registry.register_device(
+        "openwb_homeassistant", _build,
+        categories={C.CHARGER},
+        provides={Cap.POWER_W, Cap.PLUGGED, Cap.POWER_SETPOINT, Cap.SOC_PCT},
+    )
 
 
 def _build(device_id: str, cfg: dict, ctx) -> OpenWBDevice:  # type: ignore[type-arg]

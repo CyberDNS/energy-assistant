@@ -7,7 +7,6 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from energy_assistant.core.models import (
-    DeviceRole,
     DeviceState,
     ForecastPoint,
     ForecastQuantity,
@@ -16,7 +15,6 @@ from energy_assistant.core.models import (
 from energy_assistant.core.optimizer import OptimizationContext
 from energy_assistant.plugins.flat_rate.tariff import FlatRateTariff
 from energy_assistant.plugins.milp_highs import MilpHigsOptimizer
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

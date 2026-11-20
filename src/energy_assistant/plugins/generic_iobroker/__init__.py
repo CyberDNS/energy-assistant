@@ -5,14 +5,20 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from ...core.models import parse_device_role
+from ...core.device_model import Capability as Cap
+from ...core.device_model import DeviceCategory
+from ...core.device_model import DeviceCategory as C
 from ...core.plugin_registry import BuildContext, PluginRegistry
 
 _log = logging.getLogger(__name__)
 
 
 def register(registry: PluginRegistry) -> None:
-    registry.register_device("generic_iobroker", _build)
+    registry.register_device(
+        "generic_iobroker", _build,
+        categories={C.GRID_METER, C.METER, C.PV, C.CONSUMER},
+        provides={Cap.POWER_W},
+    )
 
 
 def _get(cfg: dict[str, Any], *keys: str) -> Any:
@@ -34,7 +40,7 @@ def _build(device_id: str, cfg: dict[str, Any], ctx: BuildContext) -> object | N
     try:
         return GenericIoBrokerDevice(
             device_id=device_id,
-            role=parse_device_role(cfg.get("role")),
+            category=DeviceCategory(cfg["category"]),
             client=client,
             # Accept both flat (oid_power) and nested-source (power) key names.
             oid_power=_get(cfg, "oid_power", "power"),

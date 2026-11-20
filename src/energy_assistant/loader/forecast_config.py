@@ -23,32 +23,29 @@ from __future__ import annotations
 from typing import Any
 
 from ..core.config import AppConfig
+from ..core.device_model import Capability, DeviceCategory, DeviceSpec
 
 AUTO = "auto"
 
 
-def _ha_power_entity(cfg: dict[str, Any]) -> str | None:
+def _ha_power_entity(spec: DeviceSpec) -> str | None:
     """The single HA power sensor a device reads, if it has exactly one."""
-    if cfg.get("type") != "generic_homeassistant":
+    if spec.type != "generic_homeassistant":
         return None
-    for key in ("oid_power", "power"):
-        value = cfg.get(key)
-        if isinstance(value, str) and value:
-            return value
-    return None
+    return spec.bound_entity(Capability.POWER_W)
 
 
-def default_learning_cfg(cfg: dict[str, Any]) -> dict[str, Any] | None:
-    """Forecast config for *cfg* with the default-learning rule applied.
+def default_learning_cfg(spec: DeviceSpec) -> dict[str, Any] | None:
+    """Forecast config for *spec* with the default-learning rule applied.
 
     Returns the declared ``forecast:`` (or ``None``) when the rule does not
     apply.
     """
-    declared = cfg.get("forecast") if isinstance(cfg.get("forecast"), dict) else None
-    learning = cfg.get("learning", True)
-    if learning is False or cfg.get("role") != "consumer":
+    declared = spec.forecast
+    learning = spec.learning
+    if learning is False or spec.category is not DeviceCategory.CONSUMER:
         return declared
-    entity = _ha_power_entity(cfg)
+    entity = _ha_power_entity(spec)
     if entity is None:
         return declared
     if declared is not None and declared.get("type") != "static_profile":
@@ -65,13 +62,13 @@ def effective_forecast_configs(app_config: AppConfig) -> dict[str, dict[str, Any
     """Forecast config per device id, for every device that has one."""
     default_tariff = app_config.default_tariff_id
     forecasts: dict[str, dict[str, Any]] = {}
-    for device_id, cfg in app_config.devices.items():
-        fc = default_learning_cfg(cfg)
+    for device_id, spec in app_config.devices.items():
+        fc = default_learning_cfg(spec)
         if fc is not None:
             forecasts[device_id] = fc
 
     def tariff(device_id: str) -> Any:
-        return app_config.devices[device_id].get("tariff") or default_tariff
+        return app_config.devices[device_id].tariff or default_tariff
 
     def is_residual(fc: dict[str, Any]) -> bool:
         return fc.get("type") == "learned" and AUTO in (fc.get("subtract") or [])
@@ -85,8 +82,8 @@ def effective_forecast_configs(app_config: AppConfig) -> dict[str, dict[str, Any
             other = app_config.devices[other_id]
             if (
                 other_id == device_id
-                or other.get("role") != "consumer"
-                or other.get("included_in")
+                or other.category is not DeviceCategory.CONSUMER
+                or other.included_in
                 or other_fc.get("type") != "learned"
                 or is_residual(other_fc)
                 or tariff(other_id) != tariff(device_id)

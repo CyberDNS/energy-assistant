@@ -12,7 +12,12 @@ from pathlib import Path
 
 import pytest
 
-from energy_assistant.core.models import DeviceState, StorageConstraints, ThresholdConstraints
+from energy_assistant.core.device_model import DeviceCategory, DeviceSpec
+from energy_assistant.core.models import (
+    DeviceState,
+    StorageConstraints,
+    ThresholdConstraints,
+)
 from energy_assistant.core.savings import (
     DeviceLive,
     EvLive,
@@ -505,18 +510,22 @@ class TestServerWiring:
         from energy_assistant.core.change_gate import ChangeGate
         from energy_assistant.core.config import AppConfig
         from energy_assistant.core.ledger import BatteryCostLedger
-        from energy_assistant.core.models import DeviceRole
         from energy_assistant.server import Application
 
         app = Application.__new__(Application)
         app._cfg = AppConfig(
-            devices={"hp": {"tariff": "heatpump"}, "grid": {}, "bat": {}},
+            devices={
+                "hp": DeviceSpec(id="hp", category=DeviceCategory.CONSUMER,
+                                 type="differential", tariff="heatpump"),
+                "grid": DeviceSpec(id="grid", category=DeviceCategory.METER, type="tasmota"),
+                "bat": DeviceSpec(id="bat", category=DeviceCategory.BATTERY, type="zendure"),
+            },
             default_tariff_id="household",
         )
         app._tariffs = {"household": object(), "heatpump": object()}
         app._registry = SimpleNamespace(
             get=lambda did: SimpleNamespace(
-                role=DeviceRole.CONSUMER if did == "hp" else DeviceRole.METER
+                category=DeviceCategory.CONSUMER if did == "hp" else DeviceCategory.METER
             )
         )
         app._grid_meter_id = "grid"

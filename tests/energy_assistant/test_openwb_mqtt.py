@@ -7,7 +7,8 @@ import json
 import pytest
 
 from energy_assistant.core.config import MqttConfig
-from energy_assistant.core.models import DeviceCommand, DeviceRole
+from energy_assistant.core.device_model import DeviceCategory
+from energy_assistant.core.models import DeviceCommand
 from energy_assistant.plugins.openwb_mqtt import device as device_module
 from energy_assistant.plugins.openwb_mqtt.device import (
     OpenWBMqttBridge,
@@ -159,7 +160,7 @@ async def test_get_state_unavailable_when_bridge_disconnected() -> None:
 
 
 def test_role_is_ev_charger() -> None:
-    assert _device(FakeBridge()).role == DeviceRole.EV_CHARGER
+    assert _device(FakeBridge()).category == DeviceCategory.CHARGER
 
 
 # ---------------------------------------------------------------------------

@@ -83,16 +83,23 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import date, datetime, time, timedelta, timezone
+from collections.abc import Awaitable, Callable, Collection, Mapping
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Mapping
+from datetime import date, datetime, time, timedelta, timezone
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import aiomqtt
 
-from ..assets.ev import EvChargingAsset, EvChargingGoal, EvWeeklyTarget, default_weekly_target
+from ..assets.ev import (
+    EvChargingAsset,
+    EvChargingGoal,
+    EvWeeklyTarget,
+    default_weekly_target,
+)
 from ..core.config import MqttConfig
-from ..core.models import EV_DISPLAY_MODES, DeviceRole, DeviceState
+from ..core.device_model import DeviceCategory, DeviceSpec
+from ..core.models import EV_DISPLAY_MODES, DeviceState
 from ..core.price_curve import PriceSlot, current_slot, price_curve_payload
 
 _log = logging.getLogger(__name__)
@@ -131,7 +138,7 @@ class DiscoveryDevice:
 
     device_id: str
     name: str
-    role: DeviceRole
+    category: DeviceCategory
     model: str
 
 
@@ -184,8 +191,8 @@ _DEVICE_FIELDS: tuple[tuple[str, _Field], ...] = (
 )
 # Readings already shown on the EV device (the car's SoC) are not repeated
 # on the chargepoint.
-_ROLE_SKIP_FIELDS: dict[DeviceRole, frozenset[str]] = {
-    DeviceRole.EV_CHARGER: frozenset({"soc_pct"}),
+_CATEGORY_SKIP_FIELDS: dict[DeviceCategory, frozenset[str]] = {
+    DeviceCategory.CHARGER: frozenset({"soc_pct"}),
 }
 
 _RECONNECT_DELAY_S = 30
@@ -998,31 +1005,31 @@ def _reading_messages(
 # ------------------------------------------------------------------
 
 def select_discovery_devices(
-    devices_cfg: Mapping[str, Mapping[str, Any]],
-    roles: Mapping[str, DeviceRole],
+    devices: Mapping[str, DeviceSpec],
+    built: Collection[str],
 ) -> list[DiscoveryDevice]:
     """Pick the configured devices to expose as HA sub-devices.
 
-    *roles* maps the device ids that were actually built to their role.
+    *built* are the ids of the devices that were actually built.
     Skipped: devices fed from Home Assistant (plugin type containing
     ``homeassistant``), virtual devices without readings, devices that
     failed to build, and devices with ``ha_discovery: false``.  The HA
-    device name is the device's ``name:`` (or its id, title-cased).
+    device name is the device's ``label:`` (or its id, title-cased).
     """
     out: list[DiscoveryDevice] = []
-    for device_id, cfg in devices_cfg.items():
-        type_name = str(cfg.get("type", ""))
+    for device_id, spec in devices.items():
+        type_name = spec.type
         if (
-            device_id not in roles
+            device_id not in built
             or _HA_SOURCED_MARKER in type_name
             or type_name in _VIRTUAL_DEVICE_TYPES
-            or cfg.get("ha_discovery") is False
+            or not spec.ha_discovery
         ):
             continue
         out.append(DiscoveryDevice(
             device_id=device_id,
-            name=str(cfg.get("name") or device_id.replace("_", " ").title()),
-            role=roles[device_id],
+            name=spec.display_name,
+            category=spec.category,
             model=type_name or "device",
         ))
     return out
@@ -1041,7 +1048,7 @@ def _device_fields_present(
     """The fields *state* has a numeric value for (in table order)."""
     if state is None:
         return []
-    skip = _ROLE_SKIP_FIELDS.get(device.role, frozenset())
+    skip = _CATEGORY_SKIP_FIELDS.get(device.category, frozenset())
     return [
         field for source, field in _DEVICE_FIELDS
         if field.key not in skip and _device_value(source, field, state) is not None

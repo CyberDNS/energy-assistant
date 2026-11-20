@@ -8,10 +8,12 @@ overrides/skips set in the UI.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from ..core.device_model import DeviceSpec
 from ..core.models import DeviceState, ThresholdConstraints
 from .ev import (
     _FEASIBILITY_MARGIN,
@@ -52,7 +54,7 @@ def parse_ev_assets(raw_assets: dict[str, Any]) -> list[EvChargingAsset]:
 
 def parse_threshold_assets(
     raw_assets: dict[str, Any],
-    devices: dict[str, dict[str, Any]] | None = None,
+    devices: Mapping[str, DeviceSpec] | None = None,
 ) -> list[ThresholdConstraints]:
     """Parse ``type: threshold`` entries from the ``assets:`` config section.
 
@@ -65,7 +67,7 @@ def parse_threshold_assets(
 
     Optional:
     - ``rated_power_kw``    — electrical power when running (kW).  Falls back
-      to the referenced device's ``rated_power_w`` (from *devices*) so the
+      to the referenced device's ``params.rated_power_w`` (from *devices*) so the
       value only needs to be declared once, on the device.
     - ``unit``          — display unit (default "").
     - ``direction``     — "reduces" (default) or "increases".
@@ -88,13 +90,14 @@ def parse_threshold_assets(
 def _parse_threshold_one(
     asset_id: str,
     cfg: dict[str, Any],
-    devices: dict[str, dict[str, Any]],
+    devices: Mapping[str, DeviceSpec],
 ) -> ThresholdConstraints:
     device_id = str(cfg.get("device") or asset_id)
 
     rated_power_kw = cfg.get("rated_power_kw")
     if rated_power_kw is None:
-        rated_power_w = (devices.get(device_id) or {}).get("rated_power_w")
+        spec = devices.get(device_id)
+        rated_power_w = spec.params.get("rated_power_w") if spec is not None else None
         if rated_power_w is None:
             raise ValueError(
                 f"no rated_power_kw on the asset and no rated_power_w on device {device_id!r}"
@@ -345,7 +348,7 @@ def _resolve_target(
     now: datetime,
     current_soc: float,
     dismissed_day: date | None = None,
-    catch_up_if_plugged_since: "datetime | None | object" = None,
+    catch_up_if_plugged_since: datetime | None | object = None,
 ) -> tuple[float, datetime, bool] | None:
     """Return the next (target_soc_pct, target_by UTC, overdue) deadline, or None.
 

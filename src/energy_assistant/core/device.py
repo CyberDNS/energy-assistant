@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from .models import DeviceCommand, DeviceRole, DeviceState
+from .device_model import DeviceCategory
+from .models import DeviceCommand, DeviceState
 
 
 @runtime_checkable
@@ -21,8 +22,8 @@ class Device(Protocol):
         ...
 
     @property
-    def role(self) -> DeviceRole:
-        """Semantic label describing what this device *is* in the energy system."""
+    def category(self) -> DeviceCategory:
+        """What this device *is* in the energy system (from ``category:``)."""
         ...
 
     async def get_state(self) -> DeviceState:

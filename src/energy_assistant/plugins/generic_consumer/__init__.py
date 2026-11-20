@@ -4,11 +4,15 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...core.device_model import DeviceCategory as C
 from ...core.plugin_registry import BuildContext, PluginRegistry
 
 
 def register(registry: PluginRegistry) -> None:
-    registry.register_device("generic_consumer", _build)
+    registry.register_device(
+        "generic_consumer", _build,
+        categories={C.CONSUMER},
+    )
 
 
 def _build(device_id: str, cfg: dict[str, Any], ctx: BuildContext) -> object:

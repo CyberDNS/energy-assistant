@@ -6,13 +6,20 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING, Protocol
 
-from .models import DeviceState, EnergyPlan, ForecastPoint, ForecastQuantity, StorageConstraints, ThresholdConstraints
+from .models import (
+    DeviceState,
+    EnergyPlan,
+    ForecastPoint,
+    ForecastQuantity,
+    StorageConstraints,
+    ThresholdConstraints,
+)
 
 if TYPE_CHECKING:
-    from .thermal_model import ThermalModel
+    from ..assets.ev import EvChargingGoal
     from .constraint import Constraint
     from .tariff import TariffModel
-    from ..assets.ev import EvChargingGoal
+    from .thermal_model import ThermalModel
 
 
 @dataclass
@@ -74,12 +81,12 @@ class OptimizationContext:
     ``[bottom_threshold, top_threshold]`` at minimum energy cost.
     The current measured value must be in ``device_states[id].extra["measured_value"]``.
     """
-    tariffs: dict[str, "TariffModel"] = field(default_factory=dict)
+    tariffs: dict[str, TariffModel] = field(default_factory=dict)
     forecasts: dict[ForecastQuantity, list[ForecastPoint]] = field(default_factory=dict)
-    constraints: list["Constraint"] = field(default_factory=list)
+    constraints: list[Constraint] = field(default_factory=list)
     horizon: timedelta = field(default_factory=lambda: timedelta(hours=24))
     battery_cost_basis: dict[str, float] = field(default_factory=dict)
-    ev_charging_goals: list["EvChargingGoal"] = field(default_factory=list)
+    ev_charging_goals: list[EvChargingGoal] = field(default_factory=list)
     secondary_loads: list[SecondaryTariffLoad] = field(default_factory=list)
     """Separately billed inflexible loads — see ``SecondaryTariffLoad``.
 
@@ -92,13 +99,13 @@ class OptimizationContext:
     tariffs together — from ``max_import_kw`` on the topology root.  None = no
     limit.  The realtime control loop enforces it per tick as well.
     """
-    thermal_models: dict[str, "ThermalModel"] = field(default_factory=dict)
+    thermal_models: dict[str, ThermalModel] = field(default_factory=dict)
     """Thermal model per threshold device (learned, see ``core/thermal_model``).
     Devices without an entry use the configured constant rates."""
     ambient_forecasts: dict[str, list[ForecastPoint]] = field(default_factory=dict)
     """Ambient forecast per threshold device whose model has an ambient term."""
     producer_device_ids: set[str] = field(default_factory=set)
-    """Device IDs with role=producer (PV panels).
+    """Device IDs of category pv (PV panels).
 
     When non-empty, the live-PV floor in the MILP reads ONLY these devices.
     Without this, bidirectional meters reporting negative power (exporting)

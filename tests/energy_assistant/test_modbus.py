@@ -8,10 +8,12 @@ import socket
 from pathlib import Path
 
 import pytest
+from helpers.fake_modbus_client import FakeModbusClient
 
-from energy_assistant.core.models import DeviceCommand, DeviceRole
-from energy_assistant.core.plugin_registry import BuildContext
 from energy_assistant.core.config import BackendsConfig
+from energy_assistant.core.device_model import DeviceCategory
+from energy_assistant.core.models import DeviceCommand
+from energy_assistant.core.plugin_registry import BuildContext
 from energy_assistant.plugins import registry as plugin_registry
 from energy_assistant.plugins._modbus import codec
 from energy_assistant.plugins._modbus.client import (
@@ -27,7 +29,6 @@ from energy_assistant.plugins.modbus.profile import (
     load_profile,
     parse_profile,
 )
-from helpers.fake_modbus_client import FakeModbusClient
 
 SMA = "sma_sunny_boy_storage"
 
@@ -280,13 +281,13 @@ async def test_device_applies_register_and_state_scale() -> None:
     )
     client = FakeModbusClient()
     client.set("input", 0, codec.encode(1234500, "u32") + codec.encode(-40, "s16"))
-    device = ModbusDevice("meter", client, profile, role=DeviceRole.METER)
+    device = ModbusDevice("meter", client, profile, category=DeviceCategory.METER)
 
     state = await device.get_state()
     assert client.reads == [("input", 0, 3, 1)]
     assert state.energy_kwh == pytest.approx(123.45)
     assert state.power_w == -40.0
-    assert device.role is DeviceRole.METER
+    assert device.category is DeviceCategory.METER
 
 
 async def test_device_without_strategy_is_read_only() -> None:
@@ -338,8 +339,11 @@ async def test_sma_discharge_limit_written_as_s16_percent(power_w: float, pct: i
 
 async def test_sma_control_matches_iobroker_plugin() -> None:
     """Same setpoints must yield the same percentage as sma_modbus_iobroker."""
-    from energy_assistant.plugins.sma_modbus_iobroker.device import SmaSunnyBoyStorageDevice
     from helpers.fake_iobroker_client import FakeIoBrokerClient
+
+    from energy_assistant.plugins.sma_modbus_iobroker.device import (
+        SmaSunnyBoyStorageDevice,
+    )
 
     iob = FakeIoBrokerClient()
     old = SmaSunnyBoyStorageDevice(
@@ -396,10 +400,10 @@ def _build(cfg: dict, ctx: BuildContext | None = None):
 
 
 def test_factory_builds_device_and_shares_connection() -> None:
-    cfg = {"role": "storage", "profile": SMA, "host": "192.0.2.10"}
+    cfg = {"category": "battery", "profile": SMA, "host": "192.0.2.10"}
     device, ctx = _build(cfg)
     assert isinstance(device, ModbusDevice)
-    assert device.role is DeviceRole.STORAGE
+    assert device.category is DeviceCategory.BATTERY
     assert device.profile.name == "SMA Sunny Boy Storage"
 
     other, _ = _build({**cfg, "unit_id": 4}, ctx)
@@ -409,7 +413,7 @@ def test_factory_builds_device_and_shares_connection() -> None:
 
 
 def test_factory_enables_control_only_when_configured() -> None:
-    base = {"role": "storage", "profile": SMA, "host": "192.0.2.10"}
+    base = {"category": "battery", "profile": SMA, "host": "192.0.2.10"}
     assert _build({**base, "max_discharge_kw": 3.9})[0].read_only is False
     assert _build({**base, "max_discharge_kw": 3.9, "read_only": True})[0].read_only is True
     # Strategy cannot be configured -> device still built, but read-only.
