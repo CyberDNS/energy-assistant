@@ -1,0 +1,10 @@
+name: Iskra MT681 (SML)
+description: >
+  Script from the Tasmota docs, Smart Meter Interface: "Iskra MT 681 (SML)".  Per-phase power
+  only if the grid operator enabled it on the meter.
+sensor: MT681
+fields:
+  power_w: Power_cur
+  energy_in_kwh: Total_in
+  energy_out_kwh: Total_out
+  phase_power_w: [Power_p1, Power_p2, Power_p3]

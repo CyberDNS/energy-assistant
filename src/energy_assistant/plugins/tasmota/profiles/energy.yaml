@@ -1,0 +1,11 @@
+name: Tasmota energy monitoring (ENERGY sensor)
+description: >
+  Standard energy monitoring of Tasmota plugs, relays and power monitors
+  (Shelly, Nous, Sonoff, Gosund, PZEM, …).  Multi-channel devices report
+  lists; power and the total counter are summed over all channels.
+sensor: ENERGY
+fields:
+  power_w: Power
+  energy_in_kwh: Total
+  voltage_v: Voltage
+  current_a: Current

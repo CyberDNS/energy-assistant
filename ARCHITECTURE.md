@@ -48,6 +48,7 @@ src/
       generic_ha/        # generic_ha source + ha_switch control
       tibber/            # tibber_iobroker tariff
       tibber_local/      # Tibber Pulse Bridge read on the LAN (SML telegrams)
+      tasmota/           # Tasmota devices read on the LAN (profiles/*.yaml per meter script or plug)
       zendure/           # Zendure battery (MILP participant)
       sma/               # SMA inverter / Energy Manager
       _modbus/           # shared Modbus TCP transport + register codec

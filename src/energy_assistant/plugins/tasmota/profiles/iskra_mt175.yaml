@@ -1,0 +1,10 @@
+name: Iskra MT175 (SML)
+description: >
+  Script from the Tasmota docs, Smart Meter Interface: "Iskra MT 175 (SML)".  The same names
+  (E_in, E_out, P, L1..L3) are used in many adapted scripts for other meters.
+sensor: MT175
+fields:
+  power_w: P
+  energy_in_kwh: E_in
+  energy_out_kwh: E_out
+  phase_power_w: [L1, L2, L3]

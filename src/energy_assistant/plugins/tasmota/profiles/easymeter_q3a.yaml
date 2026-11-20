@@ -1,0 +1,11 @@
+name: EasyMeter Q3A / Apator APOX+ (SML)
+description: >
+  Script from the Tasmota docs, Smart Meter Interface: "EasyMeter Q3A / Apator APOX+ (SML)".
+  Without the meter PIN only whole kWh and no power are sent.
+sensor: SML
+fields:
+  power_w: Watt_Summe
+  energy_in_kwh: Verbrauch_Summe
+  energy_out_kwh: Einspeisung_Summe
+  phase_power_w: [Watt_L1, Watt_L2, Watt_L3]
+  phase_voltage_v: [Volt_L1, Volt_L2, Volt_L3]
