@@ -4,16 +4,16 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from energy_assistant.core.device_model import DeviceCategory
 from energy_assistant.config.yaml import YamlConfigLoader
 from energy_assistant.loader.device_loader import build as build_from_config
-from energy_assistant.core.models import DeviceRole
 
 
 async def main() -> None:
     app_config = YamlConfigLoader(Path(__file__).parents[1] / "config.yaml").load()
     device_registry, _tariffs, _ = build_from_config(app_config)
 
-    for dev in device_registry.by_role(DeviceRole.STORAGE):
+    for dev in device_registry.by_category(DeviceCategory.BATTERY):
         sc = getattr(dev, "storage_constraints", None)
         state = await dev.get_state()
         if sc and state:

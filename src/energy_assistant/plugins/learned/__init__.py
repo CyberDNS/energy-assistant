@@ -4,7 +4,7 @@ Registers the ``learned`` forecast type.  Devices declare it in their
 ``forecast:`` section::
 
     - id: heatpump_meter
-      role: consumer
+      category: consumer
       type: differential
       ...
       forecast:
@@ -34,7 +34,7 @@ Residual baseline
 ``history_entity`` before fitting, so the model learns what is left::
 
     - id: baseline
-      role: consumer
+      category: consumer
       type: generic_consumer
       forecast:
         type: learned

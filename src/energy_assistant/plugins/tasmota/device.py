@@ -11,16 +11,17 @@ from __future__ import annotations
 
 from typing import Any
 
-from ...core.models import DeviceCommand, DeviceRole, DeviceState
+from ...core.device_model import DeviceCategory
+from ...core.models import DeviceCommand, DeviceState
 from .poller import TasmotaPoller
 
 
 class TasmotaDevice:
     """A read-only ``Device`` backed by a :class:`TasmotaPoller`."""
 
-    def __init__(self, device_id: str, role: DeviceRole, poller: TasmotaPoller) -> None:
+    def __init__(self, device_id: str, category: DeviceCategory, poller: TasmotaPoller) -> None:
         self._device_id = device_id
-        self._role = role
+        self._category = category
         self._poller = poller
 
     @property
@@ -28,8 +29,8 @@ class TasmotaDevice:
         return self._device_id
 
     @property
-    def role(self) -> DeviceRole:
-        return self._role
+    def category(self) -> DeviceCategory:
+        return self._category
 
     async def get_state(self) -> DeviceState:
         self._poller.ensure_started()
@@ -38,7 +39,7 @@ class TasmotaDevice:
             return DeviceState(device_id=self._device_id, power_w=None, available=False)
 
         extra: dict[str, Any] = {"source": "tasmota", **reading.values}
-        if self._role == DeviceRole.METER:
+        if self._category.is_meter:
             extra["import_w"] = max(reading.power_w, 0.0)
             extra["export_w"] = max(-reading.power_w, 0.0)
         if reading.energy_out_kwh is not None:

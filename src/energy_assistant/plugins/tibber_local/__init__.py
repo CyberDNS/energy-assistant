@@ -29,7 +29,7 @@ Example config::
 
     devices:
       - id: household_meter
-        role: meter
+        category: meter
         type: tibber_local
         tariff: household
         host: 192.168.3.18             # or tibber-bridge.lan
@@ -57,14 +57,20 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from ...core.models import parse_device_role
+from ...core.device_model import Capability as Cap
+from ...core.device_model import DeviceCategory
+from ...core.device_model import DeviceCategory as C
 from ...core.plugin_registry import BuildContext, PluginRegistry
 
 _log = logging.getLogger(__name__)
 
 
 def register(registry: PluginRegistry) -> None:
-    registry.register_device("tibber_local", _build_device)
+    registry.register_device(
+        "tibber_local", _build_device,
+        categories={C.GRID_METER, C.METER},
+        provides={Cap.POWER_W, Cap.ENERGY_IN_KWH, Cap.PHASE_POWER_W},
+    )
 
 
 def _number(cfg: dict[str, Any], key: str, default: float, device_id: str) -> float:
@@ -90,7 +96,7 @@ def _build_device(device_id: str, cfg: dict[str, Any], ctx: BuildContext) -> obj
         _log.warning("Device %r (tibber_local): 'host' and 'password' are required — skipping", device_id)
         return None
 
-    role = parse_device_role(cfg.get("role"), default=parse_device_role("meter"))
+    category = DeviceCategory(cfg["category"])
     poller = PulseBridgePoller(
         host,
         password,
@@ -108,10 +114,10 @@ def _build_device(device_id: str, cfg: dict[str, Any], ctx: BuildContext) -> obj
 
         fallback = TibberDevice(
             device_id=device_id,
-            role=role,
+            category=category,
             stream=get_api(
                 token, api_url=str(cfg.get("api_url") or "").strip() or None
             ).live_stream(cfg.get("home_id") or None),
         )
 
-    return TibberLocalDevice(device_id=device_id, role=role, poller=poller, fallback=fallback)
+    return TibberLocalDevice(device_id=device_id, category=category, poller=poller, fallback=fallback)

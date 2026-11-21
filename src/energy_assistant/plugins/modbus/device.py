@@ -35,7 +35,8 @@ import logging
 from datetime import datetime, timezone
 
 from ...core.change_gate import ChangeGate
-from ...core.models import DeviceCommand, DeviceRole, DeviceState
+from ...core.device_model import DeviceCategory
+from ...core.models import DeviceCommand, DeviceState
 from .._modbus import codec
 from .._modbus.client import ModbusClientProtocol, ModbusError
 from .control import ControlStrategy
@@ -55,8 +56,8 @@ class ModbusDevice:
         Modbus transport, normally from ``ModbusConnectionPool``.
     profile:
         Register mapping of the device model.
-    role:
-        What the device is in the energy system (from ``role:`` in config).
+    category:
+        What the device is in the energy system (from ``category:`` in config).
     unit_id:
         Modbus unit / slave id; defaults to the profile's.
     strategy:
@@ -69,14 +70,14 @@ class ModbusDevice:
         client: ModbusClientProtocol,
         profile: ModbusProfile,
         *,
-        role: DeviceRole = DeviceRole.STORAGE,
+        category: DeviceCategory = DeviceCategory.BATTERY,
         unit_id: int | None = None,
         strategy: ControlStrategy | None = None,
     ) -> None:
         self._device_id = device_id
         self._client = client
         self._profile = profile
-        self._role = role
+        self._category = category
         self._unit_id = profile.unit_id if unit_id is None else unit_id
         self._strategy = strategy
         self._polled = profile.polled_registers()
@@ -88,8 +89,8 @@ class ModbusDevice:
         return self._device_id
 
     @property
-    def role(self) -> DeviceRole:
-        return self._role
+    def category(self) -> DeviceCategory:
+        return self._category
 
     @property
     def profile(self) -> ModbusProfile:

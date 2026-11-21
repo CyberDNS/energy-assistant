@@ -9,13 +9,16 @@ import pytest
 
 from energy_assistant.config.yaml import YamlConfigLoader
 from energy_assistant.core.config import AppConfig
-from energy_assistant.core.models import DeviceRole
+from energy_assistant.core.device_model import (
+    DeviceCategory,
+    DeviceConfigError,
+    parse_devices,
+)
 from energy_assistant.core.topology import TopologyNode
 from energy_assistant.loader.device_loader import build
 from energy_assistant.plugins.differential.device import DifferentialDevice
 from energy_assistant.plugins.flat_rate.tariff import FlatRateTariff
 from energy_assistant.plugins.generic_iobroker.device import GenericIoBrokerDevice
-
 
 # ---------------------------------------------------------------------------
 # YamlConfigLoader tests
@@ -63,32 +66,31 @@ class TestYamlConfigLoader:
         yaml_text = dedent("""\
             devices:
               main_grid_meter:
-                role: meter
-                source:
-                  type: generic_iobroker
-                  power_import: "tibberlink.0.Homes.abc.powerImport"
-                  power_export: "tibberlink.0.Homes.abc.powerExport"
+                category: grid_meter
+                type: generic_iobroker
+                power_import: "tibberlink.0.Homes.abc.powerImport"
+                power_export: "tibberlink.0.Homes.abc.powerExport"
         """)
         config_file = tmp_path / "config.yaml"
         config_file.write_text(yaml_text)
 
         cfg = YamlConfigLoader(config_file).load()
-        assert "main_grid_meter" in cfg.devices
-        assert cfg.devices["main_grid_meter"]["role"] == "meter"
+        spec = cfg.devices["main_grid_meter"]
+        assert spec.category is DeviceCategory.GRID_METER
+        assert spec.type == "generic_iobroker"
+        assert spec.settings["power_import"] == "tibberlink.0.Homes.abc.powerImport"
 
-    def test_parses_topology(self, tmp_path: Path) -> None:
-        yaml_text = dedent("""\
-            topology:
-              main_grid_meter:
-                children:
-                  - household_meter
-                  - heatpump
-        """)
+    def test_topology_section_is_rejected(self, tmp_path: Path) -> None:
         config_file = tmp_path / "config.yaml"
-        config_file.write_text(yaml_text)
+        config_file.write_text("topology:\n  - main_grid_meter: {}\n")
+        with pytest.raises(DeviceConfigError, match="metered_by"):
+            YamlConfigLoader(config_file).load()
 
-        cfg = YamlConfigLoader(config_file).load()
-        assert "main_grid_meter" in cfg.topology
+    def test_role_is_rejected(self, tmp_path: Path) -> None:
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("devices:\n  - id: m\n    role: meter\n    type: tasmota\n")
+        with pytest.raises(DeviceConfigError, match="'role:' was replaced by 'category:'"):
+            YamlConfigLoader(config_file).load()
 
     def test_secret_tag_resolves_from_env(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -133,34 +135,27 @@ def _messkonzept8_config(tmp_path: Path) -> AppConfig:
 
         devices:
           main_grid_meter:
-            role: meter
-            source:
-              type: generic_iobroker
-              power_import: "tibberlink.0.Homes.abc.powerImport"
-              power_export: "tibberlink.0.Homes.abc.powerExport"
+            category: grid_meter
+            type: generic_iobroker
+            power_import: "tibberlink.0.Homes.abc.powerImport"
+            power_export: "tibberlink.0.Homes.abc.powerExport"
             tariff: export_tariff
 
           household_meter:
-            role: meter
-            source:
-              type: generic_iobroker
-              power: "sma-em.0.12345.wirkleistung_bezug"
+            category: meter
+            type: generic_iobroker
+            metered_by: main_grid_meter
+            power: "sma-em.0.12345.wirkleistung_bezug"
             tariff: household_tariff
 
           heatpump:
-            role: consumer
-            source:
-              type: differential
-              minuend: main_grid_meter
-              subtrahend: household_meter
-              min_w: 0.0
+            category: consumer
+            type: differential
+            metered_by: main_grid_meter
+            minuend: main_grid_meter
+            subtrahend: household_meter
+            min_w: 0.0
             tariff: heatpump_tariff
-
-        topology:
-          - main_grid_meter:
-              children:
-                - household_meter
-                - heatpump
     """)
     config_file = tmp_path / "config.yaml"
     config_file.write_text(yaml_text)
@@ -177,13 +172,13 @@ class TestDeviceLoaderMesskonzept8:
         assert registry.get("household_meter") is not None
         assert registry.get("heatpump") is not None
 
-    def test_device_roles(self, tmp_path: Path) -> None:
+    def test_device_categories(self, tmp_path: Path) -> None:
         cfg = _messkonzept8_config(tmp_path)
         registry, _, _ = build(cfg)
 
-        assert registry.get("main_grid_meter").role == DeviceRole.METER
-        assert registry.get("household_meter").role == DeviceRole.METER
-        assert registry.get("heatpump").role == DeviceRole.CONSUMER
+        assert registry.get("main_grid_meter").category == DeviceCategory.GRID_METER
+        assert registry.get("household_meter").category == DeviceCategory.METER
+        assert registry.get("heatpump").category == DeviceCategory.CONSUMER
 
     def test_device_types(self, tmp_path: Path) -> None:
         cfg = _messkonzept8_config(tmp_path)
@@ -218,14 +213,14 @@ class TestDeviceLoaderMesskonzept8:
         child_ids = {c.device_id for c in topology.children}
         assert child_ids == {"household_meter", "heatpump"}
 
-    def test_by_role_queries(self, tmp_path: Path) -> None:
+    def test_by_category_queries(self, tmp_path: Path) -> None:
         cfg = _messkonzept8_config(tmp_path)
         registry, _, _ = build(cfg)
 
-        meters = registry.by_role(DeviceRole.METER)
-        consumers = registry.by_role(DeviceRole.CONSUMER)
+        meters = registry.by_category(DeviceCategory.GRID_METER, DeviceCategory.METER)
+        consumers = registry.by_category(DeviceCategory.CONSUMER)
 
-        assert len(meters) == 2
+        assert [m.device_id for m in meters] == ["main_grid_meter", "household_meter"]
         assert len(consumers) == 1
         assert consumers[0].device_id == "heatpump"
 
@@ -234,14 +229,35 @@ class TestDeviceLoaderMesskonzept8:
         from energy_assistant.core.config import AppConfig
 
         cfg = AppConfig(
-            devices={
+            devices=parse_devices({
                 "main_grid_meter": {
-                    "role": "meter",
+                    "category": "meter",
                     "type": "generic_iobroker",
                     "power": "some.oid",
                 }
-            }
+            })
         )
         registry, _, _ = build(cfg)
         # Device skipped because no ioBroker backend configured
         assert registry.get("main_grid_meter") is None
+
+
+# ---------------------------------------------------------------------------
+# The shipped example configs load and validate
+# ---------------------------------------------------------------------------
+
+_REPO = Path(__file__).resolve().parents[2]
+
+
+@pytest.mark.parametrize("name", ["config.yaml.example", "config_messkonzept8.yaml.example"])
+def test_example_config_is_valid(name: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    from energy_assistant.core.topology import build_topology
+    from energy_assistant.loader.device_loader import validate_plugins
+
+    for secret in ("TIBBER_HOME_ID", "TIBBER_PULSE_PASSWORD", "ZENDURE_CLOUD_KEY"):
+        monkeypatch.setenv(f"ENERGY_ASSISTANT_SECRET_{secret}", "x")
+    cfg = YamlConfigLoader(_REPO / name).load()
+    validate_plugins(cfg.devices)
+    root = build_topology(cfg.devices)
+    assert root is not None and root.device_id == "main_grid_meter"
+    assert root.find("household_meter") is not None

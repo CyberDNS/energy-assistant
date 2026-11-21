@@ -48,7 +48,8 @@ import logging
 from datetime import datetime, timezone
 
 from ...core.change_gate import ChangeGate
-from ...core.models import DeviceCommand, DeviceRole, DeviceState, StorageConstraints
+from ...core.device_model import DeviceCategory
+from ...core.models import DeviceCommand, DeviceState, StorageConstraints
 from .._iobroker.client import IoBrokerClientProtocol
 
 _log = logging.getLogger(__name__)
@@ -132,8 +133,8 @@ class SmaSunnyBoyStorageDevice:
         return self._device_id
 
     @property
-    def role(self) -> DeviceRole:
-        return DeviceRole.STORAGE
+    def category(self) -> DeviceCategory:
+        return DeviceCategory.BATTERY
 
     # No register on this hardware controls charge power — only discharge is
     # ever actively commanded. Used by callers (e.g. dry-run logging) that

@@ -15,6 +15,7 @@ from energy_assistant.core.battery_efficiency import (
     estimate,
     find_cycles,
 )
+from energy_assistant.core.device_model import DeviceCategory, DeviceSpec, parse_devices
 from energy_assistant.core.models import StorageConstraints
 from energy_assistant.plugins.learned.efficiency import (
     EfficiencyLearner,
@@ -219,8 +220,13 @@ def test_learner_keeps_cycles_beyond_measurement_history(tmp_path):
 
 
 def test_build_learners_reads_mode():
-    devices = {"bat": {"efficiency": "learned", "efficiency_learning": {"min_cycles": 5}}}
+    devices = parse_devices({"bat": {
+        "category": "battery", "type": "zendure",
+        "params": {"capacity_kwh": 5, "max_charge_kw": 1, "max_discharge_kw": 1,
+                   "efficiency": "learned", "efficiency_learning": {"min_cycles": 5}},
+    }})
     learners = build_efficiency_learners([_sc()], devices, FakeStorage([]), None)
     assert learners["bat"].mode == "learned"
-    assert build_efficiency_learners([_sc()], {"bat": {"efficiency": "bogus"}}, FakeStorage([]), None)["bat"].mode == "configured"
+    configured = {"bat": DeviceSpec(id="bat", category=DeviceCategory.BATTERY, type="zendure")}
+    assert build_efficiency_learners([_sc()], configured, FakeStorage([]), None)["bat"].mode == "configured"
     assert build_efficiency_learners([_sc()], {}, None, None) == {}

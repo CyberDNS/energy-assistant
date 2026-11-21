@@ -7,7 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from energy_assistant.config.yaml import YamlConfigLoader
 from energy_assistant.loader.device_loader import build as build_from_config
-from energy_assistant.core.models import DeviceRole, ForecastPoint, ForecastQuantity
+from energy_assistant.core.models import ForecastPoint, ForecastQuantity
 from energy_assistant.plugins import registry as plugin_registry
 from energy_assistant.plugins._iobroker.pool import IoBrokerConnectionPool
 from energy_assistant.core.plugin_registry import BuildContext

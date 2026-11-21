@@ -9,6 +9,14 @@ Adding a new device or tariff type requires only:
 
 No changes to this file are needed.
 
+Validation
+----------
+Before anything is built, ``validate_plugins`` checks each device against
+its plugin's metadata (``core/plugin_registry``): the ``type`` exists, the
+plugin can serve the device's category, every bound capability can be bound
+by that plugin, and the category's required capabilities are provided.  All
+problems are raised together as one ``DeviceConfigError``.
+
 Two-pass build
 --------------
 1. First pass builds all device types that are **not** declared as deferred.
@@ -19,9 +27,10 @@ Two-pass build
 from __future__ import annotations
 
 import logging
-from typing import Any
+from collections.abc import Mapping
 
 from ..core.config import AppConfig
+from ..core.device_model import CATEGORY_SCHEMAS, DeviceConfigError, DeviceSpec
 from ..core.plugin_registry import BuildContext
 from ..core.registry import DeviceRegistry
 from ..core.tariff import TariffModel
@@ -63,7 +72,7 @@ def make_build_context(app_config: AppConfig) -> BuildContext:
 
 def build_top_level_forecasts(
     app_config: AppConfig,
-    ctx: "BuildContext | None" = None,
+    ctx: BuildContext | None = None,
 ) -> list:
     """Build forecast providers declared in the top-level ``forecasts:`` section.
 
@@ -101,7 +110,7 @@ def build_top_level_forecasts(
 
 def build_all_forecasts(
     app_config: AppConfig,
-    ctx: "BuildContext | None" = None,
+    ctx: BuildContext | None = None,
 ) -> list:
     """Build all forecast providers — top-level and per-device.
 
@@ -114,7 +123,7 @@ def build_all_forecasts(
 
 def build_device_forecast_map(
     app_config: AppConfig,
-    ctx: "BuildContext | None" = None,
+    ctx: BuildContext | None = None,
 ) -> dict[str, object]:
     """Like ``build_device_forecasts`` but keyed by device id.
 
@@ -143,7 +152,7 @@ def build_device_forecast_map(
 
 def build_device_forecasts(
     app_config: AppConfig,
-    ctx: "BuildContext | None" = None,
+    ctx: BuildContext | None = None,
 ) -> list:
     """Build forecast providers declared on individual consumer devices.
 
@@ -172,9 +181,43 @@ def build_device_forecasts(
     return list(build_device_forecast_map(app_config, ctx).values())
 
 
+def validate_plugins(devices: Mapping[str, DeviceSpec]) -> None:
+    """Check *devices* against their plugins' metadata.
+
+    Raises ``DeviceConfigError`` listing every problem.
+    """
+    errors: list[str] = []
+    for spec in devices.values():
+        where = f"device {spec.id!r}"
+        info = plugin_registry.device_info(spec.type)
+        if info is None:
+            errors.append(f"{where}: unknown type {spec.type!r} "
+                          f"(one of {', '.join(plugin_registry.device_types())})")
+            continue
+        if info.categories and spec.category not in info.categories:
+            allowed = ", ".join(sorted(c.value for c in info.categories))
+            errors.append(f"{where}: plugin {spec.type!r} cannot be a "
+                          f"{spec.category.value!r} (allowed: {allowed})")
+            continue
+        for cap in spec.capabilities:
+            if cap not in info.bindable:
+                bindable = ", ".join(sorted(c.value for c in info.bindable)) or "none"
+                errors.append(f"{where}: plugin {spec.type!r} cannot bind capability "
+                              f"{cap.value!r} (bindable: {bindable})")
+        provided = info.provides | set(spec.capabilities)
+        missing = CATEGORY_SCHEMAS[spec.category].required_capabilities - provided
+        for cap in sorted(missing, key=lambda c: c.value):
+            hint = (f" — bind it under 'capabilities: {{{cap.value}: {{entity: …}}}}'"
+                    if cap in info.bindable else "")
+            errors.append(f"{where}: category {spec.category.value!r} requires capability "
+                          f"{cap.value!r}, which plugin {spec.type!r} does not provide{hint}")
+    if errors:
+        raise DeviceConfigError(errors)
+
+
 def build(
     app_config: AppConfig,
-    ctx: "BuildContext | None" = None,
+    ctx: BuildContext | None = None,
 ) -> tuple[DeviceRegistry, dict[str, TariffModel], TopologyNode | None]:
     """Build runtime objects from *app_config*.
 
@@ -205,26 +248,33 @@ def build(
         if tariff is not None:
             tariffs[name] = tariff
 
-    # --- Devices (two-pass) ---
+    # --- Devices (validated, then built in two passes) ---
+    validate_plugins(app_config.devices)
     device_registry = DeviceRegistry()
-    deferred: list[tuple[str, dict[str, Any]]] = []
+    deferred: list[DeviceSpec] = []
 
-    for device_id, cfg in app_config.devices.items():
-        type_name = cfg.get("type", "")
-        if plugin_registry.is_deferred(type_name):
-            deferred.append((device_id, cfg))
+    def _build_one(spec: DeviceSpec) -> None:
+        device = plugin_registry.build_device(spec.id, spec.plugin_config(), ctx)
+        if device is None:
+            return
+        if device.category != spec.category:
+            raise DeviceConfigError([(
+                f"device {spec.id!r}: plugin {spec.type!r} built a "
+                f"{device.category.value!r}, but the config says {spec.category.value!r}"
+            )])
+        device_registry.register(device)
+
+    for spec in app_config.devices.values():
+        if plugin_registry.is_deferred(spec.type):
+            deferred.append(spec)
             continue
-        device = plugin_registry.build_device(device_id, cfg, ctx)
-        if device is not None:
-            device_registry.register(device)
+        _build_one(spec)
 
     # Second pass — deferred devices can read the populated device_registry.
     ctx.device_registry = device_registry
-    for device_id, cfg in deferred:
-        device = plugin_registry.build_device(device_id, cfg, ctx)
-        if device is not None:
-            device_registry.register(device)
+    for spec in deferred:
+        _build_one(spec)
 
-    # --- Topology ---
-    topology = build_topology(app_config.topology)
+    # --- Topology (from the devices' metered_by connections) ---
+    topology = build_topology(app_config.devices)
     return device_registry, tariffs, topology

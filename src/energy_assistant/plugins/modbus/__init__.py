@@ -4,7 +4,7 @@ Config::
 
     devices:
       sma_battery:
-        role: storage
+        category: battery
         type: modbus
         profile: sma_sunny_boy_storage   # bundled name, or path to a .yaml file
         host: 192.168.1.50
@@ -24,14 +24,20 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from ...core.models import DeviceRole, parse_device_role
+from ...core.device_model import Capability as Cap
+from ...core.device_model import DeviceCategory
+from ...core.device_model import DeviceCategory as C
 from ...core.plugin_registry import BuildContext, PluginRegistry
 
 _log = logging.getLogger(__name__)
 
 
 def register(registry: PluginRegistry) -> None:
-    registry.register_device("modbus", _build)
+    registry.register_device(
+        "modbus", _build,
+        categories={C.BATTERY, C.PV, C.GRID_METER, C.METER, C.CONSUMER},
+        provides={Cap.POWER_W, Cap.SOC_PCT},
+    )
 
 
 def _build(device_id: str, cfg: dict[str, Any], ctx: BuildContext) -> object | None:
@@ -72,7 +78,7 @@ def _build(device_id: str, cfg: dict[str, Any], ctx: BuildContext) -> object | N
         device_id=device_id,
         client=client,
         profile=profile,
-        role=parse_device_role(cfg.get("role"), default=DeviceRole.STORAGE),
+        category=DeviceCategory(cfg["category"]),
         unit_id=int(unit_id) if unit_id is not None else None,
         strategy=strategy,
     )

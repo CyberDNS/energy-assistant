@@ -4,7 +4,7 @@ Registers the ``static_profile`` forecast type with the plugin registry.
 Devices can declare this in their ``forecast:`` config section::
 
     - id: heatpump_meter
-      role: consumer
+      category: consumer
       type: differential
       ...
       forecast:

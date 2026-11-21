@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from energy_assistant.core.event import DeviceStateEvent, Event, EventBus, PlanUpdatedEvent
-from energy_assistant.core.models import DeviceRole, DeviceState, EnergyPlan
+from energy_assistant.core.event import (
+    DeviceStateEvent,
+    Event,
+    EventBus,
+    PlanUpdatedEvent,
+)
+from energy_assistant.core.models import DeviceState, EnergyPlan
 
 
 def _make_state(device_id: str = "meter", power_w: float = 1000.0) -> DeviceState:

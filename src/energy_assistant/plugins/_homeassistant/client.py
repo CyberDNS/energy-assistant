@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Protocol, runtime_checkable
 
@@ -25,6 +26,30 @@ def _parse_ts(value: Any) -> datetime | None:
         seconds = value / 1000.0 if value > 1e11 else float(value)
         return datetime.fromtimestamp(seconds, tz=timezone.utc)
     return None
+
+
+@dataclass(frozen=True)
+class EntityState:
+    """One entity's state as the REST API returns it."""
+
+    state: str | None
+    attributes: dict[str, Any]
+    last_changed: datetime | None
+    last_updated: datetime | None
+    last_reported: datetime | None
+    """When the integration last reported a value, even an unchanged one
+    (HA 2024.3+).  Falls back to ``last_updated`` on older versions."""
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> EntityState:
+        updated = _parse_ts(data.get("last_updated"))
+        return cls(
+            state=data.get("state"),
+            attributes=dict(data.get("attributes") or {}),
+            last_changed=_parse_ts(data.get("last_changed")),
+            last_updated=updated,
+            last_reported=_parse_ts(data.get("last_reported")) or updated,
+        )
 
 
 @runtime_checkable
@@ -78,6 +103,14 @@ class HAClient:
         resp = await self._client.get(f"/api/states/{entity_id}")
         resp.raise_for_status()
         return resp.json().get("state")
+
+    async def get_entity(self, entity_id: str) -> EntityState | None:
+        """Return state, attributes and timestamps of *entity_id* (None if unknown)."""
+        resp = await self._client.get(f"/api/states/{entity_id}")
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        return EntityState.from_api(resp.json())
 
     async def call_service(
         self, domain: str, service: str, data: dict[str, Any]

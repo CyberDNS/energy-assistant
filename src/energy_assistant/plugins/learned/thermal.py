@@ -8,8 +8,8 @@ Configured on the threshold asset (``assets:`` section)::
       ...                         # thresholds, rates (used as fallback)
       model: learned              # default; "fixed" keeps the configured rates
       learning:                   # all optional
-        value_entity: sensor.aquarium_thermometer_temperature  # default: device entity_sensor
-        switch_entity: switch.aquarium_cooler                  # default: device entity_switch
+        value_entity: sensor.aquarium_thermometer_temperature  # default: device temperature_c entity
+        switch_entity: switch.aquarium_cooler                  # default: device switch entity
         modes:                    # instead of switch_entity, for two-mode devices (AC)
           cool: switch.ac_cooling
           heat: switch.ac_heating
@@ -28,10 +28,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from ...core.device_model import Capability, DeviceSpec
 from ...core.models import ForecastPoint, ThresholdConstraints
 from ...core.thermal_model import (
     StepSeries,
@@ -278,7 +280,7 @@ class ThermalLearner:
 def build_thermal_learners(
     constraints: list[ThresholdConstraints],
     raw_assets: dict[str, Any],
-    devices: dict[str, dict[str, Any]],
+    devices: Mapping[str, DeviceSpec],
     ha_client: Any,
     data_dir: Path | None,
 ) -> dict[str, ThermalLearner]:
@@ -296,11 +298,15 @@ def build_thermal_learners(
             _log.info("thermal:%s: learning needs the homeassistant backend — using configured rates", device_id)
             continue
         learn = cfg.get("learning") or {}
-        dev = devices.get(device_id) or {}
-        value_entity = learn.get("value_entity") or dev.get("entity_sensor")
+        dev = devices.get(device_id)
+        value_entity = learn.get("value_entity") or (
+            dev.bound_entity(Capability.TEMPERATURE_C) if dev is not None else None
+        )
         modes = learn.get("modes")
         if not isinstance(modes, dict) or not modes:
-            switch = learn.get("switch_entity") or dev.get("entity_switch")
+            switch = learn.get("switch_entity") or (
+                dev.bound_entity(Capability.SWITCH) if dev is not None else None
+            )
             modes = {device_mode(tc): switch} if switch else {}
         if not value_entity or not modes:
             _log.warning(

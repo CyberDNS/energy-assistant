@@ -5,12 +5,16 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from energy_assistant.assets.threshold import ThresholdControlContributor
-from energy_assistant.core.control import ControlLoop, LiveSituation, StorageControlContributor
+from energy_assistant.core.control import (
+    ControlLoop,
+    LiveSituation,
+    StorageControlContributor,
+)
+from energy_assistant.core.device_model import DeviceCategory
 from energy_assistant.core.ledger import BatteryCostLedger
 from energy_assistant.core.models import (
     ControlIntent,
     DeviceCommand,
-    DeviceRole,
     DeviceState,
     EnergyPlan,
     StorageConstraints,
@@ -22,7 +26,7 @@ from energy_assistant.core.registry import DeviceRegistry
 class _FakeStorageDevice:
     def __init__(self, device_id: str) -> None:
         self._device_id = device_id
-        self._role = DeviceRole.STORAGE
+        self._category = DeviceCategory.BATTERY
         self.commands: list[DeviceCommand] = []
 
     @property
@@ -30,8 +34,8 @@ class _FakeStorageDevice:
         return self._device_id
 
     @property
-    def role(self) -> DeviceRole:
-        return self._role
+    def category(self) -> DeviceCategory:
+        return self._category
 
     async def get_state(self) -> DeviceState:
         return DeviceState(device_id=self._device_id, power_w=0.0)
@@ -539,8 +543,8 @@ class _FakeThresholdDevice:
         return self._device_id
 
     @property
-    def role(self) -> DeviceRole:
-        return DeviceRole.THRESHOLD_CONTROLLED
+    def category(self) -> DeviceCategory:
+        return DeviceCategory.THERMAL_LOAD
 
     async def get_state(self) -> DeviceState:
         return DeviceState(device_id=self._device_id, power_w=self._power_w)

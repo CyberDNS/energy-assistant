@@ -3,14 +3,15 @@
 Configured on the storage device::
 
     - id: zendure
-      role: storage
-      charge_efficiency: 0.95      # used until the estimate is confident,
-      discharge_efficiency: 0.95   # and always with efficiency: configured
-      efficiency: learned          # default: configured
-      efficiency_learning:         # all optional
-        history_days: 14
-        min_cycles: 3
-        refit_interval_h: 6
+      category: battery
+      params:
+        charge_efficiency: 0.95      # used until the estimate is confident,
+        discharge_efficiency: 0.95   # and always with efficiency: configured
+        efficiency: learned          # default: configured
+        efficiency_learning:         # all optional
+          history_days: 14
+          min_cycles: 3
+          refit_interval_h: 6
 
 Every battery is learned, so the Learning tab can compare learned and
 configured values before you switch one to ``learned``.  Cycles come from
@@ -29,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -39,6 +41,7 @@ from ...core.battery_efficiency import (
     estimate,
     find_cycles,
 )
+from ...core.device_model import DeviceSpec
 from ...core.models import StorageConstraints
 
 _log = logging.getLogger(__name__)
@@ -275,18 +278,19 @@ def _series(samples: list[tuple[datetime, float | None, float | None]]) -> list[
 
 def build_efficiency_learners(
     constraints: list[StorageConstraints],
-    devices: dict[str, dict[str, Any]],
+    devices: Mapping[str, DeviceSpec],
     storage: Any,
     data_dir: Path | None,
 ) -> dict[str, EfficiencyLearner]:
-    """One learner per battery (``role: storage``)."""
+    """One learner per battery (``category: battery``)."""
     out: dict[str, EfficiencyLearner] = {}
     if storage is None or not hasattr(storage, "query_power_soc"):
         return out
     for sc in constraints:
-        dcfg = devices.get(sc.device_id) or {}
-        opts = dcfg.get("efficiency_learning") or {}
-        mode = str(dcfg.get("efficiency", "configured"))
+        spec = devices.get(sc.device_id)
+        params = spec.params if spec is not None else {}
+        opts = params.get("efficiency_learning") or {}
+        mode = str(params.get("efficiency", "configured"))
         if mode not in ("configured", "learned"):
             _log.warning(
                 "%s: efficiency must be 'configured' or 'learned', not %r — using configured",
@@ -296,7 +300,7 @@ def build_efficiency_learners(
         out[sc.device_id] = EfficiencyLearner(
             sc, storage,
             mode=mode,
-            label=str(dcfg.get("label") or ""),
+            label=(spec.label or "") if spec is not None else "",
             history_days=float(opts.get("history_days", 14)),
             min_cycles=int(opts.get("min_cycles", 3)),
             refit_interval_h=float(opts.get("refit_interval_h", 6)),

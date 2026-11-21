@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 
-from energy_assistant.core.models import DeviceRole
+from energy_assistant.core.device_model import DeviceCategory
 from energy_assistant.plugins.tibber import api as tibber_api
 from energy_assistant.plugins.tibber.api import LiveMeasurement, TibberApi, _parse_live
 from energy_assistant.plugins.tibber.device import TibberDevice
@@ -193,7 +193,7 @@ async def test_device_reports_net_power() -> None:
         accumulated_consumption_kwh=3.0, meter_consumption_kwh=1000.0, meter_production_kwh=50.0,
     )
     stream = _FakeStream(m)
-    device = TibberDevice("household_meter", DeviceRole.METER, stream)  # type: ignore[arg-type]
+    device = TibberDevice("household_meter", DeviceCategory.METER, stream)  # type: ignore[arg-type]
 
     state = await device.get_state()
 
@@ -204,7 +204,7 @@ async def test_device_reports_net_power() -> None:
 
 
 async def test_device_unavailable_without_measurement() -> None:
-    device = TibberDevice("household_meter", DeviceRole.METER, _FakeStream(None))  # type: ignore[arg-type]
+    device = TibberDevice("household_meter", DeviceCategory.METER, _FakeStream(None))  # type: ignore[arg-type]
 
     state = await device.get_state()
 

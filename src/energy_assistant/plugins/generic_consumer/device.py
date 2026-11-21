@@ -16,7 +16,7 @@ the ``forecast:`` sub-section; the planning loop reads that via
 Configuration example::
 
     - id: baseline
-      role: consumer
+      category: consumer
       type: generic_consumer
       tariff: household       # tariff that bills this load (used for cost calc)
       forecast:
@@ -32,7 +32,8 @@ Configuration example::
 
 from __future__ import annotations
 
-from ...core.models import DeviceCommand, DeviceRole, DeviceState
+from ...core.device_model import DeviceCategory
+from ...core.models import DeviceCommand, DeviceState
 
 
 class GenericConsumerDevice:
@@ -50,8 +51,8 @@ class GenericConsumerDevice:
         return self._device_id
 
     @property
-    def role(self) -> DeviceRole:
-        return DeviceRole.CONSUMER
+    def category(self) -> DeviceCategory:
+        return DeviceCategory.CONSUMER
 
     @property
     def tariff_id(self) -> str | None:

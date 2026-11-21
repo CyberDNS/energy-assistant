@@ -145,20 +145,28 @@ def build_mcp_server(api: FastAPI) -> MCPServer:
 
     @mcp.tool(annotations=_READ_ONLY)
     async def get_config() -> dict[str, Any]:
-        """Device ids and roles, and the storage constraints (capacity, SoC
+        """Device ids, categories and connections, and the storage constraints (capacity, SoC
         limits, efficiencies, power limits). Contains no secrets."""
         return await get("/api/config")
 
     @mcp.tool(annotations=_READ_ONLY)
     async def get_ev() -> dict[str, Any]:
-        """EV chargepoints: plug state, SoC, charging goal and its status."""
+        """Vehicles: where each one is (charger and since when, or away), its
+        SoC (the car's last report, or estimated from the charger's energy
+        since then), charging goal and its status."""
         return await get("/api/ev")
 
     @mcp.tool(annotations=_READ_ONLY)
-    async def get_ev_plan(asset_id: str) -> dict[str, Any]:
-        """One EV's weekly charging plan, day overrides and the resulting
+    async def get_ev_plan(vehicle_id: str) -> dict[str, Any]:
+        """One vehicle's weekly charging plan, day overrides and the resulting
         7-day targets."""
-        return await get(f"/api/ev/{asset_id}/plan")
+        return await get(f"/api/ev/{vehicle_id}/plan")
+
+    @mcp.tool(annotations=_READ_ONLY)
+    async def get_chargers() -> dict[str, Any]:
+        """EV chargers and the car at each one: a configured vehicle, a guest,
+        or none; how it was assigned (default on plug-in or manual)."""
+        return await get("/api/chargers")
 
     @mcp.tool(annotations=_READ_ONLY)
     async def get_controllable() -> dict[str, Any]:

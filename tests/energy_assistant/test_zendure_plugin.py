@@ -10,7 +10,8 @@ import httpx
 import pytest
 
 from energy_assistant.core.config import BackendsConfig, MqttConfig
-from energy_assistant.core.models import DeviceCommand, DeviceRole
+from energy_assistant.core.device_model import DeviceCategory
+from energy_assistant.core.models import DeviceCommand
 from energy_assistant.core.plugin_registry import BuildContext
 from energy_assistant.plugins import zendure as zendure_plugin
 from energy_assistant.plugins.zendure import cloud
@@ -186,7 +187,7 @@ async def test_state_from_report(fake: FakeBridge) -> None:
     assert state.soc_pct == 42
     assert state.extra["min_soc_pct"] == 5
     assert state.extra["max_soc_pct"] == 100
-    assert dev.role is DeviceRole.STORAGE
+    assert dev.category is DeviceCategory.BATTERY
     assert dev.storage_constraints.capacity_kwh == 7.6
 
 

@@ -10,6 +10,7 @@ import pytest
 from helpers.fake_ha_client import FakeHAClient
 
 from energy_assistant.core.config import AppConfig, BackendsConfig
+from energy_assistant.core.device_model import Capability, DeviceCategory, parse_devices
 from energy_assistant.core.plugin_registry import BuildContext
 from energy_assistant.loader.device_loader import build_device_forecast_map
 from energy_assistant.loader.energy_dashboard import (
@@ -143,54 +144,61 @@ async def test_meter_gap_drops_the_day_from_training():
 
 
 def _ha_consumer(entity: str, **extra) -> dict:
-    return {"role": "consumer", "type": "generic_homeassistant", "oid_power": entity, **extra}
+    return {"category": "consumer", "type": "generic_homeassistant",
+            "capabilities": {"power_w": {"entity": entity}}, **extra}
+
+
+def _spec(raw: dict):
+    """One device entry parsed into a validated DeviceSpec."""
+    return parse_devices({"d": raw})["d"]
 
 
 def test_basic_consumer_learns_by_default():
-    assert default_learning_cfg(_ha_consumer(RACK)) == {
+    assert default_learning_cfg(_spec(_ha_consumer(RACK))) == {
         "type": "learned", "history_entity": RACK,
     }
 
 
 def test_static_profile_becomes_the_fallback():
-    fc = default_learning_cfg(_ha_consumer(RACK, forecast=STATIC))
+    fc = default_learning_cfg(_spec(_ha_consumer(RACK, forecast=STATIC)))
     assert fc == {"type": "learned", "history_entity": RACK, "fallback": STATIC}
 
 
 def test_learning_options_and_opt_out():
-    fc = default_learning_cfg(_ha_consumer(RACK, learning={"history_days": 90}))
+    fc = default_learning_cfg(_spec(_ha_consumer(RACK, learning={"history_days": 90})))
     assert fc["history_days"] == 90
-    assert default_learning_cfg(_ha_consumer(RACK, learning=False)) is None
-    assert default_learning_cfg(_ha_consumer(RACK, learning=False, forecast=STATIC)) == STATIC
+    assert default_learning_cfg(_spec(_ha_consumer(RACK, learning=False))) is None
+    assert default_learning_cfg(_spec(_ha_consumer(RACK, learning=False, forecast=STATIC))) == STATIC
 
 
 def test_default_learning_skips_meters_virtual_and_explicit_forecasts():
-    assert default_learning_cfg({**_ha_consumer(RACK), "role": "meter"}) is None
-    assert default_learning_cfg({"role": "consumer", "type": "generic_consumer"}) is None
+    assert default_learning_cfg(_spec({**_ha_consumer(RACK), "category": "meter"})) is None
+    assert default_learning_cfg(_spec({"category": "consumer", "type": "generic_consumer"})) is None
     explicit = {"type": "learned", "history_entity": "sensor.other"}
-    assert default_learning_cfg(_ha_consumer(RACK, forecast=explicit)) == explicit
+    assert default_learning_cfg(_spec(_ha_consumer(RACK, forecast=explicit))) == explicit
 
 
 def test_auto_subtract_takes_learned_consumers_on_the_same_tariff():
     app = AppConfig(
         default_tariff_id="household",
-        devices={
+        devices=parse_devices({
             "baseline": {
-                "role": "consumer", "type": "generic_consumer",
+                "category": "consumer", "type": "generic_consumer",
                 "forecast": {"type": "learned", "history_entity": HOUSE,
                              "subtract": ["auto", "sensor.extra"]},
             },
             "it_rack": _ha_consumer(RACK),
-            "freezer": {"role": "consumer", "type": "generic_consumer",
+            "freezer": {"category": "consumer", "type": "generic_consumer",
                         "forecast": {"type": "learned", "history_entity": FREEZER_KWH}},
             # other tariff (separate meter): not inside the household sensor
             "heatpump": _ha_consumer("sensor.hp", tariff="heatpump"),
             # inside another meter: subtracted as part of that one
             "lamp": _ha_consumer("sensor.lamp", included_in="it_rack"),
             "opted_out": _ha_consumer("sensor.tv", learning=False),
-            "static_only": {"role": "consumer", "type": "generic_consumer", "forecast": STATIC},
-            "grid": {"role": "meter", "type": "generic_homeassistant", "oid_power": "sensor.g"},
-        },
+            "static_only": {"category": "consumer", "type": "generic_consumer", "forecast": STATIC},
+            "grid": {"category": "grid_meter", "type": "generic_homeassistant",
+                     "capabilities": {"power_w": {"entity": "sensor.g"}}},
+        }),
     )
     fcs = effective_forecast_configs(app)
     assert fcs["baseline"]["subtract"] == [RACK, FREEZER_KWH, "sensor.extra"]
@@ -226,18 +234,18 @@ PREFS = {
 def _app() -> AppConfig:
     return AppConfig(
         default_tariff_id="household",
-        devices={
+        devices=parse_devices({
             "heatpump_meter": {
-                "role": "consumer", "type": "differential", "tariff": "heatpump",
+                "category": "consumer", "type": "differential", "tariff": "heatpump",
                 "forecast": {"type": "learned",
                              "history_entity": "sensor.power_consumption_heatpump"},
             },
             "baseline": {
-                "role": "consumer", "type": "generic_consumer",
+                "category": "consumer", "type": "generic_consumer",
                 "forecast": {"type": "learned", "history_entity": HOUSE,
                              "subtract": ["auto"], "fallback": STATIC},
             },
-        },
+        }),
     )
 
 
@@ -250,14 +258,16 @@ def test_dashboard_consumers_are_added_with_learning():
     # heat pump already configured, the car charger excluded
     assert added == ["it_rack", "freezer", "nas"]
     rack = app.devices["it_rack"]
-    assert rack["type"] == "generic_homeassistant" and rack["oid_power"] == RACK
-    assert rack["label"] == "IT Rack"
+    assert rack.type == "generic_homeassistant"
+    assert rack.bound_entity(Capability.POWER_W) == RACK
+    assert rack.category is DeviceCategory.CONSUMER
+    assert rack.label == "IT Rack"
     freezer = app.devices["freezer"]
-    assert freezer["type"] == "generic_consumer"
-    assert freezer["forecast"] == {
+    assert freezer.type == "generic_consumer"
+    assert freezer.forecast == {
         "type": "learned", "history_entity": FREEZER_KWH, "history_days": 120,
     }
-    assert app.devices["nas"]["included_in"] == "it_rack"
+    assert app.devices["nas"].included_in == "it_rack"
 
     fcs = effective_forecast_configs(app)
     # the rack learns its own load minus the NAS inside it …
@@ -288,7 +298,7 @@ def test_dashboard_without_learning_imports_live_sensors_only():
 
 def test_dashboard_device_id_does_not_clash():
     app = _app()
-    app.devices["freezer"] = {"role": "consumer", "type": "generic_consumer"}
+    app.devices["freezer"] = _spec({"category": "consumer", "type": "generic_consumer"})
     added = add_dashboard_consumers(app, {"device_consumption": [PREFS["device_consumption"][1]]}, {})
     assert added == ["freezer_2"]
 

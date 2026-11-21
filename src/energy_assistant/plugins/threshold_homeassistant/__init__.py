@@ -2,20 +2,25 @@
 
 Device type: ``threshold_homeassistant``
 
-Configuration fields
---------------------
-``entity_sensor``  — HA entity ID for the measured value (temperature, humidity, …).
-``entity_switch``  — HA entity ID for the on/off switch controlling the load.
-``rated_power_w``  — Electrical power drawn when running (W).
+Configuration
+-------------
+``capabilities.temperature_c.entity``  — HA entity of the measured value
+                                         (temperature, humidity, …).
+``capabilities.switch.entity``         — HA switch entity controlling the load.
+``params.rated_power_w``               — power drawn while running (W).
 
 Example::
 
     - id: aquarium_cooler
+      category: thermal_load
       type: threshold_homeassistant
-      role: threshold_controlled
-      entity_sensor: sensor.aquarium_thermometer_temperature
-      entity_switch: switch.nous_plug_14_aquarium_cooler
-      rated_power_w: 150
+      capabilities:
+        temperature_c: { entity: sensor.aquarium_thermometer_temperature }
+        switch: { entity: switch.nous_plug_14_aquarium_cooler }
+      params: { rated_power_w: 150 }
+
+The switch is bound on the thermal load itself for now; it becomes a
+``switch`` device the thermal load is ``controlled_by`` later.
 """
 
 from __future__ import annotations
@@ -23,13 +28,21 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from ...core.device_model import Capability as Cap
+from ...core.device_model import DeviceCategory as C
+from ...core.device_model import DeviceConfigError
 from ...core.plugin_registry import BuildContext, PluginRegistry
 
 _log = logging.getLogger(__name__)
 
 
 def register(registry: PluginRegistry) -> None:
-    registry.register_device("threshold_homeassistant", _build)
+    registry.register_device(
+        "threshold_homeassistant", _build,
+        categories={C.THERMAL_LOAD},
+        provides={Cap.POWER_W},
+        bindable={Cap.TEMPERATURE_C, Cap.SWITCH},
+    )
 
 
 def _build(device_id: str, cfg: dict[str, Any], ctx: BuildContext) -> object | None:
@@ -42,17 +55,17 @@ def _build(device_id: str, cfg: dict[str, Any], ctx: BuildContext) -> object | N
         )
         return None
 
-    entity_sensor = cfg.get("entity_sensor")
-    entity_switch = cfg.get("entity_switch")
+    caps = cfg.get("capabilities") or {}
+    entity_sensor = (caps.get("temperature_c") or {}).get("entity")
+    entity_switch = (caps.get("switch") or {}).get("entity")
     rated_power_w = cfg.get("rated_power_w")
 
     if not entity_sensor or not entity_switch or rated_power_w is None:
-        _log.warning(
-            "Device %r (threshold_homeassistant): missing required fields "
-            "(entity_sensor, entity_switch, rated_power_w) — skipping",
-            device_id,
-        )
-        return None
+        raise DeviceConfigError([(
+            f"device {device_id!r} (threshold_homeassistant) needs "
+            "'capabilities: {temperature_c: {entity: …}, switch: {entity: …}}' and "
+            "'params: {rated_power_w: …}'"
+        )])
 
     return ThresholdHADevice(
         device_id=device_id,

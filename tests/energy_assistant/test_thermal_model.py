@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from energy_assistant.core.device_model import parse_devices
 from energy_assistant.core.models import (
     DeviceState,
     ForecastPoint,
@@ -27,7 +28,10 @@ from energy_assistant.core.thermal_model import (
     fit,
     simulate,
 )
-from energy_assistant.plugins.learned.thermal import ThermalLearner, build_thermal_learners
+from energy_assistant.plugins.learned.thermal import (
+    ThermalLearner,
+    build_thermal_learners,
+)
 from energy_assistant.plugins.milp_highs import MilpHigsOptimizer
 
 T0 = datetime(2026, 11, 18, 0, 0, tzinfo=timezone.utc)
@@ -252,7 +256,11 @@ class TestLearner:
     def test_build_from_config(self) -> None:
         tc = _cooler(device_id="aquarium_cooler")
         assets = {"aquarium": {"type": "threshold", "device": "aquarium_cooler"}}
-        devices = {"aquarium_cooler": {"entity_sensor": "sensor.t", "entity_switch": "switch.c"}}
+        devices = parse_devices({"aquarium_cooler": {
+            "category": "thermal_load", "type": "threshold_homeassistant",
+            "capabilities": {"temperature_c": {"entity": "sensor.t"}, "switch": {"entity": "switch.c"}},
+            "params": {"rated_power_w": 150},
+        }})
         learners = build_thermal_learners([tc], assets, devices, object(), None)
         assert list(learners) == ["aquarium_cooler"]
         assets["aquarium"]["model"] = "fixed"

@@ -106,11 +106,13 @@ async def main() -> None:
     args = parser.parse_args()
 
     cfg = YamlConfigLoader("config.yaml").load()
-    dcfg = cfg.devices.get(args.device_id)
-    if dcfg is None or dcfg.get("type") != "openwb_mqtt":
+    spec = cfg.devices.get(args.device_id)
+    if spec is None or spec.type != "openwb_mqtt":
         sys.exit(f"{args.device_id!r} is not an openwb_mqtt device in config.yaml")
 
-    device = registry.build_device(args.device_id, dcfg, BuildContext(backends=cfg.backends))
+    device = registry.build_device(
+        args.device_id, spec.plugin_config(), BuildContext(backends=cfg.backends)
+    )
     bridge, cp = device._bridge, device._cp_id
 
     # Connect and let retained messages fill the cache.
