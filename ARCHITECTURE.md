@@ -28,7 +28,9 @@ src/
   energy_manager/
     core/              # Abstractions, event bus, registry, config & storage protocols
       models.py        # Pure data models: DeviceState, EnergyPlan, Measurement, etc.
-      device.py        # Device protocol + DeviceRole enum
+      device.py        # Device protocol
+      device_model.py  # DeviceSpec, categories, capabilities, connections, schemas
+      composition.py   # devices → optimizer / control inputs
       event.py         # Event dataclass + EventBus
       forecast.py      # ForecastProvider protocol
       tariff.py        # TariffModel protocol
@@ -37,7 +39,7 @@ src/
       registry.py      # DeviceRegistry
       config.py        # ConfigEntry model + ConfigManager protocol
       storage.py       # StorageBackend protocol
-      topology.py      # TopologyNode tree + residual derivation
+      topology.py      # TopologyNode tree built from metered_by
     config/            # Config manager implementations
       yaml.py          # YamlConfigManager (phase 1)
       json.py          # JsonConfigManager (phase 2, UI-configured)
@@ -84,14 +86,17 @@ class Device(Protocol):
     def device_id(self) -> str: ...
 
     @property
-    def role(self) -> DeviceRole: ...
+    def category(self) -> DeviceCategory: ...
 
     async def get_state(self) -> DeviceState: ...
 
     async def send_command(self, command: DeviceCommand) -> None: ...
 ```
 
-`DeviceRole` is an enum: `METER`, `PRODUCER`, `STORAGE`, `CONSUMER`, `EV_CHARGER`.
+`DeviceCategory` (`core/device_model.py`) says what a device is: `GRID_METER`,
+`METER`, `PV`, `BATTERY`, `CHARGER`, `THERMAL_LOAD`, `SWITCH`, `CONSUMER`,
+`VEHICLE`, `SENSOR`.  It comes from the `category:` of the device's config
+entry (`DeviceSpec`); see DOMAIN_MODEL.md for the category schemas.
 
 `DeviceState` is a Pydantic model holding normalized readings (power,
 SoC, availability, etc.) with a timestamp.
@@ -182,8 +187,8 @@ startup. Config is read-only at runtime; changes require a restart.
 See [`DOMAIN_MODEL.md`](DOMAIN_MODEL.md) for the full reference and
 [`config.yaml.example`](config.yaml.example) for a complete annotated example.
 
-The six top-level sections are: `backends`, `tariffs`, `devices`, `topology`,
-`assets`, and `optimizer`.
+The main top-level sections are: `backends`, `tariffs`, `devices` (with
+`metered_by` connections forming the metering tree), `assets`, and `optimizer`.
 
 ### Phase 2 — JSON files
 
@@ -266,7 +271,7 @@ No layer holds a direct reference to another layer's implementation.
 | 1 | `pyproject.toml` scaffold + project structure |
 | 2 | Data models (`DeviceState`, `EnergyPlan`, `Measurement`, `ConfigEntry`, etc.) |
 | 3 | `EventBus` + tests |
-| 4 | `Device` protocol + `DeviceRole` enum + `DeviceRegistry` + fake device for testing |
+| 4 | `Device` protocol + `DeviceCategory` enum + `DeviceRegistry` + fake device for testing |
 | 5 | `ConfigManager` protocol + `YamlConfigManager` (backends / tariffs / devices / topology / assets / optimizer) |
 | 6 | `TopologyNode` tree + residual derivation |
 | 7 | `StorageBackend` protocol + `SqliteStorageBackend` |

@@ -17,7 +17,7 @@ Example config::
 
     devices:
       - id: household_meter
-        role: meter
+        category: meter
         type: tibber
         tariff: household
         token: !secret tibber_token
@@ -29,7 +29,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from ...core.models import parse_device_role
+from ...core.device_model import Capability as Cap
+from ...core.device_model import DeviceCategory
+from ...core.device_model import DeviceCategory as C
 from ...core.plugin_registry import BuildContext, PluginRegistry
 
 _log = logging.getLogger(__name__)
@@ -39,7 +41,11 @@ _RESOLUTIONS = ("QUARTER_HOURLY", "HOURLY")
 
 def register(registry: PluginRegistry) -> None:
     registry.register_tariff("tibber", _build_tariff)
-    registry.register_device("tibber", _build_device)
+    registry.register_device(
+        "tibber", _build_device,
+        categories={C.GRID_METER, C.METER},
+        provides={Cap.POWER_W},
+    )
 
 
 def _token(kind: str, item_id: str, cfg: dict[str, Any]) -> str | None:
@@ -83,6 +89,6 @@ def _build_device(device_id: str, cfg: dict[str, Any], ctx: BuildContext) -> obj
         return None
     return TibberDevice(
         device_id=device_id,
-        role=parse_device_role(cfg.get("role"), default=parse_device_role("meter")),
+        category=DeviceCategory(cfg["category"]),
         stream=get_api(token, api_url=_api_url(cfg)).live_stream(cfg.get("home_id") or None),
     )

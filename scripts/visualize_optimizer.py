@@ -53,9 +53,9 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import numpy as np
 
+from energy_assistant.core.device_model import DeviceCategory
 from energy_assistant.config.yaml import YamlConfigLoader
 from energy_assistant.core.models import (
-    DeviceRole,
     DeviceState,
     ForecastPoint,
     ForecastQuantity,
@@ -571,7 +571,7 @@ async def _run(
     _print_diagnostics(raw_prices, raw_pv, step_min)
 
     # 7. Storage devices + live SoC
-    storage_devices = device_registry.by_role(DeviceRole.STORAGE)
+    storage_devices = device_registry.by_category(DeviceCategory.BATTERY)
     if not storage_devices:
         print("  WARNING: no storage devices found — check config.yaml")
 

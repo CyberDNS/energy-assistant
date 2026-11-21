@@ -30,7 +30,7 @@ Example config
 
     devices:
       main_grid_meter:
-        role: meter
+        category: meter
         source:
           type: generic_iobroker
           power_import: "tibberlink.0.Homes.<id>.LiveMeasurement.powerImport"
@@ -38,14 +38,14 @@ Example config
         tariff: export_tariff
 
       household_meter:
-        role: meter
+        category: meter
         source:
           type: generic_iobroker
           power: "<household-sub-circuit-oid>"
         tariff: household_tariff
 
       heatpump:
-        role: consumer
+        category: consumer
         source:
           type: differential
           minuend: main_grid_meter
@@ -69,7 +69,8 @@ from __future__ import annotations
 import logging
 
 from ...core.device import Device
-from ...core.models import DeviceCommand, DeviceRole, DeviceState
+from ...core.device_model import DeviceCategory
+from ...core.models import DeviceCommand, DeviceState
 
 _log = logging.getLogger(__name__)
 
@@ -104,8 +105,8 @@ class DifferentialDevice:
     ----------
     device_id:
         Stable, unique identifier for this device.
-    role:
-        Semantic role (typically ``DeviceRole.CONSUMER``).
+    category:
+        Device category (typically ``DeviceCategory.CONSUMER``).
     minuend:
         The device whose reading is subtracted *from*.
     subtrahend:
@@ -127,7 +128,7 @@ class DifferentialDevice:
     def __init__(
         self,
         device_id: str,
-        role: DeviceRole,
+        category: DeviceCategory,
         minuend: Device,
         subtrahend: Device,
         *,
@@ -137,7 +138,7 @@ class DifferentialDevice:
         max_power_w: float | None = None,
     ) -> None:
         self._device_id = device_id
-        self._role = role
+        self._category = category
         self._minuend = minuend
         self._subtrahend = subtrahend
         self._minuend_field = minuend_field
@@ -150,8 +151,8 @@ class DifferentialDevice:
         return self._device_id
 
     @property
-    def role(self) -> DeviceRole:
-        return self._role
+    def category(self) -> DeviceCategory:
+        return self._category
 
     async def get_state(self) -> DeviceState:
         """Derive power by reading both source devices and computing the difference."""

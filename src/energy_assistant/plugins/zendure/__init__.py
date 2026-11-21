@@ -16,7 +16,7 @@ Two connection modes:
 Example config::
 
     - id: zendure
-      role: storage
+      category: battery
       type: zendure
       cloud_key: !secret zendure_cloud_key
       product_key: "aBc1dE"      # alias: hub_id
@@ -37,6 +37,8 @@ import logging
 from typing import Any
 
 from ...core.config import MqttConfig
+from ...core.device_model import Capability as Cap
+from ...core.device_model import DeviceCategory as C
 from ...core.plugin_registry import BuildContext, PluginRegistry
 from .bridge import BrokerParams, ZendureBridge
 from .cloud import cloud_login, decode_cloud_key
@@ -50,7 +52,11 @@ _bridges: dict[tuple[Any, ...], ZendureBridge] = {}
 
 
 def register(registry: PluginRegistry) -> None:
-    registry.register_device("zendure", _build)
+    registry.register_device(
+        "zendure", _build,
+        categories={C.BATTERY},
+        provides={Cap.POWER_W, Cap.SOC_PCT, Cap.POWER_SETPOINT},
+    )
 
 
 def cloud_bridge(cloud_key: str, *, poll_interval_s: float = 60.0) -> ZendureBridge:

@@ -5,7 +5,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from ...core.models import parse_device_role
+from ...core.device_model import Capability as Cap
+from ...core.device_model import DeviceCategory
+from ...core.device_model import DeviceCategory as C
 from ...core.plugin_registry import BuildContext, PluginRegistry
 
 _log = logging.getLogger(__name__)
@@ -13,7 +15,12 @@ _log = logging.getLogger(__name__)
 
 def register(registry: PluginRegistry) -> None:
     # Deferred: needs other devices to be built first.
-    registry.register_device("differential", _build, deferred=True)
+    registry.register_device(
+        "differential", _build,
+        deferred=True,
+        categories={C.CONSUMER, C.METER},
+        provides={Cap.POWER_W},
+    )
 
 
 def _build(device_id: str, cfg: dict[str, Any], ctx: BuildContext) -> object | None:
@@ -40,7 +47,7 @@ def _build(device_id: str, cfg: dict[str, Any], ctx: BuildContext) -> object | N
     max_w = cfg.get("max_w")
     return DifferentialDevice(
         device_id=device_id,
-        role=parse_device_role(cfg.get("role")),
+        category=DeviceCategory(cfg["category"]),
         minuend=minuend,
         subtrahend=subtrahend,
         minuend_field=cfg.get("minuend_field", "power_w"),

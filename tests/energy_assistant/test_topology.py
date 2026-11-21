@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import pytest
-
+from energy_assistant.core.device_model import parse_devices
 from energy_assistant.core.topology import TopologyNode, build_topology
 
 
@@ -40,80 +39,82 @@ class TestTopologyNode:
         assert ids[0] == "main_grid_meter"  # root first
 
 
-class TestBuildTopology:
-    def test_empty_config_returns_none(self) -> None:
-        assert build_topology([]) is None
-        assert build_topology(None) is None
+def _devices(*entries: dict) -> dict:
+    """Parse ``devices:`` entries (list form) into validated specs."""
+    return parse_devices({e["id"]: {k: v for k, v in e.items() if k != "id"} for e in entries})
 
-    def test_single_root_no_children(self) -> None:
-        root = build_topology([{"main_grid_meter": {}}])
+
+def _meter(device_id: str, category: str = "meter", **kw) -> dict:
+    return {"id": device_id, "category": category, "type": "tasmota", "host": "h", **kw}
+
+
+class TestBuildTopology:
+    def test_no_grid_meter_returns_none(self) -> None:
+        assert build_topology({}) is None
+        assert build_topology(_devices(_meter("household_meter"))) is None
+
+    def test_grid_meter_without_children(self) -> None:
+        root = build_topology(_devices(_meter("main_grid_meter", "grid_meter")))
         assert root is not None
         assert root.device_id == "main_grid_meter"
         assert root.children == []
 
-    def test_root_with_string_children(self) -> None:
-        cfg = [
-            {
-                "main_grid_meter": {
-                    "children": ["household_meter", "heatpump"]
-                }
-            }
-        ]
-        root = build_topology(cfg)
+    def test_children_keep_config_order(self) -> None:
+        root = build_topology(_devices(
+            _meter("main_grid_meter", "grid_meter"),
+            _meter("household_meter", metered_by="main_grid_meter"),
+            {"id": "heatpump", "category": "consumer", "type": "differential",
+             "minuend": "main_grid_meter", "subtrahend": "household_meter",
+             "metered_by": "main_grid_meter"},
+        ))
         assert root is not None
-        assert root.device_id == "main_grid_meter"
-        child_ids = [c.device_id for c in root.children]
-        assert child_ids == ["household_meter", "heatpump"]
+        assert [c.device_id for c in root.children] == ["household_meter", "heatpump"]
 
     def test_nested_children(self) -> None:
-        cfg = [
-            {
-                "main_grid_meter": {
-                    "children": [
-                        {
-                            "household_meter": {
-                                "children": ["sub_circuit_a"]
-                            }
-                        },
-                        "heatpump",
-                    ]
-                }
-            }
-        ]
-        root = build_topology(cfg)
+        root = build_topology(_devices(
+            _meter("main_grid_meter", "grid_meter"),
+            _meter("household_meter", metered_by="main_grid_meter"),
+            _meter("sub_circuit_a", metered_by="household_meter"),
+        ))
         assert root is not None
         household = root.find("household_meter")
         assert household is not None
         assert household.children[0].device_id == "sub_circuit_a"
 
-    def test_multiple_roots_raises(self) -> None:
-        with pytest.raises(ValueError, match="exactly one root"):
-            build_topology([{"meter1": {}}, {"meter2": {}}])
+    def test_devices_without_metered_by_are_not_in_the_tree(self) -> None:
+        root = build_topology(_devices(
+            _meter("main_grid_meter", "grid_meter"),
+            {"id": "baseline", "category": "consumer", "type": "generic_consumer"},
+        ))
+        assert root is not None
+        assert root.all_device_ids() == ["main_grid_meter"]
 
-    def test_wrong_type_raises(self) -> None:
-        with pytest.raises(TypeError, match="list of dicts"):
-            build_topology({"main_grid_meter": {}})  # type: ignore[arg-type]
+    def test_grid_limit_from_grid_meter_params(self) -> None:
+        root = build_topology(_devices(
+            _meter("main_grid_meter", "grid_meter", params={
+                "max_import_kw": 24, "curtail_order": ["household_meter"],
+                "limit_hysteresis_kw": 1.0,
+            }),
+            _meter("household_meter", metered_by="main_grid_meter"),
+        ))
+        assert root is not None
+        assert root.max_import_kw == 24.0
+        assert root.curtail_order == ["household_meter"]
+        assert root.limit_hysteresis_kw == 1.0
 
-    def test_messkonzept8_topology(self) -> None:
-        """Matches the exact YAML structure used in config.yaml."""
-        cfg = [
-            {
-                "main_grid_meter": {
-                    "children": [
-                        {
-                            "household_meter": {
-                                "children": [
-                                    {"heatpump_meter": None}
-                                ]
-                            }
-                        }
-                    ]
-                }
-            }
-        ]
-        root = build_topology(cfg)
+    def test_messkonzept8_tree(self) -> None:
+        """The live installation: Z1 → Z2 → PV + batteries."""
+        root = build_topology(_devices(
+            _meter("main_grid_meter", "grid_meter"),
+            _meter("household_meter", metered_by="main_grid_meter"),
+            {"id": "pv_production", "category": "pv", "type": "generic_homeassistant",
+             "metered_by": "household_meter",
+             "capabilities": {"power_w": {"entity": "sensor.pv", "invert_sign": True}}},
+            {"id": "sma_battery", "category": "battery", "type": "modbus",
+             "metered_by": "household_meter", "profile": "p", "host": "h",
+             "params": {"capacity_kwh": 7.4, "max_charge_kw": 3, "max_discharge_kw": 3}},
+        ))
         assert root is not None
         assert root.device_id == "main_grid_meter"
-        assert root.find("household_meter") is not None
-        assert root.find("heatpump_meter") is not None
-        assert set(root.all_device_ids()) == {"main_grid_meter", "household_meter", "heatpump_meter"}
+        assert [c.device_id for c in root.children] == ["household_meter"]
+        assert [c.device_id for c in root.children[0].children] == ["pv_production", "sma_battery"]

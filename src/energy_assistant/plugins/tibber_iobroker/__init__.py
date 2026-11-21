@@ -5,7 +5,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from ...core.models import parse_device_role
+from ...core.device_model import Capability as Cap
+from ...core.device_model import DeviceCategory
+from ...core.device_model import DeviceCategory as C
 from ...core.plugin_registry import BuildContext, PluginRegistry
 
 _log = logging.getLogger(__name__)
@@ -13,7 +15,11 @@ _log = logging.getLogger(__name__)
 
 def register(registry: PluginRegistry) -> None:
     registry.register_tariff("tibber_iobroker", _build_tariff)
-    registry.register_device("tibber_iobroker", _build_device)
+    registry.register_device(
+        "tibber_iobroker", _build_device,
+        categories={C.GRID_METER, C.METER},
+        provides={Cap.POWER_W},
+    )
 
 
 def _build_tariff(tariff_id: str, cfg: dict[str, Any], ctx: BuildContext) -> object | None:
@@ -45,7 +51,7 @@ def _build_device(device_id: str, cfg: dict[str, Any], ctx: BuildContext) -> obj
         username=iob.username, password=iob.password)
     return TibberIoBrokerDevice(
         device_id=device_id,
-        role=parse_device_role(cfg.get("role"), default=parse_device_role("meter")),
+        category=DeviceCategory(cfg["category"]),
         client=client,
         home_id=home_id,
     )

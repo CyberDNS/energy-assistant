@@ -25,7 +25,8 @@ from __future__ import annotations
 
 import logging
 
-from ...core.models import DeviceCommand, DeviceRole, DeviceState
+from ...core.device_model import DeviceCategory
+from ...core.models import DeviceCommand, DeviceState
 from .._homeassistant.client import HAClientProtocol
 
 _log = logging.getLogger(__name__)
@@ -76,8 +77,8 @@ class ThresholdHADevice:
         return self._device_id
 
     @property
-    def role(self) -> DeviceRole:
-        return DeviceRole.THRESHOLD_CONTROLLED
+    def category(self) -> DeviceCategory:
+        return DeviceCategory.THERMAL_LOAD
 
     async def get_state(self) -> DeviceState:
         """Read sensor and switch state from Home Assistant."""

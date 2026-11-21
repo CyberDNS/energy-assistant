@@ -15,7 +15,8 @@ import httpx
 import pytest
 from smllib.crc import x25
 
-from energy_assistant.core.models import DeviceRole, DeviceState
+from energy_assistant.core.device_model import DeviceCategory
+from energy_assistant.core.models import DeviceState
 from energy_assistant.core.plugin_registry import BuildContext
 from energy_assistant.plugins import registry
 from energy_assistant.plugins.tibber_local import bridge as bridge_mod
@@ -350,7 +351,7 @@ async def test_device_reports_local_reading() -> None:
     reading = decode_telegram(_with_power(VALID, -300), received_at=TS)
     node = bridge_mod.NodeInfo(fetched_mono=0.0, battery_voltage=2.69)
     poller = _StubPoller(reading, node)
-    dev = TibberLocalDevice("household_meter", DeviceRole.METER, poller)  # type: ignore[arg-type]
+    dev = TibberLocalDevice("household_meter", DeviceCategory.METER, poller)  # type: ignore[arg-type]
     state = await dev.get_state()
     assert poller.started == 1
     assert state.available and state.timestamp == TS
@@ -364,7 +365,7 @@ async def test_device_reports_local_reading() -> None:
 
 
 async def test_device_unavailable_without_reading() -> None:
-    dev = TibberLocalDevice("m", DeviceRole.METER, _StubPoller())  # type: ignore[arg-type]
+    dev = TibberLocalDevice("m", DeviceCategory.METER, _StubPoller())  # type: ignore[arg-type]
     state = await dev.get_state()
     assert not state.available and state.power_w is None
 
@@ -372,7 +373,7 @@ async def test_device_unavailable_without_reading() -> None:
 async def test_device_uses_cloud_fallback_only_without_local_reading() -> None:
     cloud = _StubFallback(DeviceState(device_id="m", power_w=480.0, available=True, extra={"import_w": 480.0}))
     poller = _StubPoller()
-    dev = TibberLocalDevice("m", DeviceRole.METER, poller, fallback=cloud)  # type: ignore[arg-type]
+    dev = TibberLocalDevice("m", DeviceCategory.METER, poller, fallback=cloud)  # type: ignore[arg-type]
 
     state = await dev.get_state()
     assert state.power_w == 480.0 and state.extra["source"] == "cloud"
@@ -385,7 +386,7 @@ async def test_device_uses_cloud_fallback_only_without_local_reading() -> None:
 
 async def test_device_unavailable_when_both_sources_down() -> None:
     cloud = _StubFallback(DeviceState(device_id="m", power_w=None, available=False))
-    dev = TibberLocalDevice("m", DeviceRole.METER, _StubPoller(), fallback=cloud)  # type: ignore[arg-type]
+    dev = TibberLocalDevice("m", DeviceCategory.METER, _StubPoller(), fallback=cloud)  # type: ignore[arg-type]
     assert not (await dev.get_state()).available
 
 
@@ -400,11 +401,11 @@ def _ctx() -> BuildContext:
 def test_registered_and_built_from_config() -> None:
     dev = registry.build_device(
         "household_meter",
-        {"type": "tibber_local", "role": "meter", "host": "192.0.2.10", "password": "x"},
+        {"type": "tibber_local", "category": "meter", "host": "192.0.2.10", "password": "x"},
         _ctx(),
     )
     assert isinstance(dev, TibberLocalDevice)
-    assert dev.role == DeviceRole.METER
+    assert dev.category == DeviceCategory.METER
     assert dev._fallback is None
     assert dev._poller._base_url == "http://192.0.2.10"
     assert dev._poller._node_id == 1
@@ -413,7 +414,7 @@ def test_registered_and_built_from_config() -> None:
 def test_config_with_token_adds_cloud_fallback() -> None:
     dev = registry.build_device(
         "household_meter",
-        {"type": "tibber_local", "host": "bridge.lan", "password": "x", "token": "tok", "node_id": 2, "poll_interval_s": 1},
+        {"type": "tibber_local", "category": "meter", "host": "bridge.lan", "password": "x", "token": "tok", "node_id": 2, "poll_interval_s": 1},
         _ctx(),
     )
     assert dev._fallback is not None
@@ -429,7 +430,8 @@ def test_missing_host_or_password_skips_device(cfg: dict) -> None:
 def test_config_api_url_reaches_cloud_fallback() -> None:
     dev = registry.build_device(
         "household_meter",
-        {"type": "tibber_local", "host": "bridge.lan", "password": "x", "token": "tok-url",
+        {"type": "tibber_local", "category": "meter", "host": "bridge.lan", "password": "x",
+         "token": "tok-url",
          "api_url": "http://sim:8000/tibber/gql"},
         _ctx(),
     )

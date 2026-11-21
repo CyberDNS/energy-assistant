@@ -8,10 +8,13 @@ overrides/skips set in the UI.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from ..core.device_model import DeviceCategory, DeviceSpec
 from ..core.models import DeviceState, ThresholdConstraints
 from .ev import (
     _FEASIBILITY_MARGIN,
@@ -26,33 +29,77 @@ from .ev import (
 _log = logging.getLogger(__name__)
 
 _THRESHOLD_TYPE = "threshold"
+_DEFAULT_MAX_CHARGE_KW = 11.0
+_DEFAULT_MIN_CHARGE_KW = 1.38  # 6 A × 230 V single phase
+_GUEST_CAPACITY_KWH = 50.0
 
 # Sentinel: plug tracking unavailable — don't gate the overdue catch-up on it.
 _ALWAYS = object()
 
 
-def parse_ev_assets(raw_assets: dict[str, Any]) -> list[EvChargingAsset]:
-    """Parse the ``assets:`` section of the YAML config into ``EvChargingAsset`` objects.
+def vehicle_assets(devices: Mapping[str, DeviceSpec]) -> dict[str, EvChargingAsset]:
+    """One ``EvChargingAsset`` per ``vehicle`` device, not at any charger yet.
 
-    Entries with ``type: threshold`` are silently skipped (handled by
-    ``parse_threshold_assets``).
+    ``asset_id`` is the vehicle id; ``device_id`` is empty until a charging
+    session puts the vehicle at a charger (``at_charger``).  The charging
+    power limits come from the charger then.
     """
-    result: list[EvChargingAsset] = []
-    for asset_id, cfg in raw_assets.items():
-        if not isinstance(cfg, dict):
+    out: dict[str, EvChargingAsset] = {}
+    for spec in devices.values():
+        if spec.category is not DeviceCategory.VEHICLE:
             continue
-        if cfg.get("type") == _THRESHOLD_TYPE:
-            continue
-        try:
-            result.append(_parse_one(asset_id, cfg))
-        except Exception as exc:  # noqa: BLE001
-            _log.warning("assets[%r]: parse failed — %s", asset_id, exc)
-    return result
+        p = spec.params
+        curve = [
+            ChargeCurvePoint(soc_pct=float(pt["soc_pct"]), efficiency=float(pt["efficiency"]))
+            for pt in p.get("charge_curve") or []
+        ] or [ChargeCurvePoint(80.0, 1.0), ChargeCurvePoint(100.0, 0.55)]
+        out[spec.id] = EvChargingAsset(
+            asset_id=spec.id,
+            device_id="",
+            label=spec.display_name,
+            capacity_kwh=float(p["capacity_kwh"]),
+            max_charge_kw=float(p.get("max_charge_kw", _DEFAULT_MAX_CHARGE_KW)),
+            min_charge_kw=_DEFAULT_MIN_CHARGE_KW,
+            charge_limit_soc_pct=float(p.get("charge_limit_soc_pct", 100.0)),
+            charge_curve=curve,
+            timezone=str(p.get("timezone", "Europe/Berlin")),
+        )
+    return out
+
+
+def charger_limits(charger: DeviceSpec) -> tuple[float, float]:
+    """``(min_power_kw, max_power_kw)`` of a charger."""
+    p = charger.params
+    return (
+        float(p.get("min_power_kw", _DEFAULT_MIN_CHARGE_KW)),
+        float(p.get("max_power_kw", _DEFAULT_MAX_CHARGE_KW)),
+    )
+
+
+def at_charger(
+    vehicle: EvChargingAsset, charger: DeviceSpec, vehicle_max_kw: float | None = None
+) -> EvChargingAsset:
+    """*vehicle* charging at *charger*: its commands go to the charger, and
+    the power limits are the charger's (capped by the vehicle's own
+    ``max_charge_kw``, if set)."""
+    min_kw, max_kw = charger_limits(charger)
+    if vehicle_max_kw is not None:
+        max_kw = min(max_kw, vehicle_max_kw)
+    return replace(vehicle, device_id=charger.id, min_charge_kw=min_kw, max_charge_kw=max_kw)
+
+
+def guest_asset(charger: DeviceSpec) -> EvChargingAsset:
+    """Placeholder for an unknown car at *charger* (never planned)."""
+    min_kw, max_kw = charger_limits(charger)
+    return EvChargingAsset(
+        asset_id=f"guest@{charger.id}", device_id=charger.id, label="Guest",
+        capacity_kwh=_GUEST_CAPACITY_KWH, max_charge_kw=max_kw, min_charge_kw=min_kw,
+    )
 
 
 def parse_threshold_assets(
     raw_assets: dict[str, Any],
-    devices: dict[str, dict[str, Any]] | None = None,
+    devices: Mapping[str, DeviceSpec] | None = None,
 ) -> list[ThresholdConstraints]:
     """Parse ``type: threshold`` entries from the ``assets:`` config section.
 
@@ -65,7 +112,7 @@ def parse_threshold_assets(
 
     Optional:
     - ``rated_power_kw``    — electrical power when running (kW).  Falls back
-      to the referenced device's ``rated_power_w`` (from *devices*) so the
+      to the referenced device's ``params.rated_power_w`` (from *devices*) so the
       value only needs to be declared once, on the device.
     - ``unit``          — display unit (default "").
     - ``direction``     — "reduces" (default) or "increases".
@@ -88,13 +135,14 @@ def parse_threshold_assets(
 def _parse_threshold_one(
     asset_id: str,
     cfg: dict[str, Any],
-    devices: dict[str, dict[str, Any]],
+    devices: Mapping[str, DeviceSpec],
 ) -> ThresholdConstraints:
     device_id = str(cfg.get("device") or asset_id)
 
     rated_power_kw = cfg.get("rated_power_kw")
     if rated_power_kw is None:
-        rated_power_w = (devices.get(device_id) or {}).get("rated_power_w")
+        spec = devices.get(device_id)
+        rated_power_w = spec.params.get("rated_power_w") if spec is not None else None
         if rated_power_w is None:
             raise ValueError(
                 f"no rated_power_kw on the asset and no rated_power_w on device {device_id!r}"
@@ -113,36 +161,6 @@ def _parse_threshold_one(
         min_runtime_h=float(cfg.get("min_runtime_h", 0.0)),
         min_offtime_h=float(cfg.get("min_offtime_h", 0.0)),
         label=str(cfg.get("label", "")),
-    )
-
-
-def _parse_one(asset_id: str, cfg: dict[str, Any]) -> EvChargingAsset:
-    device_id = cfg["device"]
-    capacity = float(cfg["capacity_kwh"])
-    max_charge = float(cfg.get("max_charge_kw", 11.0))
-    min_charge = float(cfg.get("min_charge_kw", 1.38))  # 6 A × 230 V single-phase default
-    charge_limit = float(cfg.get("charge_limit_soc_pct", 100.0))
-    label = str(cfg.get("label", asset_id))
-    tz = str(cfg.get("timezone", "Europe/Berlin"))
-
-    curve: list[ChargeCurvePoint] = []
-    for pt in cfg.get("charge_curve", []):
-        curve.append(ChargeCurvePoint(soc_pct=float(pt["soc_pct"]),
-                                      efficiency=float(pt["efficiency"])))
-    if not curve:
-        # Default: full rate to 80%, 55% above 80%
-        curve = [ChargeCurvePoint(80.0, 1.0), ChargeCurvePoint(100.0, 0.55)]
-
-    return EvChargingAsset(
-        asset_id=asset_id,
-        device_id=device_id,
-        label=label,
-        capacity_kwh=capacity,
-        max_charge_kw=max_charge,
-        min_charge_kw=min_charge,
-        charge_limit_soc_pct=charge_limit,
-        charge_curve=curve,
-        timezone=tz,
     )
 
 
@@ -180,7 +198,7 @@ def resolve_active_goals(
         Overridable via ``controller.ev_feasibility_margin`` in config.yaml.
     plugged_since:
         asset_id → when the car was plugged in (None = unplugged / not yet
-        seen), tracked by ``Application._check_force_charge_reset``. A missed
+        seen), tracked by the charging sessions (``Application._on_session_changes``). A missed
         deadline is only caught up at full power if the car was plugged in
         when it passed and has stayed plugged in since: a deadline that
         passed while the car was away — unplugged the evening before, driven
@@ -198,9 +216,12 @@ def resolve_active_goals(
 
     goals: list[EvChargingGoal] = []
     for asset in assets:
-        state = device_states.get(asset.device_id)
+        # The charger's state (with the vehicle's SoC laid over it) while the
+        # vehicle is at a charger; away, only the vehicle's own SoC is known.
+        state = device_states.get(asset.device_id) if asset.device_id else None
         connected = state is not None and state.available
-        current_soc = (state.soc_pct or 0.0) if state is not None else 0.0
+        soc_state = state if state is not None else device_states.get(asset.asset_id)
+        current_soc = (soc_state.soc_pct or 0.0) if soc_state is not None else 0.0
 
         # If today's own target is already met, dismiss today for the
         # overdue catch-up right now — regardless of whether the deadline
@@ -345,7 +366,7 @@ def _resolve_target(
     now: datetime,
     current_soc: float,
     dismissed_day: date | None = None,
-    catch_up_if_plugged_since: "datetime | None | object" = None,
+    catch_up_if_plugged_since: datetime | None | object = None,
 ) -> tuple[float, datetime, bool] | None:
     """Return the next (target_soc_pct, target_by UTC, overdue) deadline, or None.
 

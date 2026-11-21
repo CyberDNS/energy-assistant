@@ -113,6 +113,82 @@ discovery as configuration entities on the EV device — per weekday a `number`
 Changes are written straight to the weekly plan and trigger a re-plan; edits
 made in the Energy Assistant UI are mirrored back to the entities.
 
+### Devices: categories, capabilities, connections
+
+Everything in the house is one entry of the flat `devices:` list:
+
+```yaml
+devices:
+  - id: main_grid_meter
+    category: grid_meter          # what it is
+    type: tasmota                 # how to talk to it (the plugin) …
+    host: 192.168.1.20            # … and the plugin's own settings
+    profile: iskra_mt175
+    tariff: grid
+    params: { max_import_kw: 24 } # optional grid connection limit
+
+  - id: pv_production
+    category: pv
+    type: generic_homeassistant
+    metered_by: main_grid_meter   # the meter it sits behind
+    capabilities:                 # bindings for HA-backed devices
+      power_w: { entity: sensor.power_production_pv, invert_sign: true }
+
+  - id: home_battery
+    category: battery
+    type: modbus
+    metered_by: main_grid_meter
+    profile: sma_sunny_boy_storage
+    host: 192.168.1.22
+    params: { capacity_kwh: 7.4, max_charge_kw: 3.0, max_discharge_kw: 3.0 }
+```
+
+- **Categories:** `grid_meter`, `meter`, `pv`, `battery`, `charger`,
+  `thermal_load`, `switch`, `consumer`, `vehicle`, `sensor`. Each category's
+  schema (`core/device_model.py`) lists the capabilities it needs or may bind
+  (`power_w`, `soc_pct`, `temperature_c`, `switch`, …), its `params` and the
+  connections it may have.
+- **Connections:** `metered_by` builds the metering tree (the grid meter is the
+  root; it replaces the old `topology:` section), `controlled_by` names the
+  switch executing a device's plan, `included_in` marks a consumer whose load
+  is inside another consumer's meter.
+- **Checked at startup:** unknown categories, params or capabilities, missing
+  required ones, plugins that can't serve a category and broken `metered_by`
+  chains stop the start with a list of everything to fix.
+
+Threshold loads (the aquarium cooler) are still configured under `assets:`
+for now (#97).
+
+### Vehicles and chargers
+
+A car is a `vehicle` device read from its own Home Assistant integration
+(`type: homeassistant_vehicle`, see `config.yaml.example`); a wallbox is a
+`charger`.  When a charger reports a car plugged in, a **charging session**
+starts with the charger's `default_vehicle`.  While plugged in, the car can be
+reassigned to another vehicle or to a **guest** (UI: Plan tab; API: `PUT
+/api/chargers/<charger>/vehicle?vehicle_id=<id|guest>`; Home Assistant: the
+charger's "Vehicle" select).  A guest car follows the charger's `guest_mode`
+(`pv_only`, `instant`, `off`).  The charger's plug state is authoritative; the
+car's own plug sensor is only shown.
+
+- **SoC:** the car's integration reports every 15–60 min.  In between, the SoC
+  is estimated from the energy the charger delivered and the vehicle's charge
+  curve; every new report resets the estimate.  The UI marks an estimated
+  value ("est.") and shows the last report on hover.  `refresh_entity` +
+  `params.refresh_after_min` press the integration's refresh button when the
+  report gets old while charging.
+- **openWB:** with `charger_ids: {openwb_mqtt: <openWB vehicle id>}` and
+  `push_soc_to_charger: true` the SoC goes to openWB's MQTT SoC module
+  (`set/mqtt/vehicle/<id>/get/soc`, range, timestamp).  A reassignment also
+  sets openWB's vehicle for that chargepoint (`set/chargepoint/<n>/config/ev`;
+  a guest is openWB's vehicle 0).
+- **Needs on the car:** weekly plans, day overrides, force charge and "disable"
+  belong to the vehicle; the charger only executes.  `params.previous_ids:
+  [<old asset id>]` moves stored plans from a former `assets:` EV entry once,
+  and keeps its Home Assistant entities (ids, history, area): only their MQTT
+  topics move to `energy_assistant/vehicle/<id>/…`.
+- **Savings** are still kept per charger (whichever car charged there).
+
 ### Tasmota meters and plugs
 
 `type: tasmota` reads a Tasmota device straight over the LAN
@@ -145,7 +221,7 @@ are tested against real devices; the others follow the scripts in the docs.
 devices:
   # Main grid meter (Z1) via a Tasmota IR head
   - id: main_grid_meter
-    role: meter
+    category: grid_meter
     type: tasmota
     tariff: grid
     host: 192.168.1.20
@@ -155,7 +231,7 @@ devices:
 
   # The same meter mapped by hand: paths below StatusSNS
   - id: main_grid_meter
-    role: meter
+    category: grid_meter
     type: tasmota
     host: 192.168.1.20
     fields:
@@ -167,7 +243,7 @@ devices:
 
   # Smart plug with standard Tasmota energy monitoring
   - id: dishwasher
-    role: consumer
+    category: consumer
     type: tasmota
     host: 192.168.1.30
     profile: energy
@@ -210,7 +286,7 @@ learned hourly shape, refitted every 6 h.
 
   ```yaml
   - id: baseline
-    role: consumer
+    category: consumer
     type: generic_consumer
     forecast:
       type: learned
@@ -259,13 +335,18 @@ cycles of the last 14 days, split evenly: η_charge = η_discharge = √round tr
 
 ```yaml
 - id: zendure
-  role: storage
-  charge_efficiency: 0.95     # used until the estimate is confident
-  discharge_efficiency: 0.95
-  efficiency: learned         # default: configured
-  efficiency_learning:        # optional
-    history_days: 14
-    min_cycles: 3             # and 1.5 × capacity charged
+  category: battery
+  type: zendure
+  params:
+    capacity_kwh: 7.6
+    max_charge_kw: 1.2
+    max_discharge_kw: 0.8
+    charge_efficiency: 0.95     # used until the estimate is confident
+    discharge_efficiency: 0.95
+    efficiency: learned         # default: configured
+    efficiency_learning:        # optional
+      history_days: 14
+      min_cycles: 3             # and 1.5 × capacity charged
 ```
 
 Every battery is learned, also with `efficiency: configured`, so you can compare

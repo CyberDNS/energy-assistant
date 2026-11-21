@@ -9,6 +9,7 @@ import pytest
 from energy_assistant.assets.loader import parse_threshold_assets
 from energy_assistant.assets.threshold import ThresholdControlContributor
 from energy_assistant.core.control import ControlIntent, LiveSituation
+from energy_assistant.core.device_model import parse_devices
 from energy_assistant.core.models import (
     DeviceState,
     ForecastPoint,
@@ -18,7 +19,6 @@ from energy_assistant.core.models import (
 )
 from energy_assistant.core.optimizer import OptimizationContext
 from energy_assistant.plugins.milp_highs import MilpHigsOptimizer
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -341,14 +341,22 @@ class TestParseThresholdAssets:
     }
 
     def test_rated_power_falls_back_to_device(self) -> None:
-        devices = {"cooler": {"type": "threshold_homeassistant", "rated_power_w": 150}}
+        devices = parse_devices({"cooler": {
+            "category": "thermal_load", "type": "threshold_homeassistant",
+            "capabilities": {"temperature_c": {"entity": "sensor.t"}, "switch": {"entity": "switch.c"}},
+            "params": {"rated_power_w": 150},
+        }})
         parsed = parse_threshold_assets({"aquarium": dict(self._BASE_ASSET)}, devices)
         assert len(parsed) == 1
         assert parsed[0].rated_power_kw == pytest.approx(0.150)
 
     def test_asset_rated_power_overrides_device(self) -> None:
         asset = dict(self._BASE_ASSET, rated_power_kw=0.2)
-        devices = {"cooler": {"rated_power_w": 150}}
+        devices = parse_devices({"cooler": {
+            "category": "thermal_load", "type": "threshold_homeassistant",
+            "capabilities": {"temperature_c": {"entity": "sensor.t"}, "switch": {"entity": "switch.c"}},
+            "params": {"rated_power_w": 150},
+        }})
         parsed = parse_threshold_assets({"aquarium": asset}, devices)
         assert parsed[0].rated_power_kw == pytest.approx(0.2)
 
@@ -478,7 +486,9 @@ class TestThresholdHADeviceReconciliation:
 
     @staticmethod
     def _device(client):
-        from energy_assistant.plugins.threshold_homeassistant.device import ThresholdHADevice
+        from energy_assistant.plugins.threshold_homeassistant.device import (
+            ThresholdHADevice,
+        )
         return ThresholdHADevice(
             "cooler", client,
             entity_sensor="sensor.temp", entity_switch="switch.cooler",
@@ -487,6 +497,7 @@ class TestThresholdHADeviceReconciliation:
 
     async def test_skips_service_call_when_already_in_desired_state(self) -> None:
         from helpers.fake_ha_client import FakeHAClient
+
         from energy_assistant.core.models import DeviceCommand
         client = FakeHAClient(states={"switch.cooler": "on"})
         await self._device(client).send_command(
@@ -497,6 +508,7 @@ class TestThresholdHADeviceReconciliation:
     async def test_corrects_mismatched_switch(self) -> None:
         """Should be on but is off (e.g. manually toggled) → turn_on sent."""
         from helpers.fake_ha_client import FakeHAClient
+
         from energy_assistant.core.models import DeviceCommand
         client = FakeHAClient(states={"switch.cooler": "off"})
         await self._device(client).send_command(
@@ -508,6 +520,7 @@ class TestThresholdHADeviceReconciliation:
 
     async def test_turns_off_when_running_but_standby_desired(self) -> None:
         from helpers.fake_ha_client import FakeHAClient
+
         from energy_assistant.core.models import DeviceCommand
         client = FakeHAClient(states={"switch.cooler": "on"})
         await self._device(client).send_command(

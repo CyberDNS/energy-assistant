@@ -43,10 +43,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import pulp
 
+from energy_assistant.core.device_model import DeviceCategory
 from energy_assistant.config.yaml import YamlConfigLoader
 from energy_assistant.core.ledger import BatteryCostLedger
 from energy_assistant.core.models import (
-    DeviceRole,
     DeviceState,
     ForecastPoint,
     ForecastQuantity,
@@ -117,7 +117,7 @@ async def _run(
     print(f"  Time step   : {step_min} min  →  {N} steps over {horizon_h} h")
 
     # ── 3. Live SoC ───────────────────────────────────────────────────────────
-    storage_devices     = device_registry.by_role(DeviceRole.STORAGE)
+    storage_devices     = device_registry.by_category(DeviceCategory.BATTERY)
     storage_constraints: list[StorageConstraints] = []
     device_states:       dict[str, DeviceState]   = {}
 

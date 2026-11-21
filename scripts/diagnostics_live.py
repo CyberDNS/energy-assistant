@@ -37,8 +37,9 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from energy_assistant.core.device_model import DeviceCategory
 from energy_assistant.config.yaml import YamlConfigLoader
-from energy_assistant.core.models import DeviceRole, DeviceState
+from energy_assistant.core.models import DeviceState
 from energy_assistant.core.optimizer import OptimizationContext
 from energy_assistant.core.plugin_registry import BuildContext
 from energy_assistant.loader.device_loader import build as build_from_config
@@ -195,7 +196,7 @@ async def _fetch_and_display(
 
     storage_constraints = {
         sc.device_id: sc
-        for dev in device_registry.by_role(DeviceRole.STORAGE)
+        for dev in device_registry.by_category(DeviceCategory.BATTERY)
         if (sc := getattr(dev, "storage_constraints", None)) is not None
     }
 

@@ -2,7 +2,8 @@
 
 A missed deadline is only caught up at full power if the car was plugged in
 when it passed and has stayed plugged in since. Application tracks the
-plug-in time (``_ev_plugged_since``) in ``_check_force_charge_reset``;
+plug-in time (``_ev_plugged_since``) from the charging sessions
+(``_on_session_changes``);
 ``resolve_active_goals`` applies the rule.
 
 This replaced date-based dismissal on unplug and at startup, which kept
@@ -20,12 +21,9 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 
-from energy_assistant.assets.ev import (
-    ChargeCurvePoint,
-    EvChargingAsset,
-    EvDayOverride,
-    EvWeeklyTarget,
-)
+from helpers.fleet_app import fleet_app as _app
+
+from energy_assistant.assets.ev import EvDayOverride, EvWeeklyTarget
 from energy_assistant.assets.loader import resolve_active_goals
 from energy_assistant.core.models import DeviceState
 from energy_assistant.server import Application
@@ -37,13 +35,6 @@ WEEKLY_90_BY_0600 = {
 }
 
 
-def _asset(**kw) -> EvChargingAsset:
-    params = dict(asset_id="ev1", device_id="wallbox", label="EV",
-                  capacity_kwh=60.0, max_charge_kw=11.0, timezone="Europe/Berlin")
-    params.update(kw)
-    return EvChargingAsset(**params)
-
-
 def _state(plugged: bool, soc: float = 40.0) -> DeviceState:
     return DeviceState(
         device_id="wallbox", power_w=0.0, soc_pct=soc, available=plugged,
@@ -51,18 +42,18 @@ def _state(plugged: bool, soc: float = 40.0) -> DeviceState:
     )
 
 
-def _app(asset: EvChargingAsset | None = None) -> Application:
-    app = Application()
-    app._ev_assets = [asset or _asset()]
-    app._ev_force_charge = {}
-    app._ev_prev_plugged = {}
-    app._ev_plugged_since = {}
-    app._ev_overdue_dismissed = {}
-    return app
-
-
 async def _tick(app: Application, plugged: bool, at: datetime, soc: float = 40.0) -> None:
-    await app._check_force_charge_reset({"wallbox": _state(plugged, soc)}, now=at)
+    """One poll: the charger's plug state and the car's SoC, through the sessions."""
+    states = {
+        "wallbox": DeviceState(device_id="wallbox", power_w=0.0, available=plugged,
+                               extra={"plugged": plugged}),
+        "ev1": DeviceState(device_id="ev1", soc_pct=soc,
+                           extra={"soc_timestamp": at.isoformat()}),
+    }
+    changes = app._fleet.compose(states, at)
+    if changes:
+        await app._on_session_changes(changes, replan=False, now=at)
+    await app._check_force_charge_reset(states, now=at)
 
 
 def _goals(app: Application, at: datetime, soc: float, overrides=None):
@@ -82,7 +73,7 @@ def _goals(app: Application, at: datetime, soc: float, overrides=None):
 async def test_plug_in_time_is_tracked_and_cleared_on_unplug() -> None:
     app = _app()
     await _tick(app, False, NOW)
-    assert app._ev_plugged_since["ev1"] is None
+    assert app._ev_plugged_since.get("ev1") is None
     plug_in = NOW + timedelta(minutes=5)
     await _tick(app, True, plug_in)
     assert app._ev_plugged_since["ev1"] == plug_in
@@ -134,8 +125,8 @@ async def test_scooter_2026_09_29_unplugged_evening_before_deadline_passes_while
     """Replay: unplugged on the 28th, away overnight while the 29th 06:00
     deadline passes, back at 16:42 on the 29th at 28% — must follow the
     next day's plan, not force-charge toward the deadline missed while away."""
-    app = _app(_asset(capacity_kwh=52.0, charge_curve=[
-        ChargeCurvePoint(90.0, 0.90), ChargeCurvePoint(100.0, 0.55)]))
+    app = _app({"capacity_kwh": 52.0, "charge_curve": [
+        {"soc_pct": 90, "efficiency": 0.90}, {"soc_pct": 100, "efficiency": 0.55}]})
     await _tick(app, True, datetime(2026, 9, 28, 15, 0, tzinfo=timezone.utc))
     await _tick(app, False, datetime(2026, 9, 28, 16, 30, tzinfo=timezone.utc))  # 18:30 local
     back = datetime(2026, 9, 29, 14, 42, tzinfo=timezone.utc)                    # 16:42 local
@@ -149,8 +140,11 @@ async def test_scooter_2026_09_29_unplugged_evening_before_deadline_passes_while
 async def test_override_unplugged_before_its_deadline_then_back_after_plans_tomorrow() -> None:
     """Replay of 2026-09-27: override 35% by 11:00, infeasible, unplugged at
     10:46 (deadline still ahead), back at 13:29 at 25%."""
-    app = _app(_asset(capacity_kwh=77.0, min_charge_kw=4.14, charge_limit_soc_pct=90.0,
-                      charge_curve=[ChargeCurvePoint(90.0, 0.90), ChargeCurvePoint(100.0, 0.55)]))
+    app = _app(
+        {"capacity_kwh": 77.0, "charge_limit_soc_pct": 90.0, "charge_curve": [
+            {"soc_pct": 90, "efficiency": 0.90}, {"soc_pct": 100, "efficiency": 0.55}]},
+        {"min_power_kw": 4.14},
+    )
     today = date(2026, 9, 27)
     overrides = {today: EvDayOverride(date=today, skip=False, target_soc_pct=35.0, target_by="11:00")}
     await _tick(app, True, datetime(2026, 9, 26, 18, 0, tzinfo=timezone.utc), soc=23.0)

@@ -9,37 +9,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
-
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-
-class DeviceRole(str, Enum):
-    """Semantic label describing what a device fundamentally *is* in the energy system."""
-
-    METER = "meter"
-    PRODUCER = "producer"
-    STORAGE = "storage"
-    CONSUMER = "consumer"
-    EV_CHARGER = "ev_charger"
-    THRESHOLD_CONTROLLED = "threshold_controlled"
-
-
-def parse_device_role(
-    raw: str | None,
-    default: DeviceRole = DeviceRole.CONSUMER,
-) -> DeviceRole:
-    """Parse *raw* into a ``DeviceRole``, returning *default* on unknown values."""
-    try:
-        return DeviceRole(raw or "")
-    except ValueError:
-        import logging
-        logging.getLogger(__name__).warning(
-            "Unknown device role %r — defaulting to %s", raw, default.value
-        )
-        return default
+from .device_model import DeviceCategory
 
 
 class DeviceState(BaseModel):
@@ -375,6 +349,6 @@ class ConfigEntry(BaseModel):
 
     id: str
     plugin: str
-    role: DeviceRole | None = None
+    category: DeviceCategory | None = None
     tariff_id: str | None = None
     data: dict[str, Any] = Field(default_factory=dict)

@@ -33,7 +33,8 @@ async def _fallback_kwh(provider, day) -> float:
 
 async def main(device_id: str, config_path: str, warmup: int) -> None:
     cfg = YamlConfigLoader(config_path).load()
-    forecast_cfg = (cfg.devices.get(device_id) or {}).get("forecast") or {}
+    spec = cfg.devices.get(device_id)
+    forecast_cfg = (spec.forecast if spec is not None else None) or {}
     if forecast_cfg.get("type") != "learned":
         raise SystemExit(f"device {device_id!r} has no 'type: learned' forecast")
 

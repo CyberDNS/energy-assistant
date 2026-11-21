@@ -17,7 +17,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from energy_assistant.core.models import DeviceRole
+from energy_assistant.core.device_model import DeviceCategory
 from energy_assistant.core.plugin_registry import BuildContext
 from energy_assistant.plugins import registry
 from energy_assistant.plugins.tasmota import poller as poller_mod
@@ -479,10 +479,11 @@ class _StubPoller:
         return self.reading
 
 
-async def test_meter_state() -> None:
+@pytest.mark.parametrize("category", [DeviceCategory.GRID_METER, DeviceCategory.METER])
+async def test_meter_state(category: DeviceCategory) -> None:
     reading = map_payload(_sml(-300), build_field_map(METER_FIELDS), received_at=TS)
     poller = _StubPoller(reading)
-    state = await TasmotaDevice("main_grid_meter", DeviceRole.METER, poller).get_state()  # type: ignore[arg-type]
+    state = await TasmotaDevice("main_grid_meter", category, poller).get_state()  # type: ignore[arg-type]
     assert poller.started == 1
     assert state.available and state.timestamp == TS
     assert state.power_w == -300.0
@@ -495,14 +496,14 @@ async def test_meter_state() -> None:
 
 async def test_consumer_state_has_no_import_export() -> None:
     reading = map_payload(PLUG, _profile_map("energy"))
-    state = await TasmotaDevice("dishwasher", DeviceRole.CONSUMER, _StubPoller(reading)).get_state()  # type: ignore[arg-type]
+    state = await TasmotaDevice("dishwasher", DeviceCategory.CONSUMER, _StubPoller(reading)).get_state()  # type: ignore[arg-type]
     assert state.power_w == 123.0 and state.energy_kwh == pytest.approx(45.612)
     assert "import_w" not in state.extra
     assert state.extra["voltage_v"] == 231.0
 
 
 async def test_unavailable_without_reading() -> None:
-    state = await TasmotaDevice("m", DeviceRole.METER, _StubPoller()).get_state()  # type: ignore[arg-type]
+    state = await TasmotaDevice("m", DeviceCategory.METER, _StubPoller()).get_state()  # type: ignore[arg-type]
     assert not state.available and state.power_w is None
 
 
@@ -517,21 +518,31 @@ def _ctx() -> BuildContext:
 def test_meter_built_from_config() -> None:
     dev = registry.build_device(
         "main_grid_meter",
-        {"type": "tasmota", "role": "meter", "host": "192.0.2.46", "fields": METER_FIELDS},
+        {"type": "tasmota", "category": "meter", "host": "192.0.2.46", "fields": METER_FIELDS},
         _ctx(),
     )
     assert isinstance(dev, TasmotaDevice)
-    assert dev.role == DeviceRole.METER
+    assert dev.category == DeviceCategory.METER
     assert dev._poller._base_url == "http://192.0.2.46"
     assert dev._poller._poll_interval_s == 2.0
     assert dev._poller._stale_after_s == 30.0
     assert "password" not in dev._poller._params
 
 
+def test_grid_meter_polls_like_a_meter() -> None:
+    dev = registry.build_device(
+        "main_grid_meter",
+        {"type": "tasmota", "category": "grid_meter", "host": "h", "fields": METER_FIELDS},
+        _ctx(),
+    )
+    assert dev.category == DeviceCategory.GRID_METER
+    assert dev._poller._poll_interval_s == 2.0
+
+
 def test_meter_built_from_profile_with_overrides() -> None:
     dev = registry.build_device(
         "main_grid_meter",
-        {"type": "tasmota", "role": "meter", "host": "h", "profile": "iskra_mt175", "fields": {"phase_power_w": None}},
+        {"type": "tasmota", "category": "meter", "host": "h", "profile": "iskra_mt175", "fields": {"phase_power_w": None}},
         _ctx(),
     )
     f = dev._poller._fields
@@ -541,7 +552,7 @@ def test_meter_built_from_profile_with_overrides() -> None:
 
 def test_config_sensor_disables_auto_sensor() -> None:
     dev = registry.build_device(
-        "m", {"type": "tasmota", "host": "h", "profile": "iskra_mt175", "sensor": "MT631", "invert_sign": True}, _ctx()
+        "m", {"type": "tasmota", "category": "meter", "host": "h", "profile": "iskra_mt175", "sensor": "MT631", "invert_sign": True}, _ctx()
     )
     f = dev._poller._fields
     assert f.sensor == "MT631" and not f.auto_sensor and f.invert_sign
@@ -550,10 +561,10 @@ def test_config_sensor_disables_auto_sensor() -> None:
 def test_plug_built_from_profile() -> None:
     dev = registry.build_device(
         "dishwasher",
-        {"type": "tasmota", "role": "consumer", "host": "plug.lan", "profile": "energy", "password": "pw"},
+        {"type": "tasmota", "category": "consumer", "host": "plug.lan", "profile": "energy", "password": "pw"},
         _ctx(),
     )
-    assert dev.role == DeviceRole.CONSUMER
+    assert dev.category == DeviceCategory.CONSUMER
     assert dev._poller._poll_interval_s == 10.0
     assert dev._poller._params["password"] == "pw"
 

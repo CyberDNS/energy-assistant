@@ -1,9 +1,10 @@
 import { defineComponent, ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
-import { fetchPlan, fetchForecast, fetchEv, fetchControllable, triggerPlanRefresh } from '../api.js'
+import { fetchPlan, fetchForecast, fetchEv, fetchControllable, fetchChargers, triggerPlanRefresh } from '../api.js'
 import { planVersion, planning } from '../composables/useStatus.js'
 import PlotlyChart from '../components/PlotlyChart.js'
 import EvCard from '../components/EvCard.js'
+import GuestCard from '../components/GuestCard.js'
 import ControllableDeviceCard from '../components/ControllableDeviceCard.js'
 
 // Convert ISO UTC string to a local-time string Plotly can parse as a date
@@ -130,7 +131,7 @@ function buildSocTraces(intents, forecast, evDeviceIds) {
 
 export default defineComponent({
   name: 'PlanView',
-  components: { PlotlyChart, EvCard, ControllableDeviceCard },
+  components: { PlotlyChart, EvCard, GuestCard, ControllableDeviceCard },
 
   setup() {
     // Single-vehicle view: #/plan/<vehicle> or #/plan?vehicle=<vehicle>.
@@ -148,6 +149,7 @@ export default defineComponent({
     const fcastTraces  = ref([])
     const priceTraces  = ref([])
     const socTraces    = ref([])
+    const chargers     = ref([])
     let timer = null
 
     const refreshing = ref(false)
@@ -160,9 +162,11 @@ export default defineComponent({
 
     async function refresh() {
       try {
-        const [plan, forecast, evs, ctrl] = await Promise.all([
+        const [plan, forecast, evs, ctrl, chs] = await Promise.all([
           fetchPlan(), fetchForecast(), fetchEv(), fetchControllable(),
+          fetchChargers().catch(() => []),
         ])
+        chargers.value = chs
 
         controllable.value = ctrl?.devices ?? []
         planMeta.value = plan.created_at
@@ -198,7 +202,7 @@ export default defineComponent({
     // event) — e.g. after '↺ Refresh plan' finishes or a scheduled re-solve.
     watch(planVersion, () => refresh())
 
-    return { vehicle, vehicleEv, vehicleDevice, loaded, evList, controllable, planMeta, flowTraces, fcastTraces, priceTraces, socTraces, refresh, triggerRefresh, refreshing, planning, XAXIS }
+    return { chargers, vehicle, vehicleEv, vehicleDevice, loaded, evList, controllable, planMeta, flowTraces, fcastTraces, priceTraces, socTraces, refresh, triggerRefresh, refreshing, planning, XAXIS }
   },
 
   template: `
@@ -210,7 +214,7 @@ export default defineComponent({
       </transition>
       <template v-if="vehicleEv">
         <div class="full">
-          <EvCard :key="vehicleEv.asset_id" :ev="vehicleEv" @refresh="refresh" />
+          <EvCard :key="vehicleEv.asset_id" :ev="vehicleEv" :chargers="chargers" @refresh="refresh" />
         </div>
         <div v-if="vehicleDevice" class="full panel">
           <h2>Charging Plan</h2>
@@ -239,10 +243,11 @@ export default defineComponent({
       </div>
 
       <div v-if="evList.length" class="full panel" style="margin-bottom:10px">
-        <h2>EV Charging</h2>
+        <h2>Cars</h2>
         <div class="ev-cards">
-          <EvCard v-for="ev in evList" :key="ev.asset_id" :ev="ev" @refresh="refresh" />
+          <EvCard v-for="ev in evList" :key="ev.asset_id" :ev="ev" :chargers="chargers" collapsible @refresh="refresh" />
         </div>
+        <GuestCard v-if="chargers.length" :chargers="chargers" style="margin-top:10px" @refresh="refresh" />
       </div>
 
       <div v-if="controllable.length" class="full panel" style="margin-bottom:10px">

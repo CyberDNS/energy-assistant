@@ -47,3 +47,12 @@ export const setLedgerBasis      = (deviceId, basis) =>
   call(`/api/ledger/set_basis?device_id=${encodeURIComponent(deviceId)}&cost_basis_eur_per_kwh=${basis}`, { method: 'POST' })
 
 export const triggerPlanRefresh  = () => call('/api/plan/refresh', { method: 'POST' })
+
+export const fetchChargers = () => call('/api/chargers')
+// Put a car (or "guest") on a charger; "none" drops its selection.
+export const selectEvCharger = (vehicleId, chargerId) =>
+  call(`/api/ev/${encodeURIComponent(vehicleId)}/charger?charger_id=${encodeURIComponent(chargerId)}`,
+       { method: 'PUT' })
+// How the guest car charges: "pv_only" or "instant".
+export const setGuestMode = (mode) =>
+  call(`/api/ev/guest/mode?mode=${encodeURIComponent(mode)}`, { method: 'PUT' })

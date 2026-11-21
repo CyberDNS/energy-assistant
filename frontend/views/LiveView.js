@@ -14,7 +14,7 @@ function fmtPower(w) {
 function fmtSetpointW(s) {
   if (s.setpoint_w == null) return '—'
   // EV charger sentinel values are not real watts — show charging mode label instead
-  if (s.role === 'ev_charger') {
+  if (s.category === 'charger') {
     if (s.setpoint_w > 500) return `${fmt(s.setpoint_w, 0)} W`
     if (s.setpoint_w > 0)   return 'PV mode'
     return 'stopped'
@@ -22,7 +22,7 @@ function fmtSetpointW(s) {
   return `${fmt(s.setpoint_w, 0)} W`
 }
 
-const ROLE_ORDER = { storage: 0, ev_charger: 1, threshold_controlled: 2, consumer: 3, producer: 4, meter: 5 }
+const CATEGORY_ORDER = { battery: 0, charger: 1, thermal_load: 2, switch: 3, consumer: 4, pv: 5, meter: 6, grid_meter: 7 }
 const IDLE_W = 10  // below this magnitude a flow is shown as idle
 
 export default defineComponent({
@@ -64,14 +64,14 @@ export default defineComponent({
       const s = status.value
       if (!s) return []
       const devs = s.devices ?? []
-      if (!devs.some(d => d.role)) return []  // old backend without role info
-      const sum = role => devs
-        .filter(d => d.role === role && d.power_w != null)
+      if (!devs.some(d => d.category)) return []  // backend without category info
+      const sum = category => devs
+        .filter(d => d.category === category && d.power_w != null)
         .reduce((a, d) => a + d.power_w, 0)
 
-      const pv   = sum('producer')
-      const bat  = sum('storage')
-      const ev   = sum('ev_charger')
+      const pv   = sum('pv')
+      const bat  = sum('battery')
+      const ev   = sum('charger')
       const grid = s.grid_power_w ?? 0
       const home = grid - pv - bat - ev
 
@@ -83,12 +83,12 @@ export default defineComponent({
           dir: grid > IDLE_W ? 'importing' : grid < -IDLE_W ? 'exporting' : 'idle',
           cls: grid > IDLE_W ? 'bad' : grid < -IDLE_W ? 'ok' : 'muted' },
       ]
-      if (devs.some(d => d.role === 'storage')) {
+      if (devs.some(d => d.category === 'battery')) {
         tiles.push({ label: 'Battery', w: Math.abs(bat),
           dir: bat > IDLE_W ? 'charging' : bat < -IDLE_W ? 'discharging' : 'idle',
           cls: bat > IDLE_W ? 'ok' : bat < -IDLE_W ? 'accent' : 'muted' })
       }
-      if (devs.some(d => d.role === 'ev_charger')) {
+      if (devs.some(d => d.category === 'charger')) {
         tiles.push({ label: 'EV', w: Math.abs(ev),
           dir: ev > IDLE_W ? 'charging' : 'idle',
           cls: ev > IDLE_W ? 'ok' : 'muted' })
@@ -103,7 +103,7 @@ export default defineComponent({
       return devices.value
         .map(d => ({ ...d, sp: sps.get(d.device_id) }))
         .sort((a, b) =>
-          (ROLE_ORDER[a.role] ?? 9) - (ROLE_ORDER[b.role] ?? 9) ||
+          (CATEGORY_ORDER[a.category] ?? 9) - (CATEGORY_ORDER[b.category] ?? 9) ||
           (a.label ?? a.device_id).localeCompare(b.label ?? b.device_id))
     })
 

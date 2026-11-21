@@ -67,6 +67,12 @@ tariffs:
 
 devices:
 
+  # Every device has a category (what it is: grid_meter, meter, pv, battery,
+  # charger, thermal_load, consumer, …), a plugin type (how to talk to it) and
+  # the plugin's own settings.  Model parameters go under params:, and
+  # metered_by: names the meter a device sits behind — together these build
+  # the metering tree, with the grid meter (Z1) as its root.
+
   # Z1 — Main grid meter at the grid connection point.
   #
   # Reads import (powerImport) and export (powerExport) separately so the
@@ -74,14 +80,13 @@ devices:
   # The heat pump differential uses extra["import_w"] to avoid sign errors
   # when PV is exporting (net power would be negative in that case).
   main_grid_meter:
-    role: meter
-    source:
-      type: generic_iobroker
-      # Tibber live measurement — replace <home-id> with your Tibber Home ID
-      power_import: "tibberlink.0.Homes.<home-id>.LiveMeasurement.powerImport"
-      power_export: "tibberlink.0.Homes.<home-id>.LiveMeasurement.powerExport"
+    category: grid_meter
+    type: generic_iobroker
+    # Tibber live measurement — replace <home-id> with your Tibber Home ID
+    power_import: "tibberlink.0.Homes.<home-id>.LiveMeasurement.powerImport"
+    power_export: "tibberlink.0.Homes.<home-id>.LiveMeasurement.powerExport"
     # Without ioBroker — live Pulse/Watty stream from the Tibber API
-    # (replaces the source block; import/export also land in extra[...]):
+    # (replaces type + the two oids; import/export also land in extra[...]):
     # type: tibber
     # token: !secret tibber_token
     # Or read the Tibber Pulse Bridge on the LAN (no cloud needed; optional
@@ -95,6 +100,16 @@ devices:
     # host: 192.168.1.51
     # profile: iskra_mt175
     tariff: export_tariff
+    # Optional grid connection limit (e.g. main fuse / connection agreement).
+    # The planner keeps planned import below it; the control loop enforces it
+    # every tick by curtailing flexible loads (battery charging, EV instant
+    # charging) — never by discharging a battery.
+    # params:
+    #   max_import_kw: 24
+    #   # Curtailed first → last; unlisted devices follow (storage before EVs).
+    #   curtail_order: [zendure, openwb_chargepoint_5]
+    #   # Release curtailment only this far below the limit (default 5 %).
+    #   limit_hysteresis_kw: 1.0
 
   # Z2 — Household sub-circuit meter.
   #
@@ -102,13 +117,13 @@ devices:
   # In a typical Messkonzept 8 setup this is a dedicated sub-meter.
   # Replace the OID with the one for your physical household meter.
   household_meter:
-    role: meter
-    source:
-      type: generic_iobroker
-      # Example: a SMA Energy Manager or a Shelly EM on the household circuit
-      power: "<your-household-sub-circuit-oid>"
-      # Alternatively, if your meter exposes import only (always ≥ 0):
-      # power: "sma-em.0.<serial>.wirkleistung_bezug"
+    category: meter
+    type: generic_iobroker
+    metered_by: main_grid_meter
+    # Example: a SMA Energy Manager or a Shelly EM on the household circuit
+    power: "<your-household-sub-circuit-oid>"
+    # Alternatively, if your meter exposes import only (always ≥ 0):
+    # power: "sma-em.0.<serial>.wirkleistung_bezug"
     tariff: household_tariff
 
   # HP — Heat pump consumption (Messkonzept 8 derived value).
@@ -123,40 +138,31 @@ devices:
   # min_w: 0.0 clamps the result to ≥ 0 to handle small transient errors
   # where Z2 reads slightly higher than Z1 due to polling time differences.
   heatpump:
-    role: consumer
-    source:
-      type: differential
-      minuend: main_grid_meter
-      minuend_field: "extra.import_w"   # use gross import, not net
-      subtrahend: household_meter
-      subtrahend_field: "power_w"
-      min_w: 0.0
+    category: consumer
+    type: differential
+    metered_by: main_grid_meter
+    minuend: main_grid_meter
+    minuend_field: "extra.import_w"   # use gross import, not net
+    subtrahend: household_meter
+    subtrahend_field: "power_w"
+    min_w: 0.0
     tariff: heatpump_tariff
 
-# ---------------------------------------------------------------------------
-# Topology — physical wiring of meters as a tree
-#
-# The main grid meter (Z1) is the root.  The household meter (Z2) and the
-# derived heat pump load are its direct children.
-# ---------------------------------------------------------------------------
-
-topology:
-  main_grid_meter:
-    # Optional grid connection limit (e.g. main fuse / connection agreement).
-    # The planner keeps planned import below it; the control loop enforces it
-    # every tick by curtailing flexible loads (battery charging, EV instant
-    # charging) — never by discharging a battery.
-    # max_import_kw: 24
-    # Curtailed first → last; unlisted devices follow (storage before EVs).
-    # curtail_order: [zendure, openwb_chargepoint_5]
-    # Release curtailment only this far below the limit (default 5 %).
-    # limit_hysteresis_kw: 1.0
-    children:
-      - household_meter
-      - heatpump
+  # A battery behind the household meter (uncomment and adapt):
+  # home_battery:
+  #   category: battery
+  #   type: zendure
+  #   metered_by: household_meter
+  #   cloud_key: !secret zendure_cloud_key
+  #   product_key: "<product-key>"
+  #   device_key: "<device-key>"
+  #   params:
+  #     capacity_kwh: 8.0
+  #     max_charge_kw: 1.2
+  #     max_discharge_kw: 1.2
 
 # ---------------------------------------------------------------------------
-# Assets — managed objects with targets (EVs, heat stores)  [future]
+# Assets — EV charging targets and threshold loads (see config.yaml.example)
 # ---------------------------------------------------------------------------
 
 assets: {}

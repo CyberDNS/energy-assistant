@@ -4,9 +4,9 @@ Polls ``http://<host>/cm?cmnd=Status 10`` (no cloud, no MQTT broker) and maps
 the sensor JSON to a device reading.  Works for
 
 - IR reading heads on smart meters (Hichi, bitShake, …) running an SML/OBIS
-  script → ``role: meter``;
+  script → ``category: meter``;
 - smart plugs / relays with energy monitoring (the ``ENERGY`` sensor) →
-  ``role: consumer``;
+  ``category: consumer``;
 - any other Tasmota sensor that reports power in its JSON.
 
 The value names come from the device — for meters from the meter script —
@@ -21,7 +21,7 @@ Example config::
     devices:
       # Main grid meter (Z1) via a Tasmota IR head running the MT175 docs script
       - id: main_grid_meter
-        role: meter
+        category: meter
         type: tasmota
         tariff: grid
         host: 192.168.1.20               # IP or hostname
@@ -32,7 +32,7 @@ Example config::
 
       # Same meter, mapped by hand (no profile)
       - id: main_grid_meter
-        role: meter
+        category: meter
         type: tasmota
         host: 192.168.1.20
         fields:
@@ -44,7 +44,7 @@ Example config::
 
       # Smart plug with standard energy monitoring
       - id: dishwasher
-        role: consumer
+        category: consumer
         type: tasmota
         host: 192.168.1.30
         profile: energy                  # ENERGY.Power, ENERGY.Total, Voltage, Current
@@ -79,14 +79,20 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from ...core.models import DeviceRole, parse_device_role
+from ...core.device_model import Capability as Cap
+from ...core.device_model import DeviceCategory
+from ...core.device_model import DeviceCategory as C
 from ...core.plugin_registry import BuildContext, PluginRegistry
 
 _log = logging.getLogger(__name__)
 
 
 def register(registry: PluginRegistry) -> None:
-    registry.register_device("tasmota", _build_device)
+    registry.register_device(
+        "tasmota", _build_device,
+        categories={C.GRID_METER, C.METER, C.PV, C.CONSUMER},
+        provides={Cap.POWER_W},
+    )
 
 
 def _number(cfg: dict[str, Any], key: str, default: float, device_id: str) -> float:
@@ -127,8 +133,8 @@ def _build_device(device_id: str, cfg: dict[str, Any], ctx: BuildContext) -> obj
         _log.warning("Device %r (tasmota): %s — skipping", device_id, exc)
         return None
 
-    role = parse_device_role(cfg.get("role"), default=DeviceRole.CONSUMER)
-    poll_default = 2.0 if role == DeviceRole.METER else 10.0
+    category = DeviceCategory(cfg["category"])
+    poll_default = 2.0 if category.is_meter else 10.0
     poll_interval_s = _number(cfg, "poll_interval_s", poll_default, device_id)
     poller = TasmotaPoller(
         host,
@@ -138,4 +144,4 @@ def _build_device(device_id: str, cfg: dict[str, Any], ctx: BuildContext) -> obj
         poll_interval_s=poll_interval_s,
         stale_after_s=_number(cfg, "stale_after_s", max(30.0, 3 * poll_interval_s), device_id),
     )
-    return TasmotaDevice(device_id=device_id, role=role, poller=poller)
+    return TasmotaDevice(device_id=device_id, category=category, poller=poller)

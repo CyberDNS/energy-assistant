@@ -13,7 +13,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from ...core.models import DeviceCommand, DeviceRole, DeviceState
+from ...core.device_model import DeviceCategory
+from ...core.models import DeviceCommand, DeviceState
 from .bridge import PulseBridgePoller
 
 
@@ -23,12 +24,12 @@ class TibberLocalDevice:
     def __init__(
         self,
         device_id: str,
-        role: DeviceRole,
+        category: DeviceCategory,
         poller: PulseBridgePoller,
         fallback: Any | None = None,
     ) -> None:
         self._device_id = device_id
-        self._role = role
+        self._category = category
         self._poller = poller
         self._fallback = fallback
 
@@ -37,8 +38,8 @@ class TibberLocalDevice:
         return self._device_id
 
     @property
-    def role(self) -> DeviceRole:
-        return self._role
+    def category(self) -> DeviceCategory:
+        return self._category
 
     async def get_state(self) -> DeviceState:
         self._poller.ensure_started()
