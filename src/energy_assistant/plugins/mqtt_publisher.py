@@ -104,7 +104,9 @@ from ..core.price_curve import PriceSlot, current_slot, price_curve_payload
 
 _log = logging.getLogger(__name__)
 
-_BASE = "energy_assistant/ev"
+_BASE = "energy_assistant/vehicle"
+# Above this a charger counts as charging (below: standby / measurement noise).
+_CHARGING_W = 100.0
 _DISC = "homeassistant"
 _STATUS_TOPIC = "energy_assistant/status"
 _SAVINGS_TOPIC = "energy_assistant/kpi/savings"
@@ -217,7 +219,19 @@ class EvMqttPublisher:
         on_set_weekly: Callable[[str, int, dict[str, Any]], Awaitable[None]] | None = None,
         savings_kpis: bool = False,
         devices: list[DiscoveryDevice] | None = None,
+        uid_slugs: Mapping[str, str] | None = None,
+        chargers: list[tuple[str, str]] | None = None,
+        on_select_charger: Callable[[str | None, str | None], Awaitable[None]] | None = None,
+        on_set_guest_mode: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
+        # Vehicle id → id used in unique ids / config topics.  A vehicle that
+        # replaces an asset keeps the asset's, so Home Assistant updates its
+        # existing entities (entity ids, history, area) instead of new ones.
+        self._uid_slugs = dict(uid_slugs or {})
+        # (charger id, label) of every charger, for the charger selects.
+        self._chargers = list(chargers or [])
+        self._on_select_charger = on_select_charger
+        self._on_set_guest_mode = on_set_guest_mode
         self._savings_kpis = savings_kpis
         self._devices = list(devices or [])
         # Discovery configs of device sensors seen so far (topic → payload)
@@ -281,7 +295,7 @@ class EvMqttPublisher:
         goals_by_asset = {g.asset_id: g for g in goals}
         for asset in self._assets:
             goal = goals_by_asset.get(asset.asset_id)
-            state = device_states.get(asset.device_id)
+            state = device_states.get(asset.asset_id)
             staged_for_asset = staged.get(asset.asset_id)
             override_active = asset.asset_id in overrides
             for topic, payload, retain in _build_state_messages(
@@ -311,9 +325,29 @@ class EvMqttPublisher:
         changed values are queued.
         """
         for asset in self._assets:
-            await self._queue_if_changed(
-                _reading_messages(asset, device_states.get(asset.device_id))
-            )
+            label = next((lbl for cid, lbl in self._chargers if cid == asset.device_id), None)
+            vehicle = device_states.get(asset.asset_id)
+            await self._queue_if_changed(_reading_messages(
+                asset, vehicle,
+                device_states.get(asset.device_id) if asset.device_id else None,
+                label,
+            ))
+            if self._chargers:
+                status = vehicle.extra.get("charger_status") if vehicle is not None else None
+                await self._queue_if_changed([(
+                    f"{_BASE}/{asset.asset_id}/charger_select",
+                    _charger_select_state(status, self._chargers),
+                )])
+        if self._chargers:
+            here = next(((lbl, st) for cid, lbl in self._chargers
+                         if (st := device_states.get(cid)) is not None and st.extra.get("guest_here")),
+                        None)
+            mode = here[1].extra.get("guest_mode") if here else None
+            mode_option = next((o for o, m in GUEST_MODE_OPTIONS.items() if m == mode), "PV")
+            await self._queue_if_changed([
+                (f"{_GUEST_BASE}/charger_select", here[0] if here else NO_CHARGER),
+                (f"{_GUEST_BASE}/mode", mode_option),
+            ])
         for device in self._devices:
             state = device_states.get(device.device_id)
             for field in _device_fields_present(device, state):
@@ -421,6 +455,10 @@ class EvMqttPublisher:
                 await client.subscribe(f"{_BASE}/{slug}/deadline_time/set")
                 await client.subscribe(f"{_BASE}/{slug}/override/set")
                 await client.subscribe(f"{_BASE}/{slug}/weekly/+/+/set")
+                await client.subscribe(f"{_BASE}/{slug}/charger_select/set")
+            if self._chargers:
+                await client.subscribe(f"{_GUEST_BASE}/charger_select/set")
+                await client.subscribe(f"{_GUEST_BASE}/mode/set")
                 for topic, payload, retain in _weekly_state_messages(
                     asset, self._weekly_plans.get(slug, {})
                 ):
@@ -454,7 +492,22 @@ class EvMqttPublisher:
                 _log.warning("MQTT command error topic=%r: %s", topic, exc)
 
     async def _dispatch(self, topic: str, payload: str) -> None:
-        # energy_assistant/ev/{asset_id}/{cmd}/set
+        # energy_assistant/guest/charger_select/set
+        if topic == f"{_GUEST_BASE}/charger_select/set":
+            await self._select_charger(None, payload)
+            return
+        if topic == f"{_GUEST_BASE}/mode/set":
+            mode = GUEST_MODE_OPTIONS.get(payload)
+            if mode is None or self._on_set_guest_mode is None:
+                _log.info("MQTT guest mode: %r is not an option", payload)
+                return
+            try:
+                await self._on_set_guest_mode(mode)
+            except ValueError as exc:
+                _log.warning("MQTT guest mode: %s", exc)
+            self._live_states.pop(f"{_GUEST_BASE}/mode", None)
+            return
+        # energy_assistant/vehicle/{vehicle_id}/{cmd}/set
         parts = topic.split("/")
         if len(parts) < 5:
             return
@@ -463,6 +516,10 @@ class EvMqttPublisher:
         asset = next((a for a in self._assets if a.asset_id == asset_id), None)
         if asset is None:
             _log.warning("MQTT command for unknown asset: %r", asset_id)
+            return
+
+        if cmd == "charger_select":
+            await self._select_charger(asset_id, payload)
             return
 
         if cmd == "weekly":
@@ -537,6 +594,24 @@ class EvMqttPublisher:
             _log.info("MQTT stage deadline_time: %r → %s (soc=%.0f%%)", asset_id, dt_utc, soc)
             await self._on_stage(asset_id, soc, dt_utc)
 
+    async def _select_charger(self, vehicle_id: str | None, option: str) -> None:
+        """A car's (``None``: the guest's) charger select was set."""
+        if self._on_select_charger is None:
+            return
+        charger_id = _charger_of_option(option, self._chargers)
+        who = vehicle_id or "guest"
+        if charger_id is False:
+            _log.info("MQTT charger select %s: %r is not a charger", who, option)
+            return
+        _log.info("MQTT charger select: %s → %s", who, charger_id or "none")
+        try:
+            await self._on_select_charger(vehicle_id, charger_id)
+        except ValueError as exc:
+            _log.warning("MQTT charger select %s: %s", who, exc)
+        # Re-publish what it really is on the next tick.
+        topic = f"{_BASE}/{vehicle_id}/charger_select" if vehicle_id else f"{_GUEST_BASE}/charger_select"
+        self._live_states.pop(topic, None)
+
     def _resolve_staged(
         self, asset_id: str, asset: EvChargingAsset, tz: ZoneInfo
     ) -> tuple[float, datetime]:
@@ -554,13 +629,18 @@ class EvMqttPublisher:
 
     async def _publish_discovery(self, client: aiomqtt.Client) -> None:
         for asset in self._assets:
+            uid = self._uid_slugs.get(asset.asset_id, asset.asset_id)
             device = {
-                "identifiers": [f"energy_assistant_ev_{asset.asset_id}"],
+                "identifiers": [f"energy_assistant_ev_{uid}"],
                 "name": asset.label,
                 "manufacturer": "Energy Assistant",
-                "model": "EV Charger",
+                "model": "Vehicle",
             }
-            for config_topic, config_payload in _discovery_configs(asset, device):
+            for config_topic, config_payload in _discovery_configs(asset, device, uid, self._chargers):
+                await client.publish(config_topic, json.dumps(config_payload), retain=True)
+        if self._chargers:
+            for config_topic, config_payload in (_guest_select_config(self._chargers),
+                                                 _guest_mode_select_config()):
                 await client.publish(config_topic, json.dumps(config_payload), retain=True)
         for config_topic, config_payload in _price_discovery_configs():
             await client.publish(config_topic, json.dumps(config_payload), retain=True)
@@ -582,10 +662,14 @@ class EvMqttPublisher:
 # ------------------------------------------------------------------
 
 def _discovery_configs(
-    asset: EvChargingAsset, device: dict
+    asset: EvChargingAsset, device: dict, uid: str | None = None,
+    chargers: list[tuple[str, str]] | None = None,
 ) -> list[tuple[str, dict]]:
-    slug = asset.asset_id
-    base = f"{_BASE}/{slug}"
+    """Discovery configs of one vehicle.  *uid* is the id used in unique ids
+    and config topics (default: the vehicle id) — kept from the former asset
+    id so Home Assistant keeps its entities (see ``EvMqttPublisher``)."""
+    slug = uid or asset.asset_id
+    base = f"{_BASE}/{asset.asset_id}"
     # Bridge-only availability for entities that don't depend on live data
     # (goal, mode, setters); data-gated availability for the live readings.
     bridge_avail = {"availability_topic": _STATUS_TOPIC}
@@ -773,8 +857,118 @@ def _discovery_configs(
         },
     ))
 
-    configs.extend(_weekly_discovery_configs(asset, device))
+    configs.append((
+        f"{_DISC}/sensor/ea_ev_{slug}_charging_power/config",
+        {
+            "unique_id": f"ea_ev_{slug}_charging_power",
+            "name": "Charging Power",
+            "device": device,
+            "state_topic": f"{base}/charging_power",
+            **bridge_avail,
+            "unit_of_measurement": "kW",
+            "device_class": "power",
+            "state_class": "measurement",
+            "suggested_display_precision": 1,
+        },
+    ))
+    configs.append((
+        f"{_DISC}/binary_sensor/ea_ev_{slug}_charging_now/config",
+        {
+            "unique_id": f"ea_ev_{slug}_charging_now",
+            "name": "Charging Now",
+            "device": device,
+            "state_topic": f"{base}/charging_now",
+            **bridge_avail,
+            "payload_on": "ON",
+            "payload_off": "OFF",
+            "device_class": "battery_charging",
+        },
+    ))
+    configs.append((
+        f"{_DISC}/sensor/ea_ev_{slug}_location/config",
+        {
+            "unique_id": f"ea_ev_{slug}_location",
+            "name": "Location",
+            "device": device,
+            "state_topic": f"{base}/location",
+            **bridge_avail,
+            "icon": "mdi:map-marker-radius",
+        },
+    ))
+    if chargers:
+        configs.append((
+            f"{_DISC}/select/ea_ev_{slug}_charger/config",
+            {
+                "unique_id": f"ea_ev_{slug}_charger",
+                "name": "Charger",
+                "device": device,
+                "state_topic": f"{base}/charger_select",
+                "command_topic": f"{base}/charger_select/set",
+                "options": _charger_options(chargers),
+                **bridge_avail,
+                "icon": "mdi:ev-station",
+            },
+        ))
+
+    configs.extend(_weekly_discovery_configs(asset, device, slug))
     return configs
+
+
+#: Option of a charger select: no charger.
+NO_CHARGER = "No charger"   # not "None": HA treats that select payload as unknown
+_GUEST_BASE = "energy_assistant/guest"
+
+
+def _charger_options(chargers: list[tuple[str, str]]) -> list[str]:
+    return [label for _cid, label in chargers] + [NO_CHARGER]
+
+
+def _charger_select_state(status: dict | None, chargers: list[tuple[str, str]]) -> str:
+    """The select's option for a car's charger status (``SessionManager.status``):
+    the charger it is at, selected for or defaults to; ``None`` when it has none
+    or its default charger is taken by another car."""
+    if not status or status.get("state") not in ("plugged", "selected", "default"):
+        return NO_CHARGER
+    return next((label for cid, label in chargers if cid == status.get("charger_id")), NO_CHARGER)
+
+
+def _charger_of_option(option: str, chargers: list[tuple[str, str]]) -> str | None | bool:
+    """Charger id of *option*, ``None`` for no charger, ``False`` if unknown."""
+    if option == NO_CHARGER:
+        return None
+    return next((cid for cid, label in chargers if label == option), False)
+
+
+#: Options of the guest car's mode select → the app's guest mode.
+GUEST_MODE_OPTIONS = {"PV": "pv_only", "Charge now": "instant"}
+
+
+def _guest_mode_select_config() -> tuple[str, dict]:
+    """Select on the site device: how the guest car charges."""
+    return (f"{_DISC}/select/ea_guest_mode/config", {
+        "unique_id": "ea_guest_mode",
+        "name": "Guest car mode",
+        "device": _SITE_DEVICE,
+        "state_topic": f"{_GUEST_BASE}/mode",
+        "command_topic": f"{_GUEST_BASE}/mode/set",
+        "options": list(GUEST_MODE_OPTIONS),
+        "availability_topic": _STATUS_TOPIC,
+        "icon": "mdi:solar-power-variant",
+    })
+
+
+def _guest_select_config(chargers: list[tuple[str, str]]) -> tuple[str, dict]:
+    """Select on the site device: the charger a guest car charges at (or will)."""
+    return (f"{_DISC}/select/ea_guest_charger/config", {
+        "unique_id": "ea_guest_charger",
+        "name": "Guest car charger",
+        "device": _SITE_DEVICE,
+        "state_topic": f"{_GUEST_BASE}/charger_select",
+        "command_topic": f"{_GUEST_BASE}/charger_select/set",
+        "options": [NO_CHARGER] + [label for _cid, label in chargers],
+        "availability_topic": _STATUS_TOPIC,
+        "icon": "mdi:account-clock",
+    })
 
 
 def _price_discovery_configs() -> list[tuple[str, dict]]:
@@ -839,13 +1033,13 @@ def _savings_discovery_configs() -> list[tuple[str, dict]]:
 
 
 def _weekly_discovery_configs(
-    asset: EvChargingAsset, device: dict
+    asset: EvChargingAsset, device: dict, uid: str | None = None
 ) -> list[tuple[str, dict]]:
     """Number + time + switch per weekday, editing the weekly plan directly."""
-    slug = asset.asset_id
+    slug = uid or asset.asset_id
     configs: list[tuple[str, dict]] = []
     for key, day in zip(_WEEKDAY_KEYS, _WEEKDAY_NAMES):
-        topic = f"{_BASE}/{slug}/weekly/{key}"
+        topic = f"{_BASE}/{asset.asset_id}/weekly/{key}"
         uid = f"ea_ev_{slug}_weekly_{key}"
 
         def common(field: str, name: str) -> dict:
@@ -971,12 +1165,17 @@ def _build_state_messages(
 
 
 def _reading_messages(
-    asset: EvChargingAsset, state: DeviceState | None
+    asset: EvChargingAsset,
+    state: DeviceState | None,
+    charger: DeviceState | None = None,
+    charger_label: str | None = None,
 ) -> list[tuple[str, str]]:
-    """Return the live-reading (topic, payload) messages for one asset.
+    """Return the live-reading (topic, payload) messages for one vehicle.
 
-    All retained.  Topics without a value are left out (the broker keeps
-    the last one, hidden behind the matching availability topic).
+    *state* is the vehicle's (SoC with the estimate, range); *charger* the
+    state of the charger it is at, if any (plug state).  All retained.
+    Topics without a value are left out (the broker keeps the last one,
+    hidden behind the matching availability topic).
     """
     base = f"{_BASE}/{asset.asset_id}"
     # Data availability: we could read the chargepoint (have a SoC).  This is
@@ -994,9 +1193,16 @@ def _reading_messages(
     if range_km is not None:
         msgs.append((f"{base}/range", f"{range_km:.0f}"))
 
-    plugged = state.extra.get("plugged") if state is not None else None
+    # Plugged in = at one of our chargers with the cable in; away = not.
+    plugged = charger.extra.get("plugged") if charger is not None else False
     if plugged is not None:
         msgs.append((f"{base}/plugged", "ON" if plugged else "OFF"))
+    # Where the car is and what it draws there (0 / OFF when away), so a
+    # dashboard tile follows the car to whichever charger it is at.
+    msgs.append((f"{base}/location", (charger_label or asset.device_id) if asset.device_id else "away"))
+    power_w = (charger.power_w or 0.0) if charger is not None else 0.0
+    msgs.append((f"{base}/charging_power", f"{max(power_w, 0.0) / 1000:.2f}"))
+    msgs.append((f"{base}/charging_now", "ON" if power_w > _CHARGING_W else "OFF"))
     return msgs
 
 

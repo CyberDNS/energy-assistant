@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 import pytest
 
@@ -13,7 +14,6 @@ from energy_assistant.plugins.openwb_mqtt import device as device_module
 from energy_assistant.plugins.openwb_mqtt.device import (
     OpenWBMqttBridge,
     OpenWBMqttDevice,
-    _range_km,
 )
 
 
@@ -29,6 +29,7 @@ class FakeBridge:
     def __init__(self, values: dict[tuple[str, str], str] | None = None) -> None:
         self.values_map = dict(values or {})
         self.published: list[tuple[str, str, str]] = []  # (cp_id, key, payload)
+        self.raw: list[tuple[str, str]] = []             # (subtopic, payload)
         self.connected = True
 
     def ensure_started(self) -> None:
@@ -46,6 +47,9 @@ class FakeBridge:
         if not self.connected:
             raise ConnectionError("not connected")
         self.published.append((cp_id, "template", template_json))
+
+    async def publish(self, subtopic: str, payload: str) -> None:
+        self.raw.append((subtopic, payload))
 
 
 def _template(current: int = 10, selected: str = "soc", soc: int = 90) -> str:
@@ -83,8 +87,8 @@ def _cmd(value: float) -> DeviceCommand:
 
 @pytest.mark.asyncio
 async def test_get_state_maps_simpleapi_values() -> None:
-    # Payloads as observed on a live openWB 2.x: SoC nested under soc/soc,
-    # Python-style booleans, long chargemode names.
+    # Payloads as observed on a live openWB 2.x: Python-style booleans, long
+    # chargemode names.  The car's SoC is not read here (vehicle device).
     bridge = FakeBridge({
         ("5", "soc/soc"): "58",
         ("5", "power"): "10850",
@@ -93,68 +97,49 @@ async def test_get_state_maps_simpleapi_values() -> None:
     })
     state = await _device(bridge).get_state()
 
-    assert state.soc_pct == 58.0
+    assert state.soc_pct is None
     assert state.power_w == 10850.0
     assert state.available is True
-    assert state.extra == {"plugged": True, "chargemode": "pv", "range_km": None}
+    assert state.extra == {"plugged": True, "chargemode": "pv"}
 
 
 @pytest.mark.asyncio
-async def test_get_state_reads_vehicle_range() -> None:
+async def test_get_state_reports_openwb_vehicle_assignment() -> None:
     bridge = FakeBridge({
-        ("5", "soc/soc"): "70",
-        ("5", "soc/range"): "342",
-        ("5", "soc/range_unit"): "km",
         ("5", "plug_state"): "True",
+        ("5", "connected_vehicle"): '{"id": 1, "name": "Banzert"}',
     })
-    state = await _device(bridge).get_state()
-    assert state.extra["range_km"] == 342.0
+    device = _device(bridge)
+    assert device.assigned_vehicle_id == 1
+    assert (await device.get_state()).extra["charger_vehicle_id"] == 1
 
 
 @pytest.mark.asyncio
-async def test_get_state_range_null_when_not_reported() -> None:
-    # SoC module without range data → openWB publishes JSON null
-    bridge = FakeBridge({
-        ("5", "soc/soc"): "100",
-        ("5", "soc/range"): "null",
-        ("5", "plug_state"): "True",
-    })
-    state = await _device(bridge).get_state()
-    assert state.extra["range_km"] is None
-
-
-def test_range_km_parsing() -> None:
-    assert _range_km("365", "km") == 365.0
-    assert _range_km("342", None) == 342.0
-    assert _range_km("null", "km") is None
-    assert _range_km("-1", "km") is None
-    assert round(_range_km("100", '"mi"'), 1) == 160.9
-
-
-@pytest.mark.asyncio
-async def test_get_state_falls_back_to_pro_soc() -> None:
-    bridge = FakeBridge({
-        ("5", "soc/soc"): "null",  # vehicle SoC unavailable (JSON null payload)
-        ("5", "pro_soc"): "63",
-        ("5", "plug_state"): "True",
-    })
-    state = await _device(bridge).get_state()
-    assert state.soc_pct == 63.0
-    assert state.available is True
-
-
-@pytest.mark.asyncio
-async def test_get_state_unavailable_when_unplugged_or_no_soc() -> None:
-    bridge = FakeBridge({("5", "soc/soc"): "42", ("5", "plug_state"): "False"})
+async def test_get_state_available_iff_plugged() -> None:
+    bridge = FakeBridge({("5", "plug_state"): "False"})
     assert (await _device(bridge).get_state()).available is False
+    bridge = FakeBridge({("5", "plug_state"): "True"})  # no SoC needed any more
+    assert (await _device(bridge).get_state()).available is True
 
-    bridge = FakeBridge({("5", "plug_state"): "True"})  # no SoC
-    assert (await _device(bridge).get_state()).available is False
+
+@pytest.mark.asyncio
+async def test_push_vehicle_soc_and_assign_vehicle_topics() -> None:
+    bridge = FakeBridge()
+    device = _device(bridge)
+    at = datetime(2026, 11, 20, 18, 0, tzinfo=UTC)
+    await device.push_vehicle_soc(1, 42.36, 135.4, at)
+    await device.assign_vehicle(3)
+    assert bridge.raw == [
+        ("set/mqtt/vehicle/1/get/soc", "42.4"),
+        ("set/mqtt/vehicle/1/get/range", "135"),
+        ("set/mqtt/vehicle/1/get/soc_timestamp", f"{at.timestamp():.0f}"),
+        ("set/chargepoint/5/config/ev", "3"),
+    ]
 
 
 @pytest.mark.asyncio
 async def test_get_state_unavailable_when_bridge_disconnected() -> None:
-    bridge = FakeBridge({("5", "soc/soc"): "42", ("5", "plug_state"): "True"})
+    bridge = FakeBridge({("5", "plug_state"): "True"})
     bridge.connected = False
     assert (await _device(bridge).get_state()).available is False
 
@@ -292,11 +277,13 @@ def test_bridge_store_parses_chargepoint_topics() -> None:
     bridge._store("openwbmaster/simpleAPI/chargepoint/5/powers/1", b"3600")
     bridge._store("openwbmaster/simpleAPI/counter/0/power", b"999")  # not a chargepoint
     bridge._store("openwbmaster/chargepoint/5/set/charge_template", b'{"id": 1}')
+    bridge._store("openwbmaster/chargepoint/5/get/connected_vehicle/info", b'{"id": 3}')
     bridge._store("other/topic", b"x")
 
     assert bridge.value("5", "soc/soc") == "42"
     assert bridge.value("5", "powers/1") == "3600"
     assert bridge.value("5", "charge_template") == '{"id": 1}'
+    assert bridge.value("5", "connected_vehicle") == '{"id": 3}'
     assert bridge.value("0", "power") is None
 
 
@@ -314,7 +301,6 @@ async def test_hours_old_retained_values_still_served(monkeypatch) -> None:
     bridge._cache = {k: (v, ts - 7200.0) for k, (v, ts) in bridge._cache.items()}
 
     state = await OpenWBMqttDevice("wallbox", bridge, chargepoint_id=5).get_state()
-    assert state.soc_pct == 42.0
     assert state.extra["plugged"] is True
 
 

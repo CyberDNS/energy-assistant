@@ -7,13 +7,9 @@ through Home Assistant.  Topic layout (root topic configurable, e.g.
 Read (subscribed, cached by the shared bridge; verified against a live
 openWB 2.x installation — the wiki docs differ in places):
   {root}/simpleAPI/chargepoint/{id}/power       → charging power (W)
-  {root}/simpleAPI/chargepoint/{id}/soc/soc     → vehicle SoC (%) — nested,
-                                                  NOT a scalar 'soc' topic
-  {root}/simpleAPI/chargepoint/{id}/soc/range   → vehicle range (unit in
-                                                  soc/range_unit, normally km);
-                                                  "null" when the SoC module
-                                                  provides no range
   {root}/simpleAPI/chargepoint/{id}/plug_state  → cable plugged ("True"/"False")
+  {root}/chargepoint/{id}/get/connected_vehicle/info → openWB's assigned vehicle
+                                                  ({"id": 1, "name": …})
   {root}/simpleAPI/chargepoint/{id}/chargemode  → long names: instant_charging|
                                                   pv_charging|stop|…
   {root}/simpleAPI/chargepoint/{id}/charge_state→ charging active (bool)
@@ -22,6 +18,15 @@ Write (published on command):
   {root}/simpleAPI/set/chargepoint/{id}/chargemode  → instant|pv|stop
   {root}/set/chargepoint/{id}/set/charge_template   → full template JSON with
       chargemode.instant_charging.{current, limit.selected, limit.soc} updated
+
+Vehicles (``push_vehicle_soc`` / ``assign_vehicle``, see ``core/vehicles.py``):
+  {root}/set/mqtt/vehicle/{vid}/get/soc, …/range, …/soc_timestamp
+      → the vehicle's SoC for openWB's "MQTT" SoC module (vid = openWB's
+        vehicle id, from the vehicle's ``charger_ids: {openwb_mqtt: vid}``)
+  {root}/set/chargepoint/{id}/config/ev → openWB's assigned vehicle
+
+The car's SoC is not read here: it belongs to the vehicle device, and the
+session logic lays it over the charger's state.
 
 The ``set_power_w`` sentinel encoding is identical to the HA-based plugin
 (see ``assets/ev.py``):  >500 W → instant, 0<x≤500 W → pv, 0 → stop.
@@ -61,6 +66,7 @@ import asyncio
 import json
 import logging
 import time
+from datetime import UTC, datetime
 from typing import Any
 
 import aiomqtt
@@ -91,21 +97,7 @@ def _to_bool(value: Any) -> bool:
     return str(value).strip().lower() in ("1", "true", "on", "yes")
 
 
-_MILES_TO_KM = 1.609344
 
-
-def _range_km(value: Any, unit: str | None) -> float | None:
-    """Vehicle range in km from ``soc/range`` + ``soc/range_unit``.
-
-    openWB publishes ``null`` when the vehicle's SoC module delivers no
-    range; the unit is a global openWB setting (``km`` or ``mi``).
-    """
-    rng = _to_float(value)
-    if rng is None or rng < 0:
-        return None
-    if unit is not None and unit.strip().strip('"').lower() in ("mi", "miles"):
-        return rng * _MILES_TO_KM
-    return rng
 
 
 # Read topic reports long mode names; the set topic expects short ones.
@@ -192,6 +184,13 @@ class OpenWBMqttBridge:
         topic = f"{self._root}/simpleAPI/set/chargepoint/{chargepoint_id}/{key}"
         await client.publish(topic, payload)
 
+    async def publish(self, subtopic: str, payload: str) -> None:
+        """Publish *payload* to ``{root}/{subtopic}``."""
+        client = self._client
+        if client is None:
+            raise ConnectionError(f"MQTT bridge {self._root!r} not connected")
+        await client.publish(f"{self._root}/{subtopic}", payload)
+
     async def publish_charge_template(self, chargepoint_id: str, template_json: str) -> None:
         """Publish a full charge template to
         ``{root}/set/chargepoint/{id}/set/charge_template`` (the topic the
@@ -232,6 +231,8 @@ class OpenWBMqttBridge:
             # Retained per-chargepoint temporary charge template — needed for
             # the atomic template writes (current / SoC limit).
             await client.subscribe(f"{self._root}/chargepoint/+/set/charge_template")
+            # openWB's own vehicle assignment (checked against our sessions).
+            await client.subscribe(f"{self._root}/chargepoint/+/get/connected_vehicle/info")
             self._client = client
             _log.info(
                 "openWB MQTT bridge connected to %s:%d (root=%r)",
@@ -256,13 +257,15 @@ class OpenWBMqttBridge:
             return
 
         # {root}/chargepoint/{id}/set/charge_template → cached under the
-        # synthetic key "charge_template"
+        # synthetic key "charge_template"; …/get/connected_vehicle/info
+        # under "connected_vehicle"
         prefix = f"{self._root}/chargepoint/"
-        suffix = "/set/charge_template"
-        if topic.startswith(prefix) and topic.endswith(suffix):
-            cp_id = topic[len(prefix):-len(suffix)]
-            if cp_id and "/" not in cp_id:
-                self._cache[(cp_id, "charge_template")] = (text, time.monotonic())
+        for suffix, key in (("/set/charge_template", "charge_template"),
+                            ("/get/connected_vehicle/info", "connected_vehicle")):
+            if topic.startswith(prefix) and topic.endswith(suffix):
+                cp_id = topic[len(prefix):-len(suffix)]
+                if cp_id and "/" not in cp_id:
+                    self._cache[(cp_id, key)] = (text, time.monotonic())
 
 
 # Shared bridges keyed by (host, port, root_topic) so multiple chargepoints
@@ -357,25 +360,51 @@ class OpenWBMqttDevice:
         """Return the latest cached simpleAPI values for this chargepoint."""
         self._bridge.ensure_started()
 
-        # Vehicle SoC lives in the nested soc/soc topic; pro_soc (direct
-        # chargepoint reading, Pro hardware only) is the fallback.
-        soc_pct = _to_float(self._value("soc/soc"))
-        if soc_pct is None:
-            soc_pct = _to_float(self._value("pro_soc"))
         power_w = _to_float(self._value("power"))
         plug_raw = self._value("plug_state")
         plugged = _to_bool(plug_raw) if plug_raw is not None else False
         mode = _normalize_mode(self._value("chargemode"))
-        range_km = _range_km(self._value("soc/range"), self._value("soc/range_unit"))
 
-        available = self._bridge.connected and plugged and soc_pct is not None
+        # "available" = a car is connected and the broker is reachable; the
+        # car's SoC comes from the vehicle device (see core/vehicles.py).
+        available = self._bridge.connected and plugged
+        extra: dict[str, Any] = {"plugged": plugged, "chargemode": mode}
+        if (vid := self.assigned_vehicle_id) is not None:
+            extra["charger_vehicle_id"] = vid
         return DeviceState(
             device_id=self._device_id,
             power_w=power_w,
-            soc_pct=soc_pct,
             available=available,
-            extra={"plugged": plugged, "chargemode": mode, "range_km": range_km},
+            extra=extra,
         )
+
+    @property
+    def assigned_vehicle_id(self) -> int | None:
+        """The vehicle openWB itself has assigned to this chargepoint."""
+        raw = self._bridge.value(self._cp_id, "connected_vehicle")
+        if raw is None:
+            return None
+        try:
+            vid = json.loads(raw).get("id")
+        except (ValueError, AttributeError):
+            return None
+        return vid if isinstance(vid, int) and not isinstance(vid, bool) else None
+
+    async def push_vehicle_soc(
+        self, vehicle_id: int | str, soc_pct: float, range_km: float | None,
+        reported_at: datetime | None,
+    ) -> None:
+        """Publish a vehicle's SoC for openWB's MQTT SoC module."""
+        base = f"set/mqtt/vehicle/{vehicle_id}/get"
+        await self._bridge.publish(f"{base}/soc", f"{soc_pct:.1f}")
+        if range_km is not None:
+            await self._bridge.publish(f"{base}/range", f"{range_km:.0f}")
+        ts = (reported_at or datetime.now(UTC)).timestamp()
+        await self._bridge.publish(f"{base}/soc_timestamp", f"{ts:.0f}")
+
+    async def assign_vehicle(self, vehicle_id: int | str) -> None:
+        """Set openWB's assigned vehicle of this chargepoint."""
+        await self._bridge.publish(f"set/chargepoint/{self._cp_id}/config/ev", str(vehicle_id))
 
     async def send_command(self, command: DeviceCommand) -> None:
         """Translate a ``set_power_w`` sentinel into simpleAPI set topics."""

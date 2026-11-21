@@ -4,6 +4,7 @@ import {
   startForceCharge, stopForceCharge, disableChargepoint, enableChargepoint,
 } from '../api.js'
 import { markPlanning } from '../composables/useStatus.js'
+import ChargerSelect from './ChargerSelect.js'
 
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
@@ -27,7 +28,14 @@ function dayLabel(dateStr) {
 
 export default defineComponent({
   name: 'EvCard',
-  props: { ev: { type: Object, required: true } },
+  components: { ChargerSelect },
+  props: {
+    ev: { type: Object, required: true },
+    // /api/chargers — the options of the charger selector (none: no selector).
+    chargers: { type: Array, default: () => [] },
+    // Fold the card to name, SoC and target on narrow screens (tap to open).
+    collapsible: { type: Boolean, default: false },
+  },
   emits: ['refresh'],
 
   setup(props, { emit }) {
@@ -49,6 +57,25 @@ export default defineComponent({
     const forceSoc  = ref(props.ev.charge_limit_soc_pct ?? 90)
 
     const forceActive = computed(() => props.ev.force_charge != null)
+
+    // An away car's next target (the first day ahead with one).
+    const nextTarget = computed(() => (props.ev.next_days ?? []).find(
+      d => !d.passed && d.source !== 'skip' && d.target_soc_pct != null) ?? null)
+
+    let narrow = false
+    try { narrow = window.matchMedia('(max-width: 760px)').matches } catch { /* no matchMedia */ }
+    const open = ref(!(props.collapsible && narrow))
+
+    // The car reports its SoC every 15–60 min; in between it is estimated
+    // from the charger's energy.
+    const socTitle = computed(() => {
+      const at = props.ev.soc_reported_at
+      if (props.ev.soc_reported_pct == null || !at) return 'SoC reported by the vehicle'
+      const when = new Date(at).toLocaleString(undefined, { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short' })
+      return props.ev.soc_estimated
+        ? `Estimated: the car reported ${fmt(props.ev.soc_reported_pct)}% at ${when}, plus the energy charged since`
+        : `Reported by the vehicle at ${when}`
+    })
 
     const socColor = computed(() => {
       const soc = props.ev.soc_pct
@@ -151,7 +178,7 @@ export default defineComponent({
     const onEnable  = () => withBusy(() => enableChargepoint(props.ev.asset_id))
 
     return {
-      busy, errMsg, socColor, fmt, fmtDeadline, dayLabel, WEEKDAYS,
+      busy, errMsg, socColor, socTitle, nextTarget, open, fmt, fmtDeadline, dayLabel, WEEKDAYS,
       editDay, editDaySoc, editDayTime, openDayEditor, onSkipDay, onSaveDay, onRevertDay,
       weeklyOpen, weeklyRows, weeklyDirty, toggleWeekly, onSaveWeekly,
       forceOpen, forceSoc, forceActive, openForce, onStartForce, onStopForce,
@@ -162,21 +189,24 @@ export default defineComponent({
   template: `
     <div class="ev-card">
 
-      <!-- Header -->
-      <div class="ev-card-header">
-        <span class="ev-label">
-          {{ ev.label }}
-          <span class="ev-device-id">{{ ev.device_id }}</span>
-        </span>
+      <!-- Header: the car, and in one quiet line where it is -->
+      <div :class="['ev-card-header', { 'is-toggle': collapsible }]" @click="collapsible && (open = !open)">
+        <span class="ev-label">{{ ev.label }}</span>
         <span v-if="forceActive" class="pill pill-warn">⚡ force charging</span>
-        <span :class="['pill', ev.connected ? 'pill-ok' : 'pill-off']">
-          {{ ev.connected ? 'Connected' : 'Disconnected' }}
-        </span>
+        <button v-if="collapsible" type="button" class="ev-toggle" :aria-expanded="open"
+          :aria-label="open ? 'Collapse' : 'Expand'" @click.stop="open = !open">{{ open ? '▲' : '▼' }}</button>
       </div>
+
+      <!-- Charger: where it charges (the last selection wins) -->
+      <ChargerSelect v-if="chargers.length" :who="ev.vehicle_id" :status="ev.charger_status"
+                     :chargers="chargers" @refresh="$emit('refresh')" />
+      <span v-else-if="!ev.charger_id" class="ev-where">away</span>
 
       <!-- SoC bar -->
       <div class="ev-soc-row">
-        <span class="ev-soc-num">{{ ev.soc_pct != null ? fmt(ev.soc_pct) + '%' : '—' }}</span>
+        <span class="ev-soc-num" :title="socTitle">
+          {{ ev.soc_pct != null ? fmt(ev.soc_pct) + '%' : '—' }}<span v-if="ev.soc_estimated" class="ev-soc-est">est.</span>
+        </span>
         <div class="ev-soc-bar">
           <div v-if="ev.soc_pct != null" class="ev-soc-fill"
             :style="{ width: Math.min(ev.soc_pct, 100) + '%', background: socColor }">
@@ -193,6 +223,14 @@ export default defineComponent({
         <template v-if="forceActive">
           Force charging to <strong>{{ fmt(ev.force_charge.target_soc_pct) }}%</strong> at full speed
         </template>
+        <template v-else-if="!ev.charger_id">
+          <template v-if="nextTarget">
+            Next <strong>{{ fmt(nextTarget.target_soc_pct) }}%</strong>
+            by <strong>{{ dayLabel(nextTarget.date) }}, {{ nextTarget.target_by }}</strong>
+          </template>
+          <template v-else>No target this week</template>
+          <span class="ev-where">· charges when plugged in</span>
+        </template>
         <template v-else-if="ev.goal">
           Target <strong>{{ fmt(ev.goal.target_soc_pct) }}%</strong>
           by <strong>{{ fmtDeadline(ev.goal.target_by) }}</strong>
@@ -201,6 +239,7 @@ export default defineComponent({
         <span v-if="ev.disabled" class="pill pill-off">disabled</span>
       </div>
 
+      <template v-if="open">
       <!-- Next 7 days strip -->
       <div class="ev-days">
         <button v-for="(day, i) in (ev.next_days ?? [])" :key="day.date"
@@ -295,6 +334,8 @@ export default defineComponent({
           </div>
         </div>
       </div>
+
+      </template>
 
       <div v-if="errMsg" class="ev-error">{{ errMsg }}</div>
     </div>

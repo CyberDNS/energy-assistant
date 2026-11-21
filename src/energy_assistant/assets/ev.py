@@ -322,6 +322,11 @@ class EvChargerContributor:
     The active goal is injected externally via ``update_goal()`` — the
     planning loop calls this after each optimizer run and whenever a UI
     override is applied.
+
+    One contributor per charger.  The car it charges changes with the
+    charging session (``set_asset``); for a car that is not a configured
+    vehicle (a guest) ``set_guest_mode`` decides: ``pv_only`` charges from PV
+    surplus only, ``instant`` charges at full power, ``off`` doesn't charge.
     """
 
     # Marks EV contributors for the control loop's PV-priority resolution
@@ -333,6 +338,7 @@ class EvChargerContributor:
         self._active_goal: EvChargingGoal | None = None
         self._disabled: bool = False
         self._force_target_soc: float | None = None
+        self._guest_mode: str | None = None
         # (setpoint, reason) last logged — only log on change so the normal
         # 30 s control tick doesn't spam the log while nothing changed.
         self._last_logged: tuple[float | None, str] | None = None
@@ -340,6 +346,22 @@ class EvChargerContributor:
     @property
     def device_id(self) -> str:
         return self._asset.device_id
+
+    @property
+    def asset(self) -> EvChargingAsset:
+        return self._asset
+
+    def set_asset(self, asset: EvChargingAsset) -> None:
+        """The car now at this charger (its ``device_id`` must be this charger)."""
+        if asset.device_id != self._asset.device_id:
+            raise ValueError(f"asset {asset.asset_id!r} is not at charger {self.device_id!r}")
+        if asset.asset_id != self._asset.asset_id:
+            self._active_goal = None
+        self._asset = asset
+
+    def set_guest_mode(self, mode: str | None) -> None:
+        """``pv_only`` / ``instant`` / ``off`` for a guest car; ``None`` for a known vehicle."""
+        self._guest_mode = mode
 
     def update_goal(self, goal: EvChargingGoal | None) -> None:
         """Replace the current charging goal (called by the planning loop)."""
@@ -410,6 +432,13 @@ class EvChargerContributor:
         if state is None or not state.available:
             # car not connected — don't send any command
             return self._decide(None, "not connected")
+
+        if self._guest_mode == "off":
+            return self._decide(_STOP_W, "guest car — guest_mode off")
+        if self._guest_mode == "instant":
+            return self._decide(
+                self._asset.max_charge_kw * 1000.0, "guest car — guest_mode instant",
+            )
 
         goal = self._active_goal
         current_soc = state.soc_pct if state.soc_pct is not None else 0.0

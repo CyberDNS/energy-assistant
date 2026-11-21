@@ -43,7 +43,7 @@ import logging
 import os
 import time
 from collections import defaultdict
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -62,9 +62,9 @@ from ..assets.ev import (
     EvWeeklyTarget,
     default_weekly_target,
 )
+from ..assets.fleet import VehicleFleet
 from ..assets.loader import (
     asset_zoneinfo,
-    parse_ev_assets,
     parse_threshold_assets,
     resolve_active_goals,
     upcoming_days,
@@ -87,6 +87,7 @@ from ..core.forecast import ForecastProvider
 from ..core.grid_limit import GridLimit
 from ..core.ledger import BatteryCostLedger
 from ..core.models import (
+    DeviceState,
     EnergyPlan,
     ForecastPoint,
     ForecastQuantity,
@@ -114,6 +115,7 @@ from ..core.savings import (
 )
 from ..core.tariff import TariffModel
 from ..core.topology import TopologyNode
+from ..core.vehicles import MANUAL, ChargingSession, SessionChange
 from ..loader.device_loader import (
     build,
     build_device_forecast_map,
@@ -137,6 +139,8 @@ _log = logging.getLogger(__name__)
 
 # How often expired history rows are purged from SQLite.
 _RETENTION_INTERVAL_S = 3600.0
+# Shortest interval between two SoC pushes of one vehicle to its charger system.
+_SOC_PUSH_MIN_INTERVAL_S = 60.0
 
 # A persisted shadow-site state older than this is discarded on startup: the
 # unplanned site then restarts level with the real one instead of carrying a
@@ -558,8 +562,15 @@ class Application:
         self._dry_run_log_gate = ChangeGate()
         self._first_poll_done: asyncio.Event
         self._api: FastAPI
+        # One asset per vehicle, kept in place (other components hold the
+        # list); device_id = the charger it is at, "" when away.
         self._ev_assets: list[EvChargingAsset] = []
         self._ev_contributors: list[EvChargerContributor] = []
+        self._fleet: VehicleFleet
+        # Last SoC pushed to a charger system per vehicle, and when.
+        self._soc_pushed: dict[str, tuple[float, Any, float]] = {}
+        # Last refresh-button press per vehicle (monotonic seconds).
+        self._refresh_pressed: dict[str, float] = {}
         self._threshold_constraints: list[ThresholdConstraints] = []
         self._thermal_learners: dict[str, Any] = {}
         self._efficiency_learners: dict[str, Any] = {}
@@ -567,9 +578,6 @@ class Application:
         self._ev_weekly_plans: dict[str, dict[int, EvWeeklyTarget]] = {}
         self._ev_day_overrides: dict[str, dict[date, EvDayOverride]] = {}
         self._ev_force_charge: dict[str, float] = {}
-        # Last seen plugged state per asset — detects the plugged→unplugged
-        # transition that cancels an active force charge.
-        self._ev_prev_plugged: dict[str, bool] = {}
         # When each car was plugged in (None = unplugged or not yet seen).
         # A missed deadline is only caught up at full power if the car was
         # plugged in when it passed and has stayed plugged in since — see
@@ -580,10 +588,6 @@ class Application:
         # by resolve_active_goals so SoC dropping afterwards (the car being
         # driven) doesn't resurrect that deadline as overdue.
         self._ev_overdue_dismissed: dict[str, date] = {}
-        # Last seen `available` state per EV device — detects a car
-        # connecting so we can replan immediately instead of waiting up to
-        # plan_interval_s for the next scheduled cycle.
-        self._ev_prev_connected: dict[str, bool] = {}
         # In-memory staging for the HA/MQTT date+time+soc picker entities.
         self._staged_overrides: dict[str, tuple[float, datetime]] = {}
         self._disabled_chargepoints: set[str] = set()
@@ -685,9 +689,27 @@ class Application:
             self._control_loop.register_contributor(StorageControlContributor(sc))
         _log.info("Registered %d storage contributors", len(self._storage_constraints))
 
-        # 7b — EV assets + contributors
-        self._ev_assets = parse_ev_assets(self._cfg.assets)
-        self._ev_contributors = [EvChargerContributor(a) for a in self._ev_assets]
+        # 7b — Vehicles, chargers and their sessions (assets/fleet.py)
+        self._fleet = VehicleFleet(self._cfg.devices)
+        if renames := self._fleet.previous_ids():
+            moved = await self._storage.rename_ev_ids(renames)
+            if moved:
+                _log.info("Moved stored EV data to vehicle ids %s: %s", renames, moved)
+        self._fleet.sessions.restore(
+            ChargingSession(
+                charger_id=row["charger_id"], vehicle_id=row["vehicle_id"],
+                started_at=row["plugged_at"], source=row["source"], session_id=row["id"],
+            )
+            for row in await self._storage.load_open_vehicle_sessions()
+        )
+        for charger_id, choice in (await self._storage.load_next_vehicles()).items():
+            try:
+                self._fleet.sessions.set_next(charger_id, choice)
+            except ValueError as exc:
+                _log.info("Dropping stored next vehicle for %s: %s", charger_id, exc)
+        self._fleet.sessions.guest_modes.update(await self._storage.load_guest_modes())
+        self._fleet.sessions.prune_guest_modes()
+        self._ev_contributors = list(self._fleet.contributors.values())
         for contrib in self._ev_contributors:
             self._control_loop.register_contributor(contrib)
         # Load persisted charge plans, overrides, force-charge and disabled state
@@ -695,15 +717,14 @@ class Application:
         self._ev_day_overrides = await self._storage.load_all_ev_day_overrides()
         self._ev_force_charge = await self._storage.load_all_ev_force_charge()
         self._disabled_chargepoints = await self._storage.load_all_ev_disabled()
-        for contrib in self._ev_contributors:
-            asset = next(a for a in self._ev_assets if a.device_id == contrib.device_id)
-            contrib.set_disabled(asset.asset_id in self._disabled_chargepoints)
-            contrib.set_force_charge(self._ev_force_charge.get(asset.asset_id))
+        self._apply_sessions()
         _log.info(
-            "Loaded %d EV assets (%d weekly plans, %d day overrides, %d forced, %d disabled)",
-            len(self._ev_assets), len(self._ev_weekly_plans),
+            "Loaded %d vehicles, %d chargers (%d weekly plans, %d day overrides, %d forced, "
+            "%d disabled, %d open sessions)",
+            len(self._fleet.vehicles), len(self._fleet.chargers), len(self._ev_weekly_plans),
             sum(len(v) for v in self._ev_day_overrides.values()),
             len(self._ev_force_charge), len(self._disabled_chargepoints),
+            len(self._fleet.sessions.sessions),
         )
 
         # 7b' — Savings accounting: the real house vs. a simulated
@@ -757,6 +778,11 @@ class Application:
                     self._cfg.devices,
                     {d.device_id for d in self._registry.all()},
                 ),
+                # A vehicle replacing an asset keeps its HA entities.
+                uid_slugs={vid: old for old, vid in reversed(self._fleet.previous_ids().items())},
+                chargers=[(cid, spec.display_name) for cid, spec in self._fleet.chargers.items()],
+                on_select_charger=self.select_charger,
+                on_set_guest_mode=lambda mode: self.set_guest_mode(None, mode),
             )
             await self._mqtt_publisher.publish_weekly_plans(self._ev_weekly_plans)
             await self._publish_savings()
@@ -886,9 +912,7 @@ class Application:
         await self._storage.set_ev_force_charge(asset_id, target_soc_pct)
         self._ev_force_charge[asset_id] = target_soc_pct
         asset = self._ev_asset(asset_id)
-        for contrib in self._ev_contributors:
-            if asset is not None and contrib.device_id == asset.device_id:
-                contrib.set_force_charge(target_soc_pct)
+        self._fleet.apply(self._disabled_chargepoints, self._ev_force_charge)
         # Write the chosen target as the instant-charging SoC limit so the
         # wallbox itself stops at the target between our control ticks.
         if asset is not None:
@@ -901,10 +925,7 @@ class Application:
     async def _clear_force_charge(self, asset_id: str, reason: str) -> None:
         await self._storage.clear_ev_force_charge(asset_id)
         self._ev_force_charge.pop(asset_id, None)
-        asset = self._ev_asset(asset_id)
-        for contrib in self._ev_contributors:
-            if asset is not None and contrib.device_id == asset.device_id:
-                contrib.set_force_charge(None)
+        self._fleet.apply(self._disabled_chargepoints, self._ev_force_charge)
         _log.info("EV force charge OFF: %r (%s)", asset_id, reason)
         asyncio.create_task(self._run_plan())
 
@@ -1028,9 +1049,18 @@ class Application:
             states = {}
             for device in self._registry.all():
                 try:
-                    state = await device.get_state()
+                    states[device.device_id] = await device.get_state()
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning("Polling failed for device %r: %s",
+                                 device.device_id, exc)
+
+            # Sessions + vehicle SoC: lays each vehicle's SoC over its charger.
+            now = datetime.now(UTC)
+            changes = self._fleet.compose(states, now)
+
+            for state in states.values():
+                try:
                     self._registry.update_state(state)
-                    states[device.device_id] = state
                     await self._bus.publish(DeviceStateEvent(state=state))
                     await self._storage.write(
                         Measurement(
@@ -1044,35 +1074,184 @@ class Application:
                         )
                     )
                 except Exception as exc:  # noqa: BLE001
-                    _log.warning("Polling failed for device %r: %s",
-                                 device.device_id, exc)
+                    _log.warning("Recording failed for device %r: %s", state.device_id, exc)
 
             await self._bus.flush()
 
+            if changes:
+                # On the first poll the planning loop's first run picks them up.
+                await self._on_session_changes(changes, replan=not first_tick, now=now)
             if first_tick:
                 await self._init_ledger(states)
                 first_tick = False
                 self._first_poll_done.set()  # unblock planning and control loops
-            else:
-                self._check_ev_connected(states)
+            await self._sync_vehicles(states)
 
             await asyncio.sleep(self._poll_interval_s)
 
-    def _check_ev_connected(self, device_states: dict[str, Any]) -> None:
-        """Replan immediately when an EV transitions to connected.
+    # ------------------------------------------------------------------
+    # Vehicles and charging sessions
+    # ------------------------------------------------------------------
 
-        Otherwise a car plugged in shortly after a planning cycle would sit
-        without a goal for up to ``plan_interval_s`` — losing time it may
-        not get back before its deadline.
+    def _apply_sessions(self) -> None:
+        """Recompose the vehicle assets and contributors after a session change."""
+        self._ev_assets[:] = self._fleet.assets()
+        self._fleet.apply(self._disabled_chargepoints, self._ev_force_charge)
+
+    async def _on_session_changes(
+        self, changes: list[SessionChange], *, replan: bool, now: datetime | None = None,
+    ) -> None:
+        """Persist session changes and react: plug-in time, force charge, openWB
+        vehicle assignment, an immediate replan.
+
+        The plug-in time gates the missed-deadline catch-up (see
+        ``resolve_active_goals``): set when a vehicle arrives at a charger —
+        also on the first poll after a restart, so how long it had been
+        plugged in before is unknown and counts as a fresh plug-in — and
+        cleared when it leaves.
         """
-        for asset in self._ev_assets:
-            state = device_states.get(asset.device_id)
-            connected = state is not None and state.available
-            prev = self._ev_prev_connected.get(asset.asset_id)
-            self._ev_prev_connected[asset.asset_id] = connected
-            if connected and prev is False:
-                _log.info("EV %r connected — replanning immediately", asset.asset_id)
-                asyncio.create_task(self._run_plan())
+        now = now or datetime.now(UTC)
+        for ch in changes:
+            vehicle = ch.vehicle_id or "guest"
+            if ch.started:
+                session = self._fleet.session(ch.charger_id)
+                if session is not None:
+                    session.session_id = await self._storage.open_vehicle_session(
+                        ch.charger_id, ch.vehicle_id, session.started_at, now, session.source,
+                    )
+                _log.info("Session: %s at %s (%s)", vehicle, ch.charger_id,
+                          session.source if session else "?")
+                if ch.vehicle_id is not None:
+                    self._ev_plugged_since[ch.vehicle_id] = now
+                await self._sync_charger_assignment(ch.charger_id)
+            else:
+                await self._storage.close_vehicle_sessions(ch.charger_id, now)
+                _log.info("Session: %s left %s%s", vehicle, ch.charger_id,
+                          " (unplugged)" if ch.unplugged else "")
+                if ch.vehicle_id is not None:
+                    self._ev_plugged_since[ch.vehicle_id] = None
+                    if ch.vehicle_id in self._ev_force_charge:
+                        await self._clear_force_charge(
+                            ch.vehicle_id,
+                            "vehicle unplugged" if ch.unplugged else "vehicle reassigned",
+                        )
+        if any(ch.started for ch in changes):  # a pre-selection may have been used up
+            await self._save_selections()
+        self._apply_sessions()
+        if replan:
+            # A car arriving shortly after a planning cycle must not wait up
+            # to plan_interval_s for a goal.
+            asyncio.create_task(self._run_plan())
+
+    async def _sync_charger_assignment(self, charger_id: str) -> None:
+        """Make the charger system's own vehicle assignment match the session
+        (openWB: the vehicle whose SoC limit and profile it uses)."""
+        device = self._registry.get(charger_id)
+        session = self._fleet.session(charger_id)
+        if session is None or device is None or not hasattr(device, "assign_vehicle"):
+            return
+        wanted = self._fleet.charger_vehicle_id(session.vehicle_id, charger_id)
+        # A manual reassignment is always passed on (the cached assignment may
+        # be stale right after the previous one); on plug-in only when the
+        # charger system has another vehicle assigned.
+        current = getattr(device, "assigned_vehicle_id", None)
+        if wanted is None or self._dry_run or (session.source != MANUAL and wanted == current):
+            return
+        try:
+            await device.assign_vehicle(wanted)
+            _log.info("Charger %s: assigned vehicle id %s in the charger system", charger_id, wanted)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("Charger %s: could not assign vehicle %s: %s", charger_id, wanted, exc)
+
+    async def _sync_vehicles(self, states: dict[str, DeviceState]) -> None:
+        """Push vehicle SoCs to their charger systems; press a car's refresh
+        button when its SoC is old while it charges."""
+        mono = time.monotonic()
+        for vid, est in self._fleet.estimators.items():
+            soc = est.state.soc_pct
+            spec = self._fleet.vehicles[vid]
+            target = self._fleet.soc_push_target(vid)
+            if soc is not None and target is not None and not self._dry_run:
+                cid, ext_id = target
+                last = self._soc_pushed.get(vid)
+                key = round(soc, 1)
+                if last is None or (last[0], last[1]) != (key, est.state.reported_at) and \
+                        mono - last[2] >= _SOC_PUSH_MIN_INTERVAL_S:
+                    device = self._registry.get(cid)
+                    vs = states.get(vid)
+                    try:
+                        await device.push_vehicle_soc(  # type: ignore[union-attr]
+                            ext_id, soc, vs.extra.get("range_km") if vs else None,
+                            est.state.reported_at,
+                        )
+                        self._soc_pushed[vid] = (key, est.state.reported_at, mono)
+                    except Exception as exc:  # noqa: BLE001
+                        _log.debug("Vehicle %s: SoC push to %s failed: %s", vid, cid, exc)
+
+            refresh_min = spec.params.get("refresh_after_min")
+            cid = self._fleet.sessions.charger_of(vid)
+            device = self._registry.get(vid)
+            charger = states.get(cid) if cid else None
+            reported = est.state.reported_at
+            if (
+                refresh_min and charger is not None and (charger.power_w or 0) > 100
+                and device is not None and getattr(device, "can_refresh", False)
+                and reported is not None
+                and datetime.now(UTC) - reported > timedelta(minutes=refresh_min)
+                and mono - self._refresh_pressed.get(vid, -1e9) > refresh_min * 60
+                and not self._dry_run
+            ):
+                self._refresh_pressed[vid] = mono
+                try:
+                    await device.refresh()  # type: ignore[attr-defined]
+                    _log.info("Vehicle %s: SoC older than %g min while charging — refresh "
+                              "requested", vid, refresh_min)
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning("Vehicle %s: refresh failed: %s", vid, exc)
+
+    async def select_charger(self, vehicle_id: str | None, charger_id: str | None) -> None:
+        """Put a car (``None`` = a guest) on *charger_id* — the last selection
+        wins (see ``SessionManager.select``); ``charger_id=None`` drops the
+        car's selections.  Raises ValueError."""
+        changes = self._fleet.sessions.select(vehicle_id, charger_id, datetime.now(UTC))
+        await self._save_selections()
+        _log.info("Charger selected: %s → %s", vehicle_id or "guest", charger_id or "none")
+        if changes:
+            await self._on_session_changes(changes, replan=True)
+        else:
+            self._apply_sessions()
+
+    async def set_guest_mode(self, charger_id: str | None, mode: str) -> None:
+        """Charge the guest car at *charger_id* (None: wherever the guest is)
+        ``pv_only`` or ``instant``.  Raises ValueError."""
+        if charger_id is None:
+            charger_id = next((c for c in self._fleet.chargers if self._fleet.sessions.guest_at(c)), None)
+            if charger_id is None:
+                raise ValueError("no guest car at any charger — put the guest on a charger first")
+        self._fleet.sessions.set_guest_mode(charger_id, mode)
+        await self._save_selections()
+        self._apply_sessions()
+        _log.info("Guest car at %s: %s", charger_id, mode)
+        asyncio.create_task(self._run_plan())
+
+    async def _save_selections(self) -> None:
+        """Store the cars expected at the chargers' next plug-ins and the guest modes."""
+        self._fleet.sessions.prune_guest_modes()
+        await self._storage.save_next_vehicles(dict(self._fleet.sessions.next_vehicle))
+        await self._storage.save_guest_modes(dict(self._fleet.sessions.guest_modes))
+
+    def _charger_status(self, status: dict) -> dict:
+        """``SessionManager.status`` with display names for the API."""
+        out = dict(status)
+        cid = status.get("charger_id")
+        out["label"] = self._fleet.chargers[cid].display_name if cid in self._fleet.chargers else None
+        by = status.get("by")
+        if by is not None:
+            out["by_label"] = (
+                "Guest" if by == "guest"
+                else self._fleet.vehicles[by].display_name if by in self._fleet.vehicles else by
+            )
+        return out
 
     # ------------------------------------------------------------------
     # Planning loop
@@ -1251,6 +1430,8 @@ class Application:
         # car won't be charged even if a schedule exists for it.
         goal_device_ids = {g.device_id for g in ev_goals}
         for asset in active_assets:
+            if not asset.device_id:
+                continue  # vehicle away: not at any charger
             state = device_states.get(asset.device_id)
             connected = state is not None and state.available
             if not connected and asset.device_id not in goal_device_ids:
@@ -1264,7 +1445,13 @@ class Application:
         # charge is active its target wins.
         assets_by_device = {a.device_id: a for a in self._ev_assets}
         for contrib in self._ev_contributors:
-            goal = next((g for g in ev_goals if g.device_id == contrib.device_id), None)
+            # Only the goal of the vehicle still at this charger (a session
+            # may have changed while the plan was being solved).
+            goal = next(
+                (g for g in ev_goals
+                 if g.device_id == contrib.device_id and g.asset_id == contrib.asset.asset_id),
+                None,
+            )
             contrib.update_goal(goal)
             device = self._registry.get(contrib.device_id)
             if device is not None and hasattr(device, "update_target_soc"):
@@ -1431,51 +1618,20 @@ class Application:
     async def _check_force_charge_reset(
         self, device_states: dict[str, Any], now: datetime | None = None,
     ) -> None:
-        """Auto-clear force charges: on plugged→unplugged transition or when
-        the target SoC is reached.  Also tracks when each car was plugged in,
-        which gates the missed-deadline catch-up (see resolve_active_goals).
+        """Clear a force charge once its target SoC is reached.
 
-        Uses the plug state from ``extra["plugged"]`` — not ``available``,
-        which also drops on MQTT bridge loss; a broker hiccup or restart must
-        not cancel a force charge (or a missed-deadline catch-up) while the
-        car is still at the wallbox.
-
-        *now* is an override for testing; defaults to ``datetime.now(UTC)``.
+        Plug-in and unplug are handled by the charging sessions
+        (``_on_session_changes``): they set when each car was plugged in and
+        clear a force charge when the car leaves.  The car's SoC at the
+        charger is the vehicle's (estimated) SoC laid over the charger state.
         """
-        if now is None:
-            now = datetime.now(timezone.utc)
         for asset in self._ev_assets:
-            state = device_states.get(asset.device_id)
-            plugged = state.extra.get("plugged") if state is not None else None
-            if not isinstance(plugged, bool):
-                continue  # no plug info this tick — keep previous knowledge
-
-            prev = self._ev_prev_plugged.get(asset.asset_id)
-            self._ev_prev_plugged[asset.asset_id] = plugged
-
-            if plugged and prev is not True:
-                # Plugged in (or first seen plugged after a restart — how
-                # long it had been plugged before is unknown, so it counts
-                # as a fresh plug-in and no pre-restart deadline is chased).
-                self._ev_plugged_since[asset.asset_id] = now
-            elif not plugged:
-                if prev is True:
-                    _log.info(
-                        "EV %r unplugged — a deadline passing while away won't "
-                        "be caught up; will follow the next scheduled plan on replug",
-                        asset.asset_id,
-                    )
-                self._ev_plugged_since[asset.asset_id] = None
-
             target = self._ev_force_charge.get(asset.asset_id)
-            if target is None:
+            if target is None or not asset.device_id:
                 continue
-            if prev is True and not plugged:
-                await self._clear_force_charge(asset.asset_id, "vehicle unplugged")
-            elif state is not None and state.soc_pct is not None and state.soc_pct >= target:
-                await self._clear_force_charge(
-                    asset.asset_id, f"target {target:.0f}% reached"
-                )
+            state = device_states.get(asset.device_id)
+            if state is not None and state.soc_pct is not None and state.soc_pct >= target:
+                await self._clear_force_charge(asset.asset_id, f"target {target:.0f}% reached")
 
     def _grid_limit(self) -> GridLimit | None:
         """Grid connection limit from ``max_import_kw`` on the topology root."""
@@ -1750,14 +1906,15 @@ class Application:
             storage_kw[sc.device_id] = kw
             stored_kwh[sc.device_id] = stored
 
+        # Per charger: whichever car (or guest) is plugged in there.
         ev: dict[str, EvLive] = {}
-        for asset in self._ev_assets:
-            st = device_states.get(asset.device_id)
+        for cid, contrib in self._fleet.contributors.items():
+            st = device_states.get(cid)
             plugged = st.extra.get("plugged") if st is not None else None
-            ev[asset.device_id] = EvLive(
+            ev[cid] = EvLive(
                 plugged=plugged if isinstance(plugged, bool) else None,
                 power_kw=max(0.0, (st.power_w or 0.0) / 1000.0) if st is not None else 0.0,
-                max_kw=asset.max_charge_kw,
+                max_kw=contrib.asset.max_charge_kw,
             )
 
         tariff_prices = await self._fetch_tariff_prices(now)
@@ -1877,18 +2034,18 @@ class Application:
         force charge, no schedule) charges like the real car.
         """
         goals = {g.device_id: g for g in ev_goals}
-        for asset in self._ev_assets:
-            st = device_states.get(asset.device_id)
+        for cid in self._fleet.chargers:
+            st = device_states.get(cid)
             if st is None or st.extra.get("plugged") is not True:
                 continue
-            goal = goals.get(asset.device_id)
+            goal = goals.get(cid)
             if goal is None or not goal.connected:
-                self._savings.set_ev_goal(asset.device_id, None, None)
+                self._savings.set_ev_goal(cid, None, None)
             elif goal.pv_only:
-                self._savings.set_ev_goal(asset.device_id, None, None, pv_only=True)
+                self._savings.set_ev_goal(cid, None, None, pv_only=True)
             else:
                 self._savings.set_ev_goal(
-                    asset.device_id,
+                    cid,
                     goal.phase1_required_kwh + goal.phase2_required_kwh,
                     goal.target_by,
                 )
@@ -1900,8 +2057,12 @@ class Application:
         groups: list[dict[str, Any]] = []
         if self._storage_constraints:
             groups.append({"id": "batteries", "kind": "batteries", "label": "Batteries"})
-        for asset in self._ev_assets:
-            groups.append({"id": asset.device_id, "kind": "car", "label": asset.label})
+        # Savings are kept per charger (whichever car charged there), named
+        # after the charger's default vehicle.
+        for cid, spec in self._fleet.chargers.items():
+            default = spec.params.get("default_vehicle")
+            label = (self._fleet.vehicles[default].display_name if default else spec.display_name)
+            groups.append({"id": cid, "kind": "car", "label": label})
         for tc in self._threshold_constraints:
             groups.append({
                 "id": tc.device_id, "kind": "device", "label": tc.label or tc.device_id,
@@ -2583,18 +2744,41 @@ class Application:
             )
             result = []
             for asset in self._ev_assets:
-                state = self._registry.latest_state(asset.device_id)
+                # At a charger: the charger's state with the vehicle's SoC;
+                # away: the vehicle's own state.
+                charger_state = (
+                    self._registry.latest_state(asset.device_id) if asset.device_id else None
+                )
+                vehicle_state = self._registry.latest_state(asset.asset_id)
+                state = charger_state or vehicle_state
+                vx = vehicle_state.extra if vehicle_state is not None else {}
+                charger_spec = self._fleet.chargers.get(asset.device_id)
                 goal = next((g for g in fresh_goals if g.asset_id == asset.asset_id), None)
                 # phase1/phase2 kWh come from the last optimizer run (more accurate energy split)
                 planned = next((g for g in self._last_ev_goals if g.asset_id == asset.asset_id), None)
                 force = self._ev_force_charge.get(asset.asset_id)
                 result.append({
                     "asset_id":       asset.asset_id,
-                    "device_id":      asset.device_id,
+                    "vehicle_id":     asset.asset_id,
+                    # The charger it is at (commands, plan intents); the
+                    # vehicle id while away.
+                    "device_id":      asset.device_id or asset.asset_id,
+                    "charger_id":     asset.device_id or None,
+                    "charger_label":  charger_spec.display_name if charger_spec else None,
+                    "session_since":  vx.get("session_since"),
                     "label":          asset.label,
-                    "connected":      state.available if state else False,
+                    "connected":      charger_state.available if charger_state else False,
                     "soc_pct":        state.soc_pct if state else None,
-                    "range_km":       state.extra.get("range_km") if state else None,
+                    "soc_estimated":  bool(vx.get("soc_estimated")),
+                    "soc_reported_pct": vx.get("soc_reported_pct"),
+                    "soc_reported_at": vx.get("soc_reported_at"),
+                    "range_km":       vx.get("range_km"),
+                    "car_plugged":    vx.get("car_plugged"),
+                    # Its charger: plugged in / selected for the next plug-in /
+                    # its default / taken by another car (greyed out in the UI).
+                    "charger_status": self._charger_status(
+                        self._fleet.sessions.status(asset.asset_id)),
+                    "location_home":  vx.get("location_home"),
                     "charge_limit_soc_pct": asset.charge_limit_soc_pct,
                     "max_charge_kw":  asset.max_charge_kw,
                     "goal": {
@@ -2673,10 +2857,13 @@ class Application:
 
             # ── EV chargers ─────────────────────────────────────────────
             for asset in self._ev_assets:
-                state = self._registry.latest_state(asset.device_id)
+                state = (
+                    self._registry.latest_state(asset.device_id) if asset.device_id
+                    else self._registry.latest_state(asset.asset_id)
+                )
                 soc_pct = state.soc_pct if state is not None else None
-                power_w = state.power_w if state is not None else None
-                connected = state.available if state is not None else False
+                power_w = state.power_w if state is not None and asset.device_id else None
+                connected = state.available if state is not None and asset.device_id else False
 
                 # EV intents are sparse (only charging steps); build a lookup
                 # and walk every plan timestamp to reconstruct the SoC trajectory.
@@ -2708,7 +2895,9 @@ class Application:
                 )
 
                 devices.append({
-                    "device_id": asset.device_id,
+                    "device_id": asset.device_id or asset.asset_id,
+                    "vehicle_id": asset.asset_id,
+                    "charger_id": asset.device_id or None,
                     "label": asset.label,
                     "type": "ev",
                     "capacity_kwh": asset.capacity_kwh,
@@ -2958,10 +3147,7 @@ class Application:
                 raise HTTPException(404, f"Unknown EV asset: {asset_id!r}")
             await self._storage.set_ev_disabled(asset_id)
             self._disabled_chargepoints.add(asset_id)
-            for contrib in self._ev_contributors:
-                asset = next((a for a in self._ev_assets if a.device_id == contrib.device_id), None)
-                if asset and asset.asset_id == asset_id:
-                    contrib.set_disabled(True)
+            self._fleet.apply(self._disabled_chargepoints, self._ev_force_charge)
             _log.info("Chargepoint disabled: %r", asset_id)
             asyncio.create_task(self._run_plan())
             return {"status": "ok", "asset_id": asset_id, "disabled": True}
@@ -2973,13 +3159,76 @@ class Application:
                 raise HTTPException(404, f"Unknown EV asset: {asset_id!r}")
             await self._storage.clear_ev_disabled(asset_id)
             self._disabled_chargepoints.discard(asset_id)
-            for contrib in self._ev_contributors:
-                asset = next((a for a in self._ev_assets if a.device_id == contrib.device_id), None)
-                if asset and asset.asset_id == asset_id:
-                    contrib.set_disabled(False)
+            self._fleet.apply(self._disabled_chargepoints, self._ev_force_charge)
             _log.info("Chargepoint enabled: %r", asset_id)
             asyncio.create_task(self._run_plan())
             return {"status": "ok", "asset_id": asset_id, "disabled": False}
+
+        # ── Chargers and charging sessions ──────────────────────────────
+
+        @api.get("/api/chargers")
+        async def get_chargers() -> list[dict]:
+            """Every charger with the car at it (vehicle, guest or none) and the
+            vehicles it can be assigned to."""
+            out = []
+            for cid, spec in self._fleet.chargers.items():
+                session = self._fleet.session(cid)
+                state = self._registry.latest_state(cid)
+                out.append({
+                    "charger_id": cid,
+                    "label": spec.display_name,
+                    "plugged": bool(state.extra.get("plugged")) if state else False,
+                    "power_w": state.power_w if state else None,
+                    "default_vehicle": spec.params.get("default_vehicle"),
+                    # Pre-selected for the next plug-in: a vehicle id, "guest",
+                    # or None (the default applies).
+                    "next_vehicle": self._fleet.sessions.next_vehicle.get(cid),
+                    # How a guest car charges here: chosen for this guest, else configured.
+                    "guest_mode": self._fleet.guest_mode(cid),
+                    "session": {
+                        "vehicle_id": session.vehicle_id,
+                        "guest": session.is_guest,
+                        "since": session.started_at.isoformat(),
+                        "source": session.source,
+                    } if session is not None else None,
+                    "vehicles": [
+                        {"vehicle_id": vid, "label": v.display_name}
+                        for vid, v in self._fleet.vehicles.items()
+                    ],
+                })
+            return out
+
+        @api.put("/api/ev/guest/mode")
+        async def put_guest_mode(mode: str, charger_id: str | None = None) -> dict:
+            """How the guest car charges: ``pv_only`` (PV surplus) or ``instant``
+            (full power now).  At *charger_id*, or wherever the guest is.
+            Back to the charger's configured mode when the guest leaves."""
+            try:
+                await self.set_guest_mode(charger_id, mode)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            return {"status": "ok", "mode": mode}
+
+        @api.put("/api/ev/{vehicle_id}/charger")
+        async def put_ev_charger(vehicle_id: str, charger_id: str) -> dict:
+            """Put a car (or ``guest``) on a charger — the last selection wins.
+            A car plugged in there is reassigned now; a free charger expects
+            this car at its next plug-in.  ``charger_id=none`` drops the
+            car's selections."""
+            try:
+                await self.select_charger(
+                    None if vehicle_id == "guest" else vehicle_id,
+                    None if charger_id == "none" else charger_id,
+                )
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            return {"status": "ok", "vehicle_id": vehicle_id, "charger_id": charger_id}
+
+        @api.get("/api/sessions")
+        async def get_sessions(start: datetime, end: datetime | None = None) -> dict:
+            """Charging sessions overlapping ``[start, end)`` (default end: now)."""
+            end_ = _as_utc(end) if end is not None else datetime.now(UTC)
+            return {"sessions": await self._storage.query_vehicle_sessions(_as_utc(start), end_)}
 
         # ── Static frontend (registered last so API routes take priority) ──────
         # JS files are served at /ui/…; index.html is served at /.

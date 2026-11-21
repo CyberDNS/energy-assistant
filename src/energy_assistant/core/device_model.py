@@ -45,7 +45,7 @@ Connections
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -123,6 +123,8 @@ class ParamSpec:
     exclusive_minimum: bool = False
     maximum: float | None = None
     description: str = ""
+    validator: Callable[[Any], str | None] | None = None
+    """Extra check of the value's content; returns an error text or None."""
 
     def check(self, value: Any) -> str | None:
         """Return an error text for *value*, or None when it is valid."""
@@ -144,6 +146,8 @@ class ParamSpec:
             return f"must be {op} {self.minimum:g}, got {value!r}"
         if self.maximum is not None and isinstance(value, (int, float)) and value > self.maximum:
             return f"must be <= {self.maximum:g}, got {value!r}"
+        if self.validator is not None:
+            return self.validator(value)
         return None
 
 
@@ -192,6 +196,67 @@ _BATTERY_PARAMS = {
     "standby_w": ParamSpec(float, minimum=0, description="Power treated as standby/noise (W)"),
 }
 
+def _check_charge_curve(value: Any) -> str | None:
+    for point in value:
+        if not isinstance(point, Mapping) or set(point) != {"soc_pct", "efficiency"}:
+            return "must be a list of {soc_pct: …, efficiency: …}"
+        soc, eff = point["soc_pct"], point["efficiency"]
+        if not isinstance(soc, (int, float)) or not 0 < soc <= 100:
+            return f"soc_pct must be in (0, 100], got {soc!r}"
+        if not isinstance(eff, (int, float)) or not 0 < eff <= 1:
+            return f"efficiency must be in (0, 1], got {eff!r}"
+    socs = [p["soc_pct"] for p in value]
+    if socs != sorted(socs):
+        return "points must be sorted by soc_pct"
+    return None
+
+
+def _check_charger_ids(value: Any) -> str | None:
+    for key, vid in value.items():
+        if not isinstance(key, str) or isinstance(vid, bool) or not isinstance(vid, (int, str)):
+            return "must map a charger plugin type to that system's vehicle id, e.g. {openwb_mqtt: 1}"
+    return None
+
+
+def _check_str_list(value: Any) -> str | None:
+    if not all(isinstance(v, str) and v for v in value):
+        return "must be a list of ids"
+    return None
+
+
+#: ``guest_mode`` values of a charger: what it does with a car that is not a
+#: configured vehicle.
+GUEST_MODES = ("pv_only", "instant", "off")
+
+_VEHICLE_PARAMS = {
+    "capacity_kwh": ParamSpec(float, required=True, minimum=0, exclusive_minimum=True,
+                              description="Usable battery capacity (kWh)"),
+    "charge_limit_soc_pct": ParamSpec(float, minimum=0, maximum=100,
+                                      description="Ceiling the optimizer charges to"),
+    "max_charge_kw": ParamSpec(float, minimum=0, exclusive_minimum=True,
+                               description="On-board charger limit (kW); default: the charger's"),
+    "charge_curve": ParamSpec(list, validator=_check_charge_curve,
+                              description="[{soc_pct, efficiency}] charging efficiency per SoC"),
+    "timezone": ParamSpec(str, description="Time zone of the weekly plan (default Europe/Berlin)"),
+    "charger_ids": ParamSpec(dict, validator=_check_charger_ids,
+                             description="This vehicle's id in a charger system, e.g. {openwb_mqtt: 1}"),
+    "push_soc_to_charger": ParamSpec(bool, description="Publish the (estimated) SoC to the charger"),
+    "refresh_after_min": ParamSpec(float, minimum=1,
+                                   description="Press the refresh button when the car's SoC is "
+                                               "older than this while charging"),
+    "previous_ids": ParamSpec(list, validator=_check_str_list,
+                              description="Former asset ids whose stored plans are migrated"),
+}
+
+_CHARGER_PARAMS = {
+    "min_power_kw": ParamSpec(float, minimum=0, description="Lowest charging power (kW)"),
+    "max_power_kw": ParamSpec(float, minimum=0, exclusive_minimum=True,
+                              description="Highest charging power (kW)"),
+    "default_vehicle": ParamSpec(str, description="Vehicle assigned on plug-in"),
+    "guest_mode": ParamSpec(str, choices=GUEST_MODES,
+                            description="Behaviour for an unknown car (default pv_only)"),
+}
+
 CATEGORY_SCHEMAS: dict[DeviceCategory, CategorySchema] = {
     s.category: s
     for s in (
@@ -236,14 +301,14 @@ CATEGORY_SCHEMAS: dict[DeviceCategory, CategorySchema] = {
             "Electric vehicle; charged through a charger session.",
             required_capabilities=_caps(_C.SOC_PCT),
             optional_capabilities=_caps(_C.RANGE_KM, _C.PLUGGED, _C.LOCATION_HOME),
+            params=_VEHICLE_PARAMS,
         ),
         CategorySchema(
             _K.CHARGER,
             "EV charger; executes a vehicle's charging plan.",
-            required_capabilities=_caps(_C.POWER_W),
-            # soc_pct: the vehicle SoC is still read through the charger
-            # until vehicles are devices of their own.
-            optional_capabilities=_caps(_C.PLUGGED, _C.POWER_SETPOINT, _C.PHASES, _C.SOC_PCT),
+            required_capabilities=_caps(_C.POWER_W, _C.PLUGGED),
+            optional_capabilities=_caps(_C.POWER_SETPOINT, _C.PHASES),
+            params=_CHARGER_PARAMS,
             connections=_METERED,
         ),
         CategorySchema(
@@ -553,6 +618,13 @@ def validate_connections(specs: Mapping[str, DeviceSpec]) -> list[str]:
             elif not has_switch and not spec.controlled_by:
                 errors.append(f"device {spec.id!r}: a thermal_load needs 'controlled_by: "
                               "<switch device>' (or a 'switch' capability binding)")
+
+        if spec.category is DeviceCategory.CHARGER:
+            default = spec.params.get("default_vehicle")
+            target = specs.get(default) if default else None
+            if default and (target is None or target.category is not DeviceCategory.VEHICLE):
+                errors.append(f"device {spec.id!r}: params.default_vehicle {default!r} is not a "
+                              "configured vehicle")
 
     grid_meters = [s for s in specs.values() if s.category is DeviceCategory.GRID_METER]
     if len(grid_meters) > 1:

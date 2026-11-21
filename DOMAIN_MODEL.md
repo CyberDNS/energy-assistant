@@ -22,7 +22,7 @@ model (categories, capabilities, connections) is designed in issue #97.
 | `backends`  | Connection parameters for ioBroker and Home Assistant |
 | `tariffs`   | Pricing models defined once, referenced by name from devices |
 | `devices`   | Everything in the house — meters, PV, batteries, chargers, consumers — with category, capabilities, params and connections; `metered_by` forms the metering tree |
-| `assets`    | EV charging targets and threshold loads (until they become devices, #97) |
+| `assets`    | Threshold loads (until they become thermal_load + switch devices, #97) |
 | `optimizer` | Single holistic solver: algorithm, horizon, schedule |
 
 For a complete annotated example covering all sections, see [`config.yaml.example`](config.yaml.example).
@@ -74,11 +74,11 @@ thermal loads, switches, consumers.  Parsed into `DeviceSpec`
 | `meter`        | `power_w` | — | `metered_by` |
 | `pv`           | `power_w` | — | `metered_by` |
 | `battery`      | `power_w`, `soc_pct` | `capacity_kwh`, `max_charge_kw`, `max_discharge_kw` (required), SoC limits, efficiencies, wear cost, … | `metered_by` |
-| `charger`      | `power_w` | — (still under `assets:`) | `metered_by` |
+| `charger`      | `power_w`, `plugged` | `min_power_kw`, `max_power_kw`, `default_vehicle`, `guest_mode` | `metered_by`; the vehicle at it comes from the charging session |
 | `thermal_load` | `temperature_c` | `rated_power_w` | `metered_by`, `controlled_by` → switch (or a `switch` capability binding for now) |
 | `switch`       | `switch` | `rated_power_w` | `metered_by` |
 | `consumer`     | — | — | `metered_by`, `controlled_by` → switch, `included_in` → consumer |
-| `vehicle`      | `soc_pct` | — | (sessions with a charger, #97 phase 3) |
+| `vehicle`      | `soc_pct` | `capacity_kwh` (required), `charge_limit_soc_pct`, `charge_curve`, `max_charge_kw`, `charger_ids`, `push_soc_to_charger`, … | dynamic: a charging session at a charger (see README "Vehicles and chargers") |
 | `sensor`       | — | — | — |
 
 Plugins declare which categories they can serve and which capabilities they
@@ -108,16 +108,13 @@ a `metered_by` chain to a meter without its own `metered_by` is an error.
 
 ## Layer 5 — `assets`
 
-Assets are managed objects — things that store energy and have a target state.
-Examples: an EV with a target SoC and a departure time, a hot water tank
-with a target temperature and a time window for cheap heating.
+Threshold loads (aquarium cooler, …) with their thresholds and thermal
+model, referenced to their device by `device:`.  They become `thermal_load`
+devices controlled by a `switch` in #97 phase 4.
 
-An asset is always associated with the device that controls it via `managed_by`.
-
-Asset constraints are discovered dynamically by the optimizer at runtime.
-When an EV is not connected, no constraint is active. When it connects, its
-`target_soc` / `target_by` constraint becomes part of the next optimization
-run automatically.
+EVs are no longer assets: a car is a `vehicle` device and its charging needs
+(weekly plan, overrides, force charge) belong to it.  It enters the
+optimization only while a charging session puts it at a charger.
 
 ---
 

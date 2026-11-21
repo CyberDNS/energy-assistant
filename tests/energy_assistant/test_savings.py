@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from energy_assistant.assets.fleet import VehicleFleet
 from energy_assistant.core.device_model import DeviceCategory, DeviceSpec
 from energy_assistant.core.models import (
     DeviceState,
@@ -535,6 +536,7 @@ class TestServerWiring:
         app._plan_interval_s = 900.0
         app._storage_constraints = [BAT]
         app._ev_assets = []
+        app._fleet = VehicleFleet({})
         app._ledger = BatteryCostLedger()
         app._ledger.initialise("bat", 5.0, 0.20)
         app._pv_opportunity_price = 0.08

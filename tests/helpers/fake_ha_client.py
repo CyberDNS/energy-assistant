@@ -22,9 +22,23 @@ class FakeHAClient:
         self.last_units: dict[str, str] | None = None
         # Result of get_energy_prefs (None → raise, like an unreachable HA).
         self.energy_prefs: dict[str, Any] | None = None
+        # entity_id -> last_reported timestamp returned by get_entity
+        self.reported: dict[str, datetime] = {}
 
     async def get_entity_state(self, entity_id: str) -> Any:
         return self._states.get(entity_id)
+
+    async def get_entity(self, entity_id: str):
+        """``EntityState`` of *entity_id*; ``reported`` holds per-entity timestamps."""
+        from energy_assistant.plugins._homeassistant.client import EntityState
+
+        if entity_id not in self._states:
+            return None
+        ts = self.reported.get(entity_id)
+        return EntityState(
+            state=None if self._states[entity_id] is None else str(self._states[entity_id]),
+            attributes={}, last_changed=ts, last_updated=ts, last_reported=ts,
+        )
 
     async def call_service(
         self,

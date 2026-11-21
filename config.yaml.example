@@ -295,11 +295,44 @@ devices:
       # no_grid_charge: true          # charge from PV surplus only
 
   # --- EV charger (openWB, MQTT simpleAPI on backends.mqtt) ---
+  # A charging session starts when a car is plugged in: the default vehicle,
+  # or another vehicle / a guest when reassigned (UI, API, HA select).
   - id: wallbox
     category: charger
     type: openwb_mqtt
+    label: Garage                 # shown in the UI and Home Assistant
     chargepoint_id: 1
     # root_topic: openWB
+    params:
+      min_power_kw: 4.14          # 6 A × 3 phases × 230 V
+      max_power_kw: 11.0
+      default_vehicle: car
+      guest_mode: pv_only         # unknown car: pv_only | instant | off
+
+  # --- Electric car, read from its Home Assistant integration ---
+  # The car reports every 15–60 min; in between its SoC is estimated from the
+  # charger's energy.  Weekly plans, overrides and force charge belong to it.
+  - id: car
+    category: vehicle
+    type: homeassistant_vehicle
+    label: Car
+    capabilities:
+      soc_pct:  { entity: sensor.car_battery_level }
+      range_km: { entity: sensor.car_range }                 # optional
+      plugged:  { entity: binary_sensor.car_plugged_in }     # optional, shown only
+      # location_home: { entity: device_tracker.car }        # optional
+    # refresh_entity: button.car_refresh_data   # pressed with refresh_after_min
+    params:
+      capacity_kwh: 77
+      charge_limit_soc_pct: 90       # ceiling the optimizer charges to
+      charge_curve:                  # charging efficiency per SoC segment
+        - { soc_pct: 90, efficiency: 0.90 }
+        - { soc_pct: 100, efficiency: 0.55 }
+      # max_charge_kw: 7.4           # on-board charger limit (default: the charger's)
+      # timezone: Europe/Berlin      # of the weekly plan
+      # charger_ids: { openwb_mqtt: 1 }   # this car's id in openWB …
+      # push_soc_to_charger: true         # … and push its SoC to openWB's MQTT SoC module
+      # refresh_after_min: 30
 
   # --- Household baseline learned as a residual ---
   # The household meter minus every consumer that has its own (learned)

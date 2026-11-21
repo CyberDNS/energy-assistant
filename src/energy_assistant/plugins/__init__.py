@@ -29,6 +29,7 @@ from . import (  # noqa: E402
     generic_consumer,
     generic_homeassistant,
     generic_iobroker,
+    homeassistant_vehicle,
     learned,
     modbus,
     openwb_homeassistant,
@@ -51,6 +52,7 @@ forecast_solar.register(registry)
 generic_consumer.register(registry)
 generic_homeassistant.register(registry)
 generic_iobroker.register(registry)
+homeassistant_vehicle.register(registry)
 learned.register(registry)
 modbus.register(registry)
 openwb_homeassistant.register(registry)

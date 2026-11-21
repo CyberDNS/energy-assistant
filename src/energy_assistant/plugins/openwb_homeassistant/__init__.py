@@ -20,7 +20,7 @@ def register(registry: PluginRegistry) -> None:
     registry.register_device(
         "openwb_homeassistant", _build,
         categories={C.CHARGER},
-        provides={Cap.POWER_W, Cap.PLUGGED, Cap.POWER_SETPOINT, Cap.SOC_PCT},
+        provides={Cap.POWER_W, Cap.PLUGGED, Cap.POWER_SETPOINT},
     )
 
 

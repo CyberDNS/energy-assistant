@@ -351,6 +351,35 @@ _DELETE_EV_DISABLED = "DELETE FROM ev_disabled WHERE asset_id = ?"
 
 _LOAD_ALL_EV_DISABLED = "SELECT asset_id FROM ev_disabled"
 
+_CREATE_VEHICLE_SESSIONS_TABLE = """
+CREATE TABLE IF NOT EXISTS vehicle_sessions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    charger_id  TEXT NOT NULL,
+    vehicle_id  TEXT,              -- NULL = guest
+    plugged_at  TEXT NOT NULL,     -- UTC ISO-8601, start of the plug-in
+    started_at  TEXT NOT NULL,     -- UTC ISO-8601, start of this assignment
+    ended_at    TEXT,              -- NULL while open
+    source      TEXT NOT NULL      -- default | manual
+)
+"""
+
+_CREATE_CHARGER_NEXT_VEHICLE_TABLE = """
+CREATE TABLE IF NOT EXISTS charger_next_vehicle (
+    charger_id TEXT PRIMARY KEY,
+    choice     TEXT NOT NULL       -- vehicle id or "guest"
+)
+"""
+
+_CREATE_CHARGER_GUEST_MODE_TABLE = """
+CREATE TABLE IF NOT EXISTS charger_guest_mode (
+    charger_id TEXT PRIMARY KEY,
+    mode       TEXT NOT NULL       -- pv_only | instant
+)
+"""
+
+# Tables whose rows belong to a vehicle (keyed by its former asset id).
+_EV_ID_TABLES = ("ev_weekly_plan", "ev_day_overrides", "ev_force_charge", "ev_disabled")
+
 _UPSERT_LEDGER = """
 INSERT INTO ledger_state (device_id, cost_basis, stored_energy_kwh, updated_at)
 VALUES (?, ?, ?, ?)
@@ -416,6 +445,9 @@ class SqliteStorageBackend:
         await self._db.execute(_CREATE_EV_DAY_OVERRIDES_TABLE)
         await self._db.execute(_CREATE_EV_FORCE_CHARGE_TABLE)
         await self._db.execute(_CREATE_EV_DISABLED_TABLE)
+        await self._db.execute(_CREATE_VEHICLE_SESSIONS_TABLE)
+        await self._db.execute(_CREATE_CHARGER_NEXT_VEHICLE_TABLE)
+        await self._db.execute(_CREATE_CHARGER_GUEST_MODE_TABLE)
         await self._db.execute(_CREATE_SAVINGS_ACTUAL_TABLE)
         await self._db.execute(_CREATE_SAVINGS_PREDICTED_TABLE)
         await self._db.execute(_CREATE_SAVINGS_STATE_TABLE)
@@ -798,6 +830,120 @@ class SqliteStorageBackend:
         async with self._db.execute(_LOAD_ALL_EV_DISABLED) as cursor:
             rows = await cursor.fetchall()
         return {row[0] for row in rows}
+
+    async def rename_ev_ids(self, renames: dict[str, str]) -> dict[str, int]:
+        """Move stored EV rows from old asset ids to vehicle ids, once.
+
+        *renames* maps old id → new id.  An old id is only moved when the new
+        id has no rows yet in that table, so running it again is a no-op.
+        Returns the number of rows moved per table.
+        """
+        assert self._db is not None
+        moved: dict[str, int] = {}
+        for table in _EV_ID_TABLES:
+            for old, new in renames.items():
+                if old == new:
+                    continue
+                async with self._db.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE asset_id = ?", (new,)
+                ) as cur:
+                    if (await cur.fetchone())[0]:
+                        continue
+                cur = await self._db.execute(
+                    f"UPDATE {table} SET asset_id = ? WHERE asset_id = ?", (new, old)
+                )
+                if cur.rowcount:
+                    moved[table] = moved.get(table, 0) + cur.rowcount
+        await self._db.commit()
+        return moved
+
+    # ------------------------------------------------------------------
+    # Vehicle sessions
+    # ------------------------------------------------------------------
+
+    async def open_vehicle_session(
+        self, charger_id: str, vehicle_id: str | None, plugged_at: datetime,
+        started_at: datetime, source: str,
+    ) -> int:
+        """Record a vehicle (or guest, ``None``) at a charger; returns the row id."""
+        assert self._db is not None
+        cur = await self._db.execute(
+            "INSERT INTO vehicle_sessions (charger_id, vehicle_id, plugged_at, started_at, source)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (charger_id, vehicle_id, plugged_at.isoformat(), started_at.isoformat(), source),
+        )
+        await self._db.commit()
+        return int(cur.lastrowid or 0)
+
+    async def close_vehicle_sessions(self, charger_id: str, ended_at: datetime) -> None:
+        """End every open session at *charger_id*."""
+        assert self._db is not None
+        await self._db.execute(
+            "UPDATE vehicle_sessions SET ended_at = ? WHERE charger_id = ? AND ended_at IS NULL",
+            (ended_at.isoformat(), charger_id),
+        )
+        await self._db.commit()
+
+    async def load_open_vehicle_sessions(self) -> list[dict]:
+        """Open sessions: ``charger_id, vehicle_id, plugged_at, source, id`` (newest per charger)."""
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT id, charger_id, vehicle_id, plugged_at, source FROM vehicle_sessions"
+            " WHERE ended_at IS NULL ORDER BY id"
+        ) as cur:
+            rows = await cur.fetchall()
+        latest: dict[str, dict] = {}
+        for row_id, charger_id, vehicle_id, plugged_at, source in rows:
+            latest[charger_id] = {
+                "id": row_id, "charger_id": charger_id, "vehicle_id": vehicle_id,
+                "plugged_at": datetime.fromisoformat(plugged_at), "source": source,
+            }
+        return list(latest.values())
+
+    async def save_next_vehicles(self, choices: dict[str, str]) -> None:
+        """Replace the pre-selected cars for the chargers' next plug-ins."""
+        assert self._db is not None
+        await self._db.execute("DELETE FROM charger_next_vehicle")
+        await self._db.executemany(
+            "INSERT INTO charger_next_vehicle (charger_id, choice) VALUES (?, ?)",
+            list(choices.items()),
+        )
+        await self._db.commit()
+
+    async def load_next_vehicles(self) -> dict[str, str]:
+        assert self._db is not None
+        async with self._db.execute("SELECT charger_id, choice FROM charger_next_vehicle") as cur:
+            return {c: v for c, v in await cur.fetchall()}
+
+    async def save_guest_modes(self, modes: dict[str, str]) -> None:
+        """Replace the charging mode chosen per charger for its guest car."""
+        assert self._db is not None
+        await self._db.execute("DELETE FROM charger_guest_mode")
+        await self._db.executemany(
+            "INSERT INTO charger_guest_mode (charger_id, mode) VALUES (?, ?)", list(modes.items()),
+        )
+        await self._db.commit()
+
+    async def load_guest_modes(self) -> dict[str, str]:
+        assert self._db is not None
+        async with self._db.execute("SELECT charger_id, mode FROM charger_guest_mode") as cur:
+            return {c: m for c, m in await cur.fetchall()}
+
+    async def query_vehicle_sessions(self, start: datetime, end: datetime) -> list[dict]:
+        """Sessions overlapping ``[start, end)``, oldest first."""
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT charger_id, vehicle_id, plugged_at, started_at, ended_at, source"
+            " FROM vehicle_sessions WHERE started_at < ? AND (ended_at IS NULL OR ended_at >= ?)"
+            " ORDER BY started_at",
+            (end.isoformat(), start.isoformat()),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [
+            {"charger_id": c, "vehicle_id": v, "plugged_at": p, "started_at": s_, "ended_at": e,
+             "source": src}
+            for c, v, p, s_, e, src in rows
+        ]
 
     # ------------------------------------------------------------------
     # Savings accounting

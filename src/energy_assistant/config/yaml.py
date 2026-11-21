@@ -6,7 +6,7 @@ Expected top-level sections
 ``tariffs``    Pricing models keyed by name, e.g. ``tibber``, ``export``.
 ``devices``    Device declarations (category, capabilities, params,
                connections), see ``core/device_model``.
-``assets``     Managed objects (EVs, threshold loads).
+``assets``     Threshold loads (aquarium cooler, …).  EVs are vehicle devices.
 ``optimizer``  Algorithm, horizon, schedule.
 ``energy_dashboard``  Optional import of the HA Energy dashboard consumers.
 
@@ -99,6 +99,17 @@ class YamlConfigLoader:
                 "the 'topology:' section was removed — set 'metered_by: <meter id>' on each "
                 "device instead, and move max_import_kw / curtail_order / "
                 "limit_hysteresis_kw to the grid_meter's 'params:'"
+            )])
+        ev_assets = [
+            asset_id for asset_id, cfg in (raw.get("assets") or {}).items()
+            if not (isinstance(cfg, dict) and cfg.get("type") == "threshold")
+        ]
+        if ev_assets:
+            raise DeviceConfigError([(
+                f"assets: {', '.join(ev_assets)}: EVs are devices now — a 'category: vehicle' "
+                "device for the car (capacity, charge curve, SoC entity; "
+                "params.previous_ids: [<old asset id>] keeps its stored plans) and "
+                "'params: {default_vehicle: <car>, min_power_kw, max_power_kw}' on its charger"
             )])
         backends = _parse_backends(raw.get("backends") or {})
         raw_tariffs: dict[str, Any] = raw.get("tariffs") or {}

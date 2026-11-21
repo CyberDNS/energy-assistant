@@ -156,8 +156,38 @@ devices:
   required ones, plugins that can't serve a category and broken `metered_by`
   chains stop the start with a list of everything to fix.
 
-EV charging targets and threshold loads are still configured under `assets:`
+Threshold loads (the aquarium cooler) are still configured under `assets:`
 for now (#97).
+
+### Vehicles and chargers
+
+A car is a `vehicle` device read from its own Home Assistant integration
+(`type: homeassistant_vehicle`, see `config.yaml.example`); a wallbox is a
+`charger`.  When a charger reports a car plugged in, a **charging session**
+starts with the charger's `default_vehicle`.  While plugged in, the car can be
+reassigned to another vehicle or to a **guest** (UI: Plan tab; API: `PUT
+/api/chargers/<charger>/vehicle?vehicle_id=<id|guest>`; Home Assistant: the
+charger's "Vehicle" select).  A guest car follows the charger's `guest_mode`
+(`pv_only`, `instant`, `off`).  The charger's plug state is authoritative; the
+car's own plug sensor is only shown.
+
+- **SoC:** the car's integration reports every 15–60 min.  In between, the SoC
+  is estimated from the energy the charger delivered and the vehicle's charge
+  curve; every new report resets the estimate.  The UI marks an estimated
+  value ("est.") and shows the last report on hover.  `refresh_entity` +
+  `params.refresh_after_min` press the integration's refresh button when the
+  report gets old while charging.
+- **openWB:** with `charger_ids: {openwb_mqtt: <openWB vehicle id>}` and
+  `push_soc_to_charger: true` the SoC goes to openWB's MQTT SoC module
+  (`set/mqtt/vehicle/<id>/get/soc`, range, timestamp).  A reassignment also
+  sets openWB's vehicle for that chargepoint (`set/chargepoint/<n>/config/ev`;
+  a guest is openWB's vehicle 0).
+- **Needs on the car:** weekly plans, day overrides, force charge and "disable"
+  belong to the vehicle; the charger only executes.  `params.previous_ids:
+  [<old asset id>]` moves stored plans from a former `assets:` EV entry once,
+  and keeps its Home Assistant entities (ids, history, area): only their MQTT
+  topics move to `energy_assistant/vehicle/<id>/…`.
+- **Savings** are still kept per charger (whichever car charged there).
 
 ### Tasmota meters and plugs
 
