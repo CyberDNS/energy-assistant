@@ -166,18 +166,21 @@ def test_metered_by_loop_is_reported() -> None:
     assert "metered_by forms a loop: a → b → a" in errors
 
 
+THERMAL = {"category": "thermal_load", "type": "homeassistant_thermal",
+           "capabilities": {"temperature_c": {"entity": "sensor.t"}},
+           "params": {"bottom_threshold": 18.0, "top_threshold": 20.5,
+                      "active_rate_per_h": 0.4, "drift_rate_per_h": 0.2}}
+PLUG = {"category": "switch", "type": "homeassistant_switch",
+        "capabilities": {"switch": {"entity": "switch.c"}}, "params": {"rated_power_w": 150}}
+
+
 def test_thermal_load_needs_a_switch() -> None:
-    base = {"category": "thermal_load", "type": "threshold_homeassistant",
-            "capabilities": {"temperature_c": {"entity": "sensor.t"}},
-            "params": {"rated_power_w": 150}}
-    assert _errors({"aq": base}) == [(
-        "device 'aq': a thermal_load needs 'controlled_by: <switch device>' "
-        "(or a 'switch' capability binding)"
-    )]
-    plug = {"category": "switch", "type": "tasmota", "host": "h"}
-    assert parse_devices({"aq": {**base, "controlled_by": "plug"}, "plug": plug})
+    assert _errors({"aq": THERMAL}) == [
+        "device 'aq': a thermal_load needs 'controlled_by: <switch device>'"
+    ]
+    assert parse_devices({"aq": {**THERMAL, "controlled_by": "plug"}, "plug": PLUG})
     assert "controlled_by 'grid' is a 'grid_meter', expected switch" in _errors(
-        {"aq": {**base, "controlled_by": "grid"}, "grid": GRID}
+        {"aq": {**THERMAL, "controlled_by": "grid"}, "grid": GRID}
     )[0]
 
 
@@ -238,12 +241,8 @@ def test_live_style_config_validates() -> None:
         "baseline": {"category": "consumer", "type": "generic_consumer"},
         "zendure": {**BATTERY, "metered_by": "household_meter"},
         "cp5": {"category": "charger", "type": "openwb_mqtt", "chargepoint_id": 5},
-        "aquarium_cooler": {
-            "category": "thermal_load", "type": "threshold_homeassistant",
-            "capabilities": {"temperature_c": {"entity": "sensor.t"},
-                             "switch": {"entity": "switch.c"}},
-            "params": {"rated_power_w": 150},
-        },
+        "aquarium_cooler_plug": PLUG,
+        "aquarium_cooler": {**THERMAL, "controlled_by": "aquarium_cooler_plug"},
     })
     validate_plugins(specs)
 
@@ -260,10 +259,8 @@ def test_build_uses_categories_and_bindings() -> None:
     cfg = AppConfig(devices=parse_devices({
         "pv": {"category": "pv", "type": "generic_homeassistant",
                "capabilities": {"power_w": {"entity": "sensor.pv", "invert_sign": True}}},
-        "aq": {"category": "thermal_load", "type": "threshold_homeassistant",
-               "capabilities": {"temperature_c": {"entity": "sensor.t"},
-                                "switch": {"entity": "switch.c"}},
-               "params": {"rated_power_w": 150}},
+        "aq": {**THERMAL, "controlled_by": "plug"},
+        "plug": PLUG,
     }))
     ctx = BuildContext(backends=BackendsConfig(), ha_client=_FakeHA())
     registry, _, topology = build(cfg, ctx=ctx)
@@ -271,7 +268,8 @@ def test_build_uses_categories_and_bindings() -> None:
     assert pv.category is DeviceCategory.PV
     assert pv._entity_power == "sensor.pv" and pv._invert_sign is True
     assert aq.category is DeviceCategory.THERMAL_LOAD
-    assert (aq._entity_sensor, aq._entity_switch) == ("sensor.t", "switch.c")
+    assert (aq._entity_sensor, aq.switch_id) == ("sensor.t", "plug")
+    assert registry.get("plug")._entity_switch == "switch.c"
     assert topology is None  # no grid meter
 
 

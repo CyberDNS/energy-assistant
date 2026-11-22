@@ -156,8 +156,19 @@ devices:
   required ones, plugins that can't serve a category and broken `metered_by`
   chains stop the start with a list of everything to fix.
 
-Threshold loads (the aquarium cooler) are still configured under `assets:`
-for now (#97).
+### Thermal loads and switches
+
+A load that keeps a measured value between two thresholds (aquarium cooler,
+fridge, AC, water heater) is a `thermal_load` device: its `params` hold the
+needs (`bottom_threshold`, `top_threshold`, `direction`, the fallback rates
+`active_rate_per_h` / `drift_rate_per_h`, `min_runtime_h` / `min_offtime_h`),
+and it reads its value from `capabilities.temperature_c` (`type:
+homeassistant_thermal`).  The `switch` device it is `controlled_by` (a plug or
+relay, `type: homeassistant_switch`) is the means: it holds `rated_power_w`,
+reports the power (its optional `power_w` sensor, else the rated power while
+on) and receives the on/off commands.  The planner schedules the load in cheap
+or PV hours; the control loop keeps it inside its thresholds whatever the plan
+says.  Stored thermal models and savings are keyed by the thermal load's id.
 
 ### Vehicles and chargers
 
@@ -318,8 +329,9 @@ Energy Assistant learns it from Home Assistant's state history of the value
 sensor and the device switch (refitted every 6 h, last 10 days) and uses it in
 the planner; until a fit succeeds it uses the configured rates. The Learning tab
 shows the learned rates next to the configured ones, the fit quality and the
-measured vs. modelled value. Configuration: see the threshold example at the end
-of `config.yaml.example`.
+measured vs. modelled value. Configuration: the thermal load's `learning:`
+(`false` keeps the configured rates), see the aquarium example in
+`config.yaml.example`.
 
 ### Learned battery efficiency
 

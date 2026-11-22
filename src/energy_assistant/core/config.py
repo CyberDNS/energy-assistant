@@ -8,11 +8,10 @@ Phase 1 — YAML config
     tariffs:     pricing models, keyed by name
     devices:     device declarations (``DeviceSpec``), keyed by device_id;
                  their ``metered_by`` connections form the metering tree
-    assets:      managed objects (EVs, threshold loads) with targets
     optimizer:   algorithm, horizon, schedule
 
 ``devices`` is parsed into typed ``DeviceSpec`` objects and validated against
-the category schemas (``core/device_model``).  The ``tariffs``, ``assets``
+the category schemas (``core/device_model``).  The ``tariffs``
 and ``optimizer`` sections are kept as raw dicts so each plugin can validate
 its own slice.
 
@@ -101,7 +100,7 @@ class AppConfig:
     """Fully-parsed application configuration from the YAML file.
 
     ``devices`` holds validated ``DeviceSpec`` objects.  The raw dicts in
-    ``tariffs``, ``assets`` and ``optimizer`` are validated by the relevant
+    ``tariffs`` and ``optimizer`` are validated by the relevant
     plugins / loaders — not here.
     """
 
@@ -109,7 +108,6 @@ class AppConfig:
     tariffs: dict[str, dict[str, Any]] = field(default_factory=dict)
     devices: dict[str, DeviceSpec] = field(default_factory=dict)
     forecasts: dict[str, dict[str, Any]] = field(default_factory=dict)
-    assets: dict[str, Any] = field(default_factory=dict)
     optimizer: dict[str, Any] = field(default_factory=dict)
     controller: dict[str, Any] = field(default_factory=dict)
     server: dict[str, Any] = field(default_factory=dict)

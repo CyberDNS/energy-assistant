@@ -306,7 +306,8 @@ def test_select_discovery_devices_skips_ha_and_virtual_devices() -> None:
 
     cfg = {
         "main_grid_meter": spec("main_grid_meter", "generic_homeassistant"),
-        "cooler": spec("cooler", "threshold_homeassistant", DeviceCategory.THERMAL_LOAD),
+        "cooler": spec("cooler", "homeassistant_thermal", DeviceCategory.THERMAL_LOAD),
+        "cooler_plug": spec("cooler_plug", "homeassistant_switch", DeviceCategory.SWITCH),
         "baseline": spec("baseline", "generic_consumer", DeviceCategory.CONSUMER),
         "sma_battery": spec("sma_battery", "modbus", DeviceCategory.BATTERY, label="SMA Speicher"),
         "household_meter": spec("household_meter", "tibber_local"),

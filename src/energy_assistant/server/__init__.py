@@ -65,7 +65,6 @@ from ..assets.ev import (
 from ..assets.fleet import VehicleFleet
 from ..assets.loader import (
     asset_zoneinfo,
-    parse_threshold_assets,
     resolve_active_goals,
     upcoming_days,
 )
@@ -667,7 +666,9 @@ class Application:
 
         # 6 — Storage constraints + optimizer
         # Composition: optimizer / control inputs from the device list.
-        self._storage_constraints = compose(self._cfg.devices).storage_constraints
+        composition = compose(self._cfg.devices)
+        self._storage_constraints = composition.storage_constraints
+        self._threshold_constraints = composition.threshold_constraints
         self._optimizer = MilpHigsOptimizer(
             step_minutes=int(opt.get("step_minutes", 60)),
             precision=float(opt.get("precision", 0.5)),
@@ -729,7 +730,6 @@ class Application:
 
         # 7b' — Savings accounting: the real house vs. a simulated
         # uncontrolled house (core/savings.py).
-        self._threshold_constraints = parse_threshold_assets(self._cfg.assets, self._cfg.devices)
         self._savings = SavingsTracker(
             self._storage_constraints,
             step_minutes=self._optimizer._step_min,
@@ -739,17 +739,17 @@ class Application:
         # Plan fidelity: what the control loop did with each slot's intent.
         self._execution_log = ExecutionLog(step_minutes=self._optimizer._step_min)
 
-        # 7c — Threshold assets + contributors
+        # 7c — Thermal loads (threshold control) + contributors
         self._threshold_contributors = [
             ThresholdControlContributor(tc) for tc in self._threshold_constraints
         ]
         for contrib in self._threshold_contributors:
             self._control_loop.register_contributor(contrib)
-        _log.info("Loaded %d threshold assets", len(self._threshold_constraints))
+        _log.info("Loaded %d thermal loads", len(self._threshold_constraints))
         # Learned thermal model per threshold device (plugins/learned/thermal).
         from ..plugins.learned.thermal import build_thermal_learners  # noqa: PLC0415
         self._thermal_learners = build_thermal_learners(
-            self._threshold_constraints, self._cfg.assets, self._cfg.devices,
+            self._threshold_constraints, self._cfg.devices,
             self._build_ctx.ha_client, self._build_ctx.data_dir,
         )
         if self._thermal_learners:

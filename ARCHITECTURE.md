@@ -188,7 +188,7 @@ See [`DOMAIN_MODEL.md`](DOMAIN_MODEL.md) for the full reference and
 [`config.yaml.example`](config.yaml.example) for a complete annotated example.
 
 The main top-level sections are: `backends`, `tariffs`, `devices` (with
-`metered_by` connections forming the metering tree), `assets`, and `optimizer`.
+`metered_by` connections forming the metering tree), and `optimizer`.
 
 ### Phase 2 — JSON files
 

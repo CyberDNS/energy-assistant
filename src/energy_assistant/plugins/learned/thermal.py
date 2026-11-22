@@ -1,15 +1,13 @@
-"""ThermalLearner — learns a threshold device's thermal model from HA history.
+"""ThermalLearner — learns a thermal load's thermal model from HA history.
 
-Configured on the threshold asset (``assets:`` section)::
+Configured on the ``thermal_load`` device (learning is on by default)::
 
-    aquarium_cooler:
-      type: threshold
-      device: aquarium_cooler
-      ...                         # thresholds, rates (used as fallback)
-      model: learned              # default; "fixed" keeps the configured rates
-      learning:                   # all optional
-        value_entity: sensor.aquarium_thermometer_temperature  # default: device temperature_c entity
-        switch_entity: switch.aquarium_cooler                  # default: device switch entity
+    - id: aquarium_cooler
+      category: thermal_load
+      ...                         # params: thresholds, rates (used as fallback)
+      learning:                   # all optional; "learning: false" keeps the configured rates
+        value_entity: sensor.aquarium_thermometer_temperature  # default: temperature_c entity
+        switch_entity: switch.aquarium_cooler                  # default: the switch's entity
         modes:                    # instead of switch_entity, for two-mode devices (AC)
           cool: switch.ac_cooling
           heat: switch.ac_heating
@@ -279,35 +277,29 @@ class ThermalLearner:
 
 def build_thermal_learners(
     constraints: list[ThresholdConstraints],
-    raw_assets: dict[str, Any],
     devices: Mapping[str, DeviceSpec],
     ha_client: Any,
     data_dir: Path | None,
 ) -> dict[str, ThermalLearner]:
-    """One learner per threshold asset with ``model: learned`` (the default)."""
-    by_device = {tc.device_id: tc for tc in constraints}
+    """One learner per thermal load, unless it has ``learning: false``."""
     out: dict[str, ThermalLearner] = {}
-    for asset_id, cfg in (raw_assets or {}).items():
-        if not isinstance(cfg, dict) or cfg.get("type") != "threshold":
-            continue
-        device_id = str(cfg.get("device") or asset_id)
-        tc = by_device.get(device_id)
-        if tc is None or str(cfg.get("model", "learned")) != "learned":
+    for tc in constraints:
+        device_id = tc.device_id
+        dev = devices.get(device_id)
+        if dev is None or dev.learning is False:
             continue
         if ha_client is None:
             _log.info("thermal:%s: learning needs the homeassistant backend — using configured rates", device_id)
             continue
-        learn = cfg.get("learning") or {}
-        dev = devices.get(device_id)
-        value_entity = learn.get("value_entity") or (
-            dev.bound_entity(Capability.TEMPERATURE_C) if dev is not None else None
-        )
+        learn = dev.learning if isinstance(dev.learning, Mapping) else {}
+        value_entity = learn.get("value_entity") or dev.bound_entity(Capability.TEMPERATURE_C)
         modes = learn.get("modes")
-        if not isinstance(modes, dict) or not modes:
-            switch = learn.get("switch_entity") or (
-                dev.bound_entity(Capability.SWITCH) if dev is not None else None
+        if not isinstance(modes, Mapping) or not modes:
+            switch = devices.get(dev.controlled_by) if dev.controlled_by else None
+            switch_entity = learn.get("switch_entity") or (
+                switch.bound_entity(Capability.SWITCH) if switch is not None else None
             )
-            modes = {device_mode(tc): switch} if switch else {}
+            modes = {device_mode(tc): switch_entity} if switch_entity else {}
         if not value_entity or not modes:
             _log.warning(
                 "thermal:%s: no value/switch entity known (set learning.value_entity and "

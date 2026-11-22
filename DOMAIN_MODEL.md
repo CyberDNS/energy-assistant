@@ -12,17 +12,16 @@ model (categories, capabilities, connections) is designed in issue #97.
 ```
 ┌─────────────────────────────────────────────────────┐
 │                     config.yaml                     │
-├────────────┬──────────┬──────────┬────────┬─────────┤
-│  backends  │ tariffs  │ devices  │ assets │optimizer│
-└────────────┴──────────┴──────────┴────────┴─────────┘
+├─────────────┬─────────────┬─────────────┬────────────┤
+│  backends   │   tariffs   │   devices   │ optimizer  │
+└─────────────┴─────────────┴─────────────┴────────────┘
 ```
 
 | Section     | Purpose |
 |-------------|---------|
 | `backends`  | Connection parameters for ioBroker and Home Assistant |
 | `tariffs`   | Pricing models defined once, referenced by name from devices |
-| `devices`   | Everything in the house — meters, PV, batteries, chargers, consumers — with category, capabilities, params and connections; `metered_by` forms the metering tree |
-| `assets`    | Threshold loads (until they become thermal_load + switch devices, #97) |
+| `devices`   | Everything in the house — meters, PV, batteries, chargers, vehicles, thermal loads, switches, consumers — with category, capabilities, params and connections; `metered_by` forms the metering tree |
 | `optimizer` | Single holistic solver: algorithm, horizon, schedule |
 
 For a complete annotated example covering all sections, see [`config.yaml.example`](config.yaml.example).
@@ -75,8 +74,8 @@ thermal loads, switches, consumers.  Parsed into `DeviceSpec`
 | `pv`           | `power_w` | — | `metered_by` |
 | `battery`      | `power_w`, `soc_pct` | `capacity_kwh`, `max_charge_kw`, `max_discharge_kw` (required), SoC limits, efficiencies, wear cost, … | `metered_by` |
 | `charger`      | `power_w`, `plugged` | `min_power_kw`, `max_power_kw`, `default_vehicle`, `guest_mode` | `metered_by`; the vehicle at it comes from the charging session |
-| `thermal_load` | `temperature_c` | `rated_power_w` | `metered_by`, `controlled_by` → switch (or a `switch` capability binding for now) |
-| `switch`       | `switch` | `rated_power_w` | `metered_by` |
+| `thermal_load` | `temperature_c` | `bottom_threshold`, `top_threshold`, `active_rate_per_h`, `drift_rate_per_h` (required), `direction`, `unit`, `min_runtime_h`, `min_offtime_h` | `metered_by`, `controlled_by` → switch (required) |
+| `switch`       | `switch` | `rated_power_w` (required when it controls a thermal load) | `metered_by`; controls at most one device |
 | `consumer`     | — | — | `metered_by`, `controlled_by` → switch, `included_in` → consumer |
 | `vehicle`      | `soc_pct` | `capacity_kwh` (required), `charge_limit_soc_pct`, `charge_curve`, `max_charge_kw`, `charger_ids`, `push_soc_to_charger`, … | dynamic: a charging session at a charger (see README "Vehicles and chargers") |
 | `sensor`       | — | — | — |
@@ -106,19 +105,24 @@ a `metered_by` chain to a meter without its own `metered_by` is an error.
 
 ---
 
-## Layer 5 — `assets`
+## Needs and means
 
-Threshold loads (aquarium cooler, …) with their thresholds and thermal
-model, referenced to their device by `device:`.  They become `thermal_load`
-devices controlled by a `switch` in #97 phase 4.
+**Needs live on the controlled device, means on the controlling one.**
 
-EVs are no longer assets: a car is a `vehicle` device and its charging needs
-(weekly plan, overrides, force charge) belong to it.  It enters the
-optimization only while a charging session puts it at a charger.
+- A car is a `vehicle` device; its charging needs (weekly plan, overrides,
+  force charge) belong to it.  It enters the optimization only while a
+  charging session puts it at a `charger`, which brings the means (power
+  limits).
+- A `thermal_load` holds its thresholds and thermal model (learned, or the
+  configured rates); the `switch` it is `controlled_by` brings the rated power
+  and executes the on/off plan.
+
+The former `assets:` section is gone; the loader rejects it with a
+migration hint.
 
 ---
 
-## Layer 6 — `optimizer`
+## Layer 4 — `optimizer`
 
 A single holistic optimizer runs over all controllable devices simultaneously.
 This is the main value driver: joint optimization means the scheduler sees
@@ -137,10 +141,10 @@ rule-based scheduler, an ML model, or an LLM-driven planner in the future.
 tariffs:          ←── referenced by name from devices[*].tariff
 devices:          ←── referenced by id from devices[*].metered_by /
                       controlled_by / included_in
-                  ←── referenced by id from assets[*].device
                   ←── type:differential references two device ids
-assets:           ←── optimizer discovers constraints from active assets
-optimizer:        ←── reads all devices + active asset constraints at runtime
+optimizer:        ←── reads all devices; constraints are composed from them
+                      (batteries, thermal loads + switches, vehicles at
+                      chargers) at runtime
 ```
 
 ---

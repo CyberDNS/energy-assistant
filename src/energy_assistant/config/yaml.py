@@ -6,7 +6,6 @@ Expected top-level sections
 ``tariffs``    Pricing models keyed by name, e.g. ``tibber``, ``export``.
 ``devices``    Device declarations (category, capabilities, params,
                connections), see ``core/device_model``.
-``assets``     Threshold loads (aquarium cooler, …).  EVs are vehicle devices.
 ``optimizer``  Algorithm, horizon, schedule.
 ``energy_dashboard``  Optional import of the HA Energy dashboard consumers.
 
@@ -100,16 +99,18 @@ class YamlConfigLoader:
                 "device instead, and move max_import_kw / curtail_order / "
                 "limit_hysteresis_kw to the grid_meter's 'params:'"
             )])
-        ev_assets = [
-            asset_id for asset_id, cfg in (raw.get("assets") or {}).items()
-            if not (isinstance(cfg, dict) and cfg.get("type") == "threshold")
+        if raw.get("assets"):
+            raise DeviceConfigError([_assets_hint(raw["assets"])])
+        old_thermal = [
+            device_id for device_id, d in _normalize_devices(raw.get("devices") or {}).items()
+            if d.get("type") == "threshold_homeassistant"
         ]
-        if ev_assets:
+        if old_thermal:
             raise DeviceConfigError([(
-                f"assets: {', '.join(ev_assets)}: EVs are devices now — a 'category: vehicle' "
-                "device for the car (capacity, charge curve, SoC entity; "
-                "params.previous_ids: [<old asset id>] keeps its stored plans) and "
-                "'params: {default_vehicle: <car>, min_power_kw, max_power_kw}' on its charger"
+                f"devices: {', '.join(old_thermal)}: type 'threshold_homeassistant' was replaced — "
+                "a 'category: switch' device (type homeassistant_switch, capabilities.switch, "
+                "params.rated_power_w) and the thermal_load with type homeassistant_thermal, "
+                "'controlled_by: <switch>' and the thresholds / rates under 'params:'"
             )])
         backends = _parse_backends(raw.get("backends") or {})
         raw_tariffs: dict[str, Any] = raw.get("tariffs") or {}
@@ -119,7 +120,6 @@ class YamlConfigLoader:
             tariffs=raw_tariffs,
             devices=parse_devices(_normalize_devices(raw.get("devices") or {})),
             forecasts=_normalize_forecasts(raw.get("forecasts") or {}),
-            assets=raw.get("assets") or {},
             optimizer=raw.get("optimizer") or {},
             controller=raw.get("controller") or {},
             server=raw.get("server") or {},
@@ -127,6 +127,25 @@ class YamlConfigLoader:
             energy_dashboard=raw.get("energy_dashboard") or {},
             default_tariff_id=default_tariff_id,
         )
+
+
+def _assets_hint(assets: Any) -> str:
+    """Migration hint for a leftover ``assets:`` section."""
+    kinds = {
+        str(cfg.get("type")) if isinstance(cfg, dict) and cfg.get("type") == "threshold" else "ev"
+        for cfg in (assets.values() if isinstance(assets, dict) else [])
+    }
+    parts = []
+    if "ev" in kinds:
+        parts.append("EVs are 'category: vehicle' devices (capacity, charge curve, SoC entity; "
+                     "params.previous_ids: [<old asset id>] keeps their stored plans) with "
+                     "'params: {default_vehicle: <car>, min_power_kw, max_power_kw}' on the charger")
+    if "threshold" in kinds:
+        parts.append("threshold loads are 'category: thermal_load' devices (thresholds, rates "
+                     "and run times under 'params:', 'model: fixed' → 'learning: false') "
+                     "'controlled_by' a 'category: switch' device with params.rated_power_w; "
+                     "keep the device id so stored models and savings stay")
+    return "the 'assets:' section was removed — " + "; ".join(parts)
 
 
 def _find_default_tariff(raw_tariffs: dict[str, Any]) -> str | None:
