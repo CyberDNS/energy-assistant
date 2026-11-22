@@ -8,7 +8,6 @@ from .config import (
     BackendsConfig,
     ConfigManager,
     HomeAssistantConfig,
-    IoBrokerConfig,
 )
 from .constraint import Constraint
 from .control import (
@@ -73,7 +72,6 @@ __all__ = [
     "ForecastProvider",
     "ForecastQuantity",
     "HomeAssistantConfig",
-    "IoBrokerConfig",
     "LiveSituation",
     "Measurement",
     "OptimizationContext",

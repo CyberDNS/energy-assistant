@@ -46,15 +46,21 @@ src/
     storage/           # Storage backend implementations
       sqlite.py        # SqliteStorageBackend (aiosqlite)
     plugins/           # Built-in device & service integrations
-      generic_iobroker/  # generic_iobroker source
-      generic_ha/        # generic_ha source + ha_switch control
-      tibber/            # tibber_iobroker tariff
-      tibber_local/      # Tibber Pulse Bridge read on the LAN (SML telegrams)
+      generic_homeassistant/   # HA sensor as meter / PV / consumer
+      homeassistant_vehicle/   # car from its HA integration (SoC, range, plug)
+      homeassistant_switch/    # on/off switch in HA (executes a thermal load)
+      homeassistant_thermal/   # thermal load read from HA, switched by its switch
       tasmota/           # Tasmota devices read on the LAN (profiles/*.yaml per meter script or plug)
-      zendure/           # Zendure battery (MILP participant)
-      sma/               # SMA inverter / Energy Manager
+      tibber/            # Tibber prices (tariff) and live stream (meter)
+      tibber_local/      # Tibber Pulse Bridge read on the LAN (SML telegrams)
+      openwb_mqtt/       # openWB 2.x chargepoint over MQTT
+      zendure/           # Zendure battery (cloud or local MQTT)
       _modbus/           # shared Modbus TCP transport + register codec
       modbus/            # profile-driven Modbus device (profiles/*.yaml per vendor model)
+      differential/      # power = minuend − subtrahend of two devices
+      learned/           # learned consumption, thermal and efficiency models
+      milp_highs/        # the MILP optimizer (HiGHS)
+      mqtt_publisher.py  # Home Assistant MQTT discovery entities
       ...
     server/            # HTTP API, WebSocket, startup lifecycle
 tests/
@@ -279,5 +285,5 @@ No layer holds a direct reference to another layer's implementation.
 | 9 | `ForecastProvider` protocol + pass-through stub |
 | 10 | `Optimizer` protocol + MILP implementation |
 | 11 | `Asset` constraint model + runtime discovery |
-| 12 | First generic device plugins (`generic_ha`, `generic_iobroker`) |
+| 12 | First generic device plugins (`generic_homeassistant`, `differential`) |
 | 13 | First typed device plugin (e.g. Zendure battery with SOC tracking) |

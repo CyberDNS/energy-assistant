@@ -416,21 +416,29 @@ class TestSavingsStorage:
             new = SavingsSlot(now - timedelta(hours=1), 0.25, 0.10, 0.25, 0.30, 0.25, 0.05)
             await db.save_savings_slot(old)
             await db.save_savings_slot(new)
-            # Legacy rows: kept a week for debugging.
-            for age in (8, 2):
-                await db._db.execute(
-                    "INSERT INTO savings_actual (slot_start, hours, baseline_cost, actual_cost,"
-                    " inventory_delta) VALUES (?, 0.25, 0, 0, 0)",
-                    ((now - timedelta(days=age)).isoformat(timespec="seconds"),),
-                )
-            await db._db.commit()
 
-            assert await db.purge_savings(now) == 2
+            assert await db.purge_savings(now) == 1
             (row,) = await db.query_savings_slots(now - timedelta(days=500), now)
             assert row["saving"] == pytest.approx(0.15)
             assert row["ev_saving"] == pytest.approx(0.05)
-            async with db._db.execute("SELECT COUNT(*) FROM savings_actual") as cur:
-                assert (await cur.fetchone())[0] == 1
+        finally:
+            await db.stop()
+
+    async def test_legacy_savings_tables_are_dropped(self, tmp_path: Path) -> None:
+        import sqlite3
+
+        path = tmp_path / "h.db"
+        with sqlite3.connect(path) as con:  # the accounting before #82
+            con.execute("CREATE TABLE savings_actual (slot_start TEXT PRIMARY KEY)")
+            con.execute("CREATE TABLE savings_predicted (slot_start TEXT, kind TEXT)")
+        db = SqliteStorageBackend(path)
+        await db.start()
+        try:
+            async with db._db.execute(
+                "SELECT name FROM sqlite_master WHERE name LIKE 'savings_%'"
+            ) as cur:
+                names = {r[0] for r in await cur.fetchall()}
+            assert not names & {"savings_actual", "savings_predicted"}
         finally:
             await db.stop()
 

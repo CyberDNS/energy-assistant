@@ -6,91 +6,57 @@
 # See secrets.yaml.example for the list of required secret keys.
 
 # ---------------------------------------------------------------------------
-# Backends
+# Backends — shared connections the plugins use
 # ---------------------------------------------------------------------------
 
-iobroker:
-  host: "192.168.x.x"
-  port: 8087
-  # Only needed if authentication is enabled in the ioBroker simple-api adapter.
-  # Put the values in secrets.yaml (iobroker_user / iobroker_password).
-  # username: !secret iobroker_user
-  # password: !secret iobroker_password
-
-homeassistant:
-  # Direct Home Assistant REST API connection (for devices not bridged via ioBroker).
-  # Token goes in secrets.yaml as: ha_token: "<long-lived-access-token>"
-  url: "https://your-homeassistant-instance.example.com"
-  # or: url: "http://192.168.x.x:8123"
+backends:
+  homeassistant:
+    # Home Assistant REST/WebSocket API: HA-backed devices (generic_homeassistant,
+    # homeassistant_vehicle / _switch / _thermal), learned forecasts, the
+    # Energy dashboard import.
+    url: "https://your-homeassistant-instance.example.com"   # or http://192.168.x.x:8123
+    token: !secret ha_token
+  mqtt:
+    # Broker for openwb_mqtt, zendure (connection: local) and the Home
+    # Assistant MQTT discovery entities Energy Assistant publishes.
+    host: 192.168.x.x
+    port: 1883
+    username: !secret mqtt_user
+    password: !secret mqtt_password
 
 # ---------------------------------------------------------------------------
-# Python device plugins
-# (devices with complex protocols or MILP participation — require custom code)
+# Forecasts — system-wide forecasts (device forecasts live on the devices)
 # ---------------------------------------------------------------------------
 
-tibber_iobroker:
-  # Find your home ID under: tibberlink.0.Homes.* in ioBroker
-  home_id: "<your-tibber-home-id>"
+forecasts:
+  pv:
+    type: forecast_solar          # https://forecast.solar, no account needed
+    latitude: 49.8
+    longitude: 6.4
+    declination: 20               # panel tilt (°)
+    azimuth: 0                    # 0 = south, -90 = east, 90 = west
+    kwp: 7.4
+    # api_key: !secret forecast_solar_key   # optional (personal plan)
 
-pvforecast_iobroker:
-  plant_id: "pv"
-  timezone: "Europe/Berlin"
+# ---------------------------------------------------------------------------
+# Tariffs — pricing models, referenced by id from devices (tariff: <id>)
+# ---------------------------------------------------------------------------
 
-zendure:
-  # Native Zendure plugin — no ioBroker. Talks MQTT to the Zendure cloud
-  # (connection: cloud, default) or to backends.mqtt (connection: local).
-  # cloud_key = the Zendure app's authorization cloud key (HA integration key).
-  # List product/device keys: python scripts/probe_zendure.py
-  cloud_key: !secret zendure_cloud_key
-  product_key: "<product-key>"
-  device_key: "<device-key>"
-  capacity_kwh: 8.0
-  max_charge_kw: 1.2
-  max_discharge_kw: 1.2
-  maintenance_charge_w: 300
-  # smart_mode: true   # keep limit writes in RAM instead of flash
-  # charge_efficiency: 0.95       # per direction; defaults 0.95
-  # discharge_efficiency: 0.95
-  # efficiency: learned           # plan with the round trip learned from measured
-  #                               # cycles once confident (default: configured)
-
-zendure_iobroker:
-  # Find hub_id and device_serial: python scripts/probe_iobroker.py zendure
-  hub_id: "<hub-id>"
-  device_serial: "<device-serial>"
-  # Capacity = number of AB2000 packs × 2 kWh. Confirm via the packNum OID.
-  capacity_kwh: 8.0
-  max_charge_kw: 1.2
-  max_discharge_kw: 1.2
-  # Charge power (W) applied when SoC drops below 5% (maintenance mode).
-  maintenance_charge_w: 300
-
-sma_modbus_iobroker:
-  # SMA battery read via Modbus adapter (instance 0).
-  # This battery is NOT controllable — the SMA inverter manages it automatically.
-  # OID defaults follow the SMA Modbus register map; override if your model differs.
-  # oid_power_w: "modbus.0.inputRegisters.30775_PowerAC"  # signed; negative=charging
-  # oid_soc: "modbus.0.inputRegisters.30845_BAT_SoC"
-  # oid_max_charge_w: "modbus.0.holdingRegisters.40189_WMaxCha"
-  # oid_max_discharge_w: "modbus.0.holdingRegisters.40191_WMaxDsch"
-
-sma_em_iobroker:
-  # SMA Energy Manager — direct grid meter via ioBroker sma-em adapter.
-  # Find the serial under: sma-em.0.<serial> in the ioBroker object tree.
-  # serial: "1234567890"
-
-mt175_ha:
-  # MT175 smart meter exposed as a Home Assistant sensor.
-  # Uncomment to override the default entity ID (sensor.mt175_mt175_p).
-  # entity_id: "sensor.mt175_mt175_p"
-
-home_power_iobroker:
-  # Real-time home energy sensors from Home Assistant via ioBroker hass adapter.
-  # Override only if your HA entity IDs differ from the defaults.
-  # oid_household_w: "hass.0.entities.sensor.power_consumption_household.state"
-  # oid_overflow_w: "hass.0.entities.sensor.power_production_overflow_pv_only_household.state"
-  # oid_cars_w: "hass.0.entities.sensor.power_consumption_cars.state"
-  # oid_pv_w: "hass.0.entities.sensor.power_production_pv.state"
+tariffs:
+  # Grid connection point: what you receive for feed-in.
+  grid:
+    type: flat_rate
+    export_price_eur_per_kwh: 0.082
+  # Tibber spot price; default: true bills every device without a tariff: here.
+  household:
+    type: tibber
+    token: !secret tibber_token   # https://developer.tibber.com/settings/access-token
+    # home_id: !secret tibber_home_id   # default: the account's first home
+    default: true
+  # A fixed rate, e.g. a separately metered heat pump (Messkonzept 8).
+  # heatpump:
+  #   type: flat_rate
+  #   import_price_eur_per_kwh: 0.178
 
 # ---------------------------------------------------------------------------
 # Tasmota devices on the LAN (type: tasmota)
@@ -158,13 +124,13 @@ home_power_iobroker:
 # Optimizer
 # ---------------------------------------------------------------------------
 
-milp:
-  # Constant household background load when no load forecast is available.
-  baseline_load_kw: 0.3
-  # Grid feed-in tariff (EUR/kWh). Set to 0.0 if you don't sell back to the grid.
-  feed_in_eur_per_kwh: 0.082
-  # Planning horizon in hours.
-  horizon_hours: 24
+optimizer:
+  # Upper cap; the horizon follows the available prices and forecasts.
+  horizon_hours: 48
+  step_minutes: 15
+  # Speed/accuracy trade-off, 0.0 (fast/coarse) … 1.0 (slow/exact): the
+  # solver's MIP gap and time limit.  On timeout the best plan found is used.
+  precision: 0.1
 
 # ---------------------------------------------------------------------------
 # Controller and server

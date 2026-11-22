@@ -72,9 +72,9 @@ spectrum from pure configuration to full Python plugins:
 ```
 Simple ◄────────────────────────────────────────► Complex
 Config-driven                                  Python plugin
-generic_ha/iobroker  →  + tariff + control  →  battery (MILP)
-differential source  →  + asset model       →  EV charger (SOC planning)
-read-only sensor     →  + topology node     →  SMA EM (firmware protocol)
+generic_homeassistant  →  + tariff + control   →  battery (MILP)
+differential source    →  + vehicle / session →  EV charger (SoC planning)
+read-only sensor       →  + metered_by        →  Modbus / Tasmota (LAN protocol)
 ```
 
 A user who wants to integrate their heat pump as a read-only consumer needs
@@ -124,18 +124,17 @@ correctly handle arbitrage, opportunity cost, and cross-device interactions.
 
 ### Configuration Structure
 
-An Energy Assistant configuration is divided into six top-level sections,
+An Energy Assistant configuration is divided into a few top-level sections,
 each with a distinct responsibility. See `DOMAIN_MODEL.md` for the full
 reference.
 
 | Section     | Purpose |
 |-------------|------------------------------------------------------------------|
-| `backends`  | Connection parameters for ioBroker and Home Assistant |
+| `backends`  | Connections to Home Assistant and the MQTT broker |
 | `tariffs`   | Pricing models defined once, referenced by name |
-| `devices`   | Every piece of hardware — meters, consumers, producers, storage |
-| `topology`  | The physical wiring of meters as a tree |
-| `assets`    | Managed objects (EVs, heat stores) with their own targets |
-| `optimizer` | Single holistic solver: algorithm, horizon, schedule |
+| `forecasts` | System-wide forecasts (PV) |
+| `devices`   | Everything in the house, one flat list: meters, PV, batteries, chargers, vehicles, thermal loads, switches, consumers; `metered_by` wires the meters into a tree |
+| `optimizer` | Single holistic solver: horizon, slot length, precision |
 
 ### Devices
 
@@ -180,8 +179,8 @@ code:
 
 | Connector          | Description |
 |--------------------|-------------|
-| `generic_ha`       | Reads sensors and controls entities via the Home Assistant REST API |
-| `generic_iobroker` | Reads and writes datapoints via the ioBroker simple-api |
+| `generic_homeassistant` | Reads sensors via the Home Assistant REST API |
+| `tasmota`          | Reads a Tasmota device (IR head, smart plug) on the LAN |
 | `differential`     | Derives power as `minuend − subtrahend` from two named devices |
 | `modbus`           | Reads a device directly over Modbus TCP; the vendor register mapping comes from a profile file (e.g. `sma_sunny_boy_storage`) |
 
@@ -202,11 +201,11 @@ load only.
 The heat pump consumption is never directly measured — it is derived as
 `household_meter − measuring_switch`. No plugin, no code, no extra hardware.
 
-### Energy Topology
+### Metering Tree
 
-The topology describes the physical wiring of meters as a tree.
-Device capabilities and sources are declared in `devices:`, not here —
-the topology is purely structural.
+Each device names the meter it sits behind (`metered_by:`); together these
+describe the physical wiring of the meters as a tree, rooted at the grid
+connection point (the meter that sees the full imported/exported power).
 
 The tree is used for:
 - **Power flow visualisation** — the dashboard renders where energy is flowing
@@ -215,20 +214,17 @@ The tree is used for:
 - **Residual derivation** — a device with no direct sensor and exactly one
   un-metered branch can have its power inferred as parent minus metered children
 
-The single top-level key is the grid connection point (the meter that
-sees the full imported/exported power). Every node references a device
-defined in `devices:`.
+### Needs and Means
 
-### Assets
+Things with a quantified target — a car that must reach 80 % SoC by 07:00, an
+aquarium kept between 18 and 20.5 °C, later a hot water tank — are devices
+of their own (`vehicle`, `thermal_load`).  They hold the **needs**: targets,
+weekly plans, thresholds, learned models.  The device that acts on them holds
+the **means**: a `charger` (power limits) or a `switch` (rated power).
 
-An **Asset** is a managed object that stores energy and has a quantified
-target — an EV that must reach 80 % SoC by 07:00, or a hot water tank that
-must reach 55 °C before the morning peak tariff window. Assets are distinct
-from the devices that control them.
-
-Asset constraints are discovered dynamically by the optimizer at runtime.
-When an EV is not connected, no constraint is active. When it connects, its
-target becomes part of the next optimization run automatically.
+A car meets a charger through a charging session, which starts when the car
+is plugged in.  Only then does its target become part of the next
+optimization run; when it is away, no constraint is active.
 
 ### The Optimizer
 

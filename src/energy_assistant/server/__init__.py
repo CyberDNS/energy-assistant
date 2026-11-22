@@ -710,6 +710,7 @@ class Application:
                 _log.info("Dropping stored next vehicle for %s: %s", charger_id, exc)
         self._fleet.sessions.guest_modes.update(await self._storage.load_guest_modes())
         self._fleet.sessions.prune_guest_modes()
+        await self._report_orphaned_data()
         self._ev_contributors = list(self._fleet.contributors.values())
         for contrib in self._ev_contributors:
             self._control_loop.register_contributor(contrib)
@@ -2470,15 +2471,6 @@ class Application:
                 ],
             }
 
-        @api.get("/api/savings/legacy")
-        async def get_legacy_savings(start: datetime, end: datetime | None = None) -> dict:
-            """Slots of the previous accounting (before #82), kept a week for
-            debugging."""
-            start = _as_utc(start)
-            end = _as_utc(end) if end is not None else datetime.now(timezone.utc)
-            rows = await self._storage.query_legacy_savings(start, end)
-            return {"slots": [{**r, "slot_start": r["slot_start"].isoformat()} for r in rows]}
-
         @api.post("/api/plan/refresh")
         async def trigger_plan_refresh() -> dict:
             """Trigger an immediate plan recomputation outside the normal interval."""
@@ -2724,9 +2716,9 @@ class Application:
 
         # ── EV charging targets ────────────────────────────────────────
 
-        @api.get("/api/ev")
-        async def get_ev_status() -> list[dict]:
-            """Active EV charging goals (one per configured chargepoint)."""
+        @api.get("/api/vehicles")
+        async def get_vehicles() -> list[dict]:
+            """Every vehicle: where it is, its SoC, charging goal and plans."""
             device_states = {
                 did: state
                 for device in self._registry.all()
@@ -2758,11 +2750,9 @@ class Application:
                 planned = next((g for g in self._last_ev_goals if g.asset_id == asset.asset_id), None)
                 force = self._ev_force_charge.get(asset.asset_id)
                 result.append({
-                    "asset_id":       asset.asset_id,
                     "vehicle_id":     asset.asset_id,
-                    # The charger it is at (commands, plan intents); the
-                    # vehicle id while away.
-                    "device_id":      asset.device_id or asset.asset_id,
+                    # The charger it is at (its plan intents are the
+                    # charger's); None while away.
                     "charger_id":     asset.device_id or None,
                     "charger_label":  charger_spec.display_name if charger_spec else None,
                     "session_since":  vx.get("session_since"),
@@ -2895,11 +2885,11 @@ class Application:
                 )
 
                 devices.append({
-                    "device_id": asset.device_id or asset.asset_id,
+                    "device_id": asset.asset_id,
                     "vehicle_id": asset.asset_id,
                     "charger_id": asset.device_id or None,
                     "label": asset.label,
-                    "type": "ev",
+                    "category": "vehicle",
                     "capacity_kwh": asset.capacity_kwh,
                     "soc_pct": soc_pct,
                     "connected": connected,
@@ -2939,8 +2929,8 @@ class Application:
 
                 devices.append({
                     "device_id": sc.device_id,
-                    "label": sc.device_id.replace("_", " ").title(),
-                    "type": "storage",
+                    "label": self._label(sc.device_id),
+                    "category": "battery",
                     "capacity_kwh": sc.capacity_kwh,
                     "min_soc_pct": sc.min_soc_pct,
                     "max_soc_pct": sc.max_soc_pct,
@@ -2982,8 +2972,8 @@ class Application:
 
                 devices.append({
                     "device_id": tc.device_id,
-                    "label": tc.label or tc.device_id.replace("_", " ").title(),
-                    "type": "threshold",
+                    "label": tc.label or self._label(tc.device_id),
+                    "category": "thermal_load",
                     "unit": tc.unit,
                     "bottom_threshold": tc.bottom_threshold,
                     "top_threshold": tc.top_threshold,
@@ -3026,14 +3016,14 @@ class Application:
             except ValueError:
                 raise HTTPException(400, f"Invalid date: {s!r} (expected YYYY-MM-DD)")
 
-        @api.get("/api/ev/{asset_id}/plan")
-        async def get_ev_plan(asset_id: str) -> dict:
+        @api.get("/api/vehicles/{vehicle_id}/plan")
+        async def get_ev_plan(vehicle_id: str) -> dict:
             """Weekly plan, active dated overrides, and the effective next 7 days."""
-            asset = _parse_ev_asset(asset_id)
-            weekly = self._ev_weekly_plans.get(asset_id, {})
-            overrides = self._ev_day_overrides.get(asset_id, {})
+            asset = _parse_ev_asset(vehicle_id)
+            weekly = self._ev_weekly_plans.get(vehicle_id, {})
+            overrides = self._ev_day_overrides.get(vehicle_id, {})
             return {
-                "asset_id": asset_id,
+                "vehicle_id": vehicle_id,
                 "timezone": asset.timezone,
                 "weekly": [
                     {
@@ -3056,10 +3046,10 @@ class Application:
                 "days": upcoming_days(asset, weekly, overrides),
             }
 
-        @api.put("/api/ev/{asset_id}/plan")
-        async def put_ev_weekly_plan(asset_id: str, body: WeeklyPlanBody) -> dict:
+        @api.put("/api/vehicles/{vehicle_id}/plan")
+        async def put_ev_weekly_plan(vehicle_id: str, body: WeeklyPlanBody) -> dict:
             """Replace the weekly plan (one row per ISO weekday)."""
-            _parse_ev_asset(asset_id)
+            _parse_ev_asset(vehicle_id)
             entries: list[EvWeeklyTarget] = []
             seen: set[int] = set()
             for row in body.weekly:
@@ -3073,13 +3063,13 @@ class Application:
                     target_soc_pct=row.target_soc_pct,
                     target_by=_validate_hhmm(row.target_by),
                 ))
-            await self._save_ev_weekly_plan(asset_id, entries)
-            return {"status": "ok", "asset_id": asset_id}
+            await self._save_ev_weekly_plan(vehicle_id, entries)
+            return {"status": "ok", "vehicle_id": vehicle_id}
 
-        @api.put("/api/ev/{asset_id}/plan/{day}")
-        async def put_ev_day_override(asset_id: str, day: str, body: DayOverrideBody) -> dict:
+        @api.put("/api/vehicles/{vehicle_id}/plan/{day}")
+        async def put_ev_day_override(vehicle_id: str, day: str, body: DayOverrideBody) -> dict:
             """Skip or re-target one concrete date. Expires after that local day."""
-            asset = _parse_ev_asset(asset_id)
+            asset = _parse_ev_asset(vehicle_id)
             d = _parse_date(day)
             today_local = datetime.now(timezone.utc).astimezone(asset_zoneinfo(asset)).date()
             if d < today_local:
@@ -3095,74 +3085,74 @@ class Application:
                     target_soc_pct=body.target_soc_pct,
                     target_by=_validate_hhmm(body.target_by),
                 )
-            await self._set_ev_day_override(asset_id, override)
-            _log.info("EV day override: %r %s → %s", asset_id, day,
+            await self._set_ev_day_override(vehicle_id, override)
+            _log.info("EV day override: %r %s → %s", vehicle_id, day,
                       "skip" if override.skip else f"{override.target_soc_pct:.0f}% by {override.target_by}")
             asyncio.create_task(self._run_plan())
-            return {"status": "ok", "asset_id": asset_id, "date": day}
+            return {"status": "ok", "vehicle_id": vehicle_id, "date": day}
 
-        @api.delete("/api/ev/{asset_id}/plan/{day}")
-        async def delete_ev_day_override(asset_id: str, day: str) -> dict:
+        @api.delete("/api/vehicles/{vehicle_id}/plan/{day}")
+        async def delete_ev_day_override(vehicle_id: str, day: str) -> dict:
             """Revert one date to the weekly plan."""
-            _parse_ev_asset(asset_id)
+            _parse_ev_asset(vehicle_id)
             d = _parse_date(day)
-            if d not in self._ev_day_overrides.get(asset_id, {}):
-                raise HTTPException(404, f"No override for {asset_id!r} on {day}")
-            await self._clear_ev_day_override(asset_id, d)
-            _log.info("EV day override cleared: %r %s", asset_id, day)
+            if d not in self._ev_day_overrides.get(vehicle_id, {}):
+                raise HTTPException(404, f"No override for {vehicle_id!r} on {day}")
+            await self._clear_ev_day_override(vehicle_id, d)
+            _log.info("EV day override cleared: %r %s", vehicle_id, day)
             asyncio.create_task(self._run_plan())
-            return {"status": "ok", "asset_id": asset_id, "date": day}
+            return {"status": "ok", "vehicle_id": vehicle_id, "date": day}
 
-        @api.post("/api/ev/{asset_id}/force_charge")
-        async def force_charge(asset_id: str, target_soc_pct: float) -> dict:
+        @api.post("/api/vehicles/{vehicle_id}/force_charge")
+        async def force_charge(vehicle_id: str, target_soc_pct: float) -> dict:
             """Charge at full speed until *target_soc_pct*.
 
             Resets automatically on vehicle unplug or when the target is
             reached.  Only allowed while a vehicle is connected — otherwise
             the flag could never clear.
             """
-            asset = _parse_ev_asset(asset_id)
+            asset = _parse_ev_asset(vehicle_id)
             _validate_soc(target_soc_pct)
-            if asset.asset_id in self._disabled_chargepoints:
-                raise HTTPException(409, f"Chargepoint {asset_id!r} is disabled")
+            if asset.vehicle_id in self._disabled_chargepoints:
+                raise HTTPException(409, f"Chargepoint {vehicle_id!r} is disabled")
             state = self._registry.latest_state(asset.device_id)
             if state is None or not state.available:
-                raise HTTPException(409, f"No vehicle connected at {asset_id!r}")
-            await self._apply_force_charge(asset_id, target_soc_pct)
-            return {"status": "ok", "asset_id": asset_id, "target_soc_pct": target_soc_pct}
+                raise HTTPException(409, f"No vehicle connected at {vehicle_id!r}")
+            await self._apply_force_charge(vehicle_id, target_soc_pct)
+            return {"status": "ok", "vehicle_id": vehicle_id, "target_soc_pct": target_soc_pct}
 
-        @api.delete("/api/ev/{asset_id}/force_charge")
-        async def cancel_force_charge(asset_id: str) -> dict:
+        @api.delete("/api/vehicles/{vehicle_id}/force_charge")
+        async def cancel_force_charge(vehicle_id: str) -> dict:
             """Cancel an active force charge (control returns to the plan)."""
-            _parse_ev_asset(asset_id)
-            if asset_id not in self._ev_force_charge:
-                raise HTTPException(404, f"No active force charge for {asset_id!r}")
-            await self._clear_force_charge(asset_id, "cancelled via API")
-            return {"status": "ok", "asset_id": asset_id}
+            _parse_ev_asset(vehicle_id)
+            if vehicle_id not in self._ev_force_charge:
+                raise HTTPException(404, f"No active force charge for {vehicle_id!r}")
+            await self._clear_force_charge(vehicle_id, "cancelled via API")
+            return {"status": "ok", "vehicle_id": vehicle_id}
 
-        @api.post("/api/ev/{asset_id}/disable")
-        async def disable_chargepoint(asset_id: str) -> dict:
+        @api.post("/api/vehicles/{vehicle_id}/disable")
+        async def disable_chargepoint(vehicle_id: str) -> dict:
             """Exclude this chargepoint from optimizer and control."""
-            if not any(a.asset_id == asset_id for a in self._ev_assets):
-                raise HTTPException(404, f"Unknown EV asset: {asset_id!r}")
-            await self._storage.set_ev_disabled(asset_id)
-            self._disabled_chargepoints.add(asset_id)
+            if not any(a.vehicle_id == vehicle_id for a in self._ev_assets):
+                raise HTTPException(404, f"Unknown EV asset: {vehicle_id!r}")
+            await self._storage.set_ev_disabled(vehicle_id)
+            self._disabled_chargepoints.add(vehicle_id)
             self._fleet.apply(self._disabled_chargepoints, self._ev_force_charge)
-            _log.info("Chargepoint disabled: %r", asset_id)
+            _log.info("Chargepoint disabled: %r", vehicle_id)
             asyncio.create_task(self._run_plan())
-            return {"status": "ok", "asset_id": asset_id, "disabled": True}
+            return {"status": "ok", "vehicle_id": vehicle_id, "disabled": True}
 
-        @api.delete("/api/ev/{asset_id}/disable")
-        async def enable_chargepoint(asset_id: str) -> dict:
+        @api.delete("/api/vehicles/{vehicle_id}/disable")
+        async def enable_chargepoint(vehicle_id: str) -> dict:
             """Re-include this chargepoint in optimizer and control."""
-            if not any(a.asset_id == asset_id for a in self._ev_assets):
-                raise HTTPException(404, f"Unknown EV asset: {asset_id!r}")
-            await self._storage.clear_ev_disabled(asset_id)
-            self._disabled_chargepoints.discard(asset_id)
+            if not any(a.vehicle_id == vehicle_id for a in self._ev_assets):
+                raise HTTPException(404, f"Unknown EV asset: {vehicle_id!r}")
+            await self._storage.clear_ev_disabled(vehicle_id)
+            self._disabled_chargepoints.discard(vehicle_id)
             self._fleet.apply(self._disabled_chargepoints, self._ev_force_charge)
-            _log.info("Chargepoint enabled: %r", asset_id)
+            _log.info("Chargepoint enabled: %r", vehicle_id)
             asyncio.create_task(self._run_plan())
-            return {"status": "ok", "asset_id": asset_id, "disabled": False}
+            return {"status": "ok", "vehicle_id": vehicle_id, "disabled": False}
 
         # ── Chargers and charging sessions ──────────────────────────────
 
@@ -3198,7 +3188,7 @@ class Application:
                 })
             return out
 
-        @api.put("/api/ev/guest/mode")
+        @api.put("/api/guest/mode")
         async def put_guest_mode(mode: str, charger_id: str | None = None) -> dict:
             """How the guest car charges: ``pv_only`` (PV surplus) or ``instant``
             (full power now).  At *charger_id*, or wherever the guest is.
@@ -3209,7 +3199,7 @@ class Application:
                 raise HTTPException(400, str(exc)) from exc
             return {"status": "ok", "mode": mode}
 
-        @api.put("/api/ev/{vehicle_id}/charger")
+        @api.put("/api/vehicles/{vehicle_id}/charger")
         async def put_ev_charger(vehicle_id: str, charger_id: str) -> dict:
             """Put a car (or ``guest``) on a charger — the last selection wins.
             A car plugged in there is reassigned now; a free charger expects
@@ -3300,6 +3290,38 @@ class Application:
     # ------------------------------------------------------------------
     # Ledger initialisation
     # ------------------------------------------------------------------
+
+    def _label(self, device_id: str) -> str:
+        """The device's display name (its label, or its id title-cased)."""
+        spec = self._cfg.devices.get(device_id)
+        return spec.display_name if spec is not None else device_id.replace("_", " ").title()
+
+    async def _report_orphaned_data(self) -> None:
+        """Log stored rows whose id is no configured device of the right
+        category (left over from renamed or removed devices).  Nothing is
+        deleted; the warning names the table and the ids."""
+        stored_ids = getattr(self._storage, "stored_ids", None)
+        if stored_ids is None:
+            return
+        try:
+            stored = await stored_ids()
+        except Exception as exc:  # noqa: BLE001 — a diagnostic only
+            _log.debug("orphan check failed: %s", exc)
+            return
+        batteries = {sc.device_id for sc in self._storage_constraints}
+        vehicles, chargers = set(self._fleet.vehicles), set(self._fleet.chargers)
+        expected = {
+            "ledger_state": batteries,
+            "ev_weekly_plan": vehicles, "ev_day_overrides": vehicles,
+            "ev_force_charge": vehicles, "ev_disabled": vehicles,
+            "vehicle_sessions": chargers, "charger_next_vehicle": chargers,
+            "charger_guest_mode": chargers,
+        }
+        for table, ids in sorted(stored.items()):
+            orphans = sorted(ids - expected.get(table, ids))
+            if orphans:
+                _log.warning("Stored data without a matching device: %s: %s",
+                             table, ", ".join(orphans))
 
     async def _init_ledger(self, states: dict[str, Any]) -> None:
         """Initialise the ledger from persisted state or live SoC readings.

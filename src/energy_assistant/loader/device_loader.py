@@ -37,7 +37,6 @@ from ..core.tariff import TariffModel
 from ..core.topology import TopologyNode, build_topology
 from ..plugins import registry as plugin_registry
 from ..plugins._homeassistant.client import HAClient
-from ..plugins._iobroker.pool import IoBrokerConnectionPool
 from .forecast_config import effective_forecast_configs
 
 _log = logging.getLogger(__name__)
@@ -49,12 +48,7 @@ def make_build_context(app_config: AppConfig) -> BuildContext:
     Call this once and share the resulting context across all build functions
     so that all plugins reuse the same backend client instances.
     """
-    iobroker_pool: IoBrokerConnectionPool | None = None
     ha_client: HAClient | None = None
-
-    if app_config.backends.iobroker:
-        iobroker_pool = IoBrokerConnectionPool()
-
     if app_config.backends.homeassistant:
         ha_cfg = app_config.backends.homeassistant
         ha_client = HAClient(
@@ -65,7 +59,6 @@ def make_build_context(app_config: AppConfig) -> BuildContext:
 
     return BuildContext(
         backends=app_config.backends,
-        iobroker_pool=iobroker_pool,
         ha_client=ha_client,
     )
 
@@ -86,7 +79,7 @@ def build_top_level_forecasts(
         Parsed application configuration.
     ctx:
         Build context with backend clients.  When ``None`` a minimal context
-        is created; providers that require live backends (e.g. ``pvforecast_iobroker``)
+        is created; providers that require live backends (e.g. ``learned``)
         will be skipped.
 
     Returns
