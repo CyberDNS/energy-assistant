@@ -56,3 +56,40 @@ export const selectEvCharger = (vehicleId, chargerId) =>
 // How the guest car charges: "pv_only" or "instant".
 export const setGuestMode = (mode) =>
   call(`/api/guest/mode?mode=${encodeURIComponent(mode)}`, { method: 'PUT' })
+
+// ── Configuration editor (Devices tab) ──────────────────────────────────
+// These calls report validation problems as a list, so they resolve to
+// { ok, errors, ...body } instead of throwing on 4xx.
+async function configCall(url, options) {
+  let res
+  try {
+    res = await fetch(_apiBase + url, options)
+  } catch (e) {
+    return { ok: false, errors: [`Server not reachable: ${e.message}`] }
+  }
+  let body = null
+  try { body = await res.json() } catch { /* empty or non-JSON body */ }
+  if (res.ok) return { ok: true, errors: [], ...(body ?? {}) }
+  const detail = body?.detail
+  const errors = detail?.errors
+    ?? (typeof detail === 'string' ? [detail] : [`${res.status} ${res.statusText}`])
+  return { ok: false, status: res.status, errors }
+}
+
+export const fetchConfigSchema   = () => call('/api/config/schema')
+export const fetchConfigFile     = () => call('/api/config/file')
+export const fetchConfigEntities = () => call('/api/config/entities')
+// kind: 'devices' | 'tariffs' | 'forecasts' | 'section'
+export const validateConfigChange = (kind, id, value, create) =>
+  configCall('/api/config/validate', _json('POST', { kind, id, value, create }))
+export const saveConfigChange = (kind, id, value, revision, create) =>
+  configCall(`/api/config/${kind === 'section' ? 'sections' : kind}/${encodeURIComponent(id)}`,
+             _json('PUT', { value, revision, create }))
+export const deleteConfigEntry = (kind, id, revision) =>
+  configCall(`/api/config/${kind}/${encodeURIComponent(id)}?revision=${encodeURIComponent(revision)}`,
+             { method: 'DELETE' })
+export const setConfigSecret = (name, value) =>
+  configCall(`/api/config/secrets/${encodeURIComponent(name)}`, _json('PUT', { value }))
+export const deleteConfigSecret = (name) =>
+  configCall(`/api/config/secrets/${encodeURIComponent(name)}`, { method: 'DELETE' })
+export const reloadConfig = () => configCall('/api/config/reload', { method: 'POST' })

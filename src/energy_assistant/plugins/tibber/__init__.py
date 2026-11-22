@@ -18,7 +18,7 @@ Example config::
     devices:
       - id: household_meter
         category: meter
-        type: tibber
+        type: tibber_cloud
         tariff: household
         token: !secret tibber_token
         home_id: "<home-id>"        # optional
@@ -30,7 +30,7 @@ import logging
 from typing import Any
 
 from ...core.device_model import Capability as Cap
-from ...core.device_model import DeviceCategory
+from ...core.device_model import DeviceCategory, ParamSpec
 from ...core.device_model import DeviceCategory as C
 from ...core.plugin_registry import BuildContext, PluginRegistry
 
@@ -39,12 +39,31 @@ _log = logging.getLogger(__name__)
 _RESOLUTIONS = ("QUARTER_HOURLY", "HOURLY")
 
 
+_ACCOUNT = {
+    "token": ParamSpec(str, required=True, secret=True, label="Tibber API token",
+                       description="Personal access token from developer.tibber.com"),
+    "home_id": ParamSpec(str, label="Tibber home ID",
+                         description="Default: the account's first home"),
+    "api_url": ParamSpec(str, advanced=True, label="Tibber API URL", description="Tests only"),
+}
+
+
 def register(registry: PluginRegistry) -> None:
-    registry.register_tariff("tibber", _build_tariff)
+    registry.register_tariff(
+        "tibber", _build_tariff,
+        title="Tibber",
+        description="Tibber spot prices from the Tibber API.",
+        settings={**_ACCOUNT, "resolution": ParamSpec(str, choices=_RESOLUTIONS,
+                                                      default="QUARTER_HOURLY",
+                                                      description="Price resolution")},
+    )
     registry.register_device(
-        "tibber", _build_device,
-        categories={C.GRID_METER, C.METER},
+        "tibber_cloud", _build_device,
+        title="Tibber Pulse (cloud)",
+        description="Live meter power from the Tibber cloud (Pulse or Watty).",
+        categories={C.METER},
         provides={Cap.POWER_W},
+        settings=_ACCOUNT,
     )
 
 

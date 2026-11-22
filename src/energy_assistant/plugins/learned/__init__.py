@@ -53,14 +53,62 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from ...core.device_model import ParamSpec
 from ...core.plugin_registry import BuildContext, PluginRegistry
 
 _log = logging.getLogger(__name__)
 
 
+#: Options of a learned forecast besides its ``history_entity``; also the
+#: options of a consumer's ``learning:``.
+LEARNING_OPTIONS = {
+    "history_unit": ParamSpec(str, choices=("W", "kW"), advanced=True,
+                              description="Only for sensors without a unit"),
+    "subtract": ParamSpec(list, items=ParamSpec(str, entity=True), label="Subtract sensors",
+                          description="Sensors taken off before fitting; 'auto' = every other "
+                                      "consumer with a learned forecast on the same tariff"),
+    "temperature_entity": ParamSpec(str, entity=True, label="Outdoor temperature sensor",
+                                    description="Outdoor temperature sensor (°C), for heating loads"),
+    "weather_entity": ParamSpec(str, entity=True, label="Weather forecast entity",
+                                description="Weather entity whose forecast gives the temperature"),
+    "history_days": ParamSpec(int, minimum=1, default=730, advanced=True, description="Days of history used"),
+    "min_days": ParamSpec(int, minimum=1, default=14, advanced=True,
+                          description="Usable days needed before a model is used"),
+    "refit_interval_h": ParamSpec(float, minimum=0, exclusive_minimum=True, default=6,
+                                  advanced=True,
+                                  description="Hours between refits"),
+    "exclude": ParamSpec(list, label="Excluded periods", advanced=True, description="Periods left out of the training (local time)",
+                         items=ParamSpec(dict, fields={
+                             "from": ParamSpec(str, required=True, label="from (YYYY-MM-DD HH:MM)"),
+                             "to": ParamSpec(str, required=True, label="to (YYYY-MM-DD HH:MM)"),
+                         })),
+    "exclude_when": ParamSpec(list, label="Exclude while", description="Hours left out while a condition holds",
+                              items=ParamSpec(dict, fields={
+                                  "entity": ParamSpec(str, required=True, entity=True),
+                                  "condition": ParamSpec(str, choices=("frozen",),
+                                                         description="frozen = value not changing"),
+                                  "below": ParamSpec(float),
+                                  "above": ParamSpec(float),
+                                  "min_hours": ParamSpec(int, minimum=1, default=1),
+                              })),
+    "fallback": ParamSpec(dict, plugin="forecast", label="Fallback forecast",
+                          description="Forecast used until a model is fitted"),
+}
+
+
 def register(registry: PluginRegistry) -> None:
     """Register the learned forecast factory."""
-    registry.register_forecast("learned", _build)
+    registry.register_forecast(
+        "learned", _build,
+        title="Learned from history",
+        description="Consumption forecast learned from Home Assistant statistics.",
+        scopes=("device",),
+        settings={
+            "history_entity": ParamSpec(str, required=True, entity=True, label="Sensor to learn from",
+                                        description="Power sensor or energy meter to learn from"),
+            **LEARNING_OPTIONS,
+        },
+    )
 
 
 def _build(forecast_id: str, cfg: dict[str, Any], ctx: BuildContext) -> object:

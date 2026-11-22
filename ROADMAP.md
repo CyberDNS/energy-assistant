@@ -77,8 +77,15 @@ and what comes later. Open items link to their GitHub issue.
 
 ## Next: finish the device model (#97)
 
-- [ ] Phase 6: configuration UI on top of the category schemas (device list by category, forms, "metered by" / "controlled by" / default-vehicle dropdowns)
-- [ ] Changing a charger's default vehicle from the UI
+- [x] Phase 6: configuration UI on top of the category schemas — Devices tab with the device list by category, forms generated from the schemas, "metered by" / "controlled by" / default-vehicle dropdowns; writes `config.yaml` in place and applies it without a restart
+- [x] Changing a charger's default vehicle from the UI
+- [x] Plugin settings declared per plugin (typed, validated at startup)
+- [x] Configuration UI for the other sections (backends, tariffs, forecasts, optimizer, controller, server, logging, energy dashboard), with the whole file validated at startup
+- [x] Secrets editable in the UI (stored in `secrets.yaml`, values write-only)
+- [x] Reusable, schema-driven editor components (tables, lists, maps, load profiles, plugin forms)
+- [x] One `meter` category: the meter without `metered_by` is the grid connection (`grid_meter` is gone)
+- [x] Device plugin `tibber` renamed to `tibber_cloud` (next to `tibber_local`); the tariff type stays `tibber`
+- [x] Friendly names for plugins, categories, capabilities and fields; defaults shown in the dropdowns; fields that depend on another choice only appear with it
 
 ## Next: vehicles
 
@@ -115,7 +122,8 @@ and what comes later. Open items link to their GitHub issue.
 
 - [ ] Plugin discovery via entry points
 - [ ] Plugin developer guide
-- [ ] Configuration UI (replaces YAML for non-technical users): see #97 phase 6
+- [x] Configuration UI for everything in `config.yaml` and `secrets.yaml` (#97 phase 6)
+- [ ] First-run setup without a `config.yaml` (guided: connections → grid meter → devices)
 
 ## Housekeeping (outside the repo)
 

@@ -96,6 +96,7 @@ The Plan tab can be deep-linked and embedded (e.g. in an iframe / webpage card):
 |---|---|
 | `#/plan` | Plan tab |
 | `#/savings` | Savings tab: savings against an uncontrolled house over rolling windows (24 h – 1 y) |
+| `#/config` | Config tab; `#/config/<page>` with `devices`, `tariffs`, `forecasts`, `connections`, `system`, `secrets` |
 | `#/plan/<vehicle>` or `#/plan?vehicle=<vehicle>` | One EV only: target, 7-day strip, weekly plan, "Charge now" and its charging-plan chart. `<vehicle>` is the vehicle id or label (case-insensitive). |
 | `…?embed=1` | Hides the header, KPI tiles and tab bar. Combine with any route, e.g. `#/plan/bandit?embed=1`. |
 
@@ -122,7 +123,7 @@ Everything in the house is one entry of the flat `devices:` list:
 ```yaml
 devices:
   - id: main_grid_meter
-    category: grid_meter          # what it is
+    category: meter               # what it is (no metered_by: the grid connection)
     type: tasmota                 # how to talk to it (the plugin) …
     host: 192.168.1.20            # … and the plugin's own settings
     profile: iskra_mt175
@@ -145,18 +146,69 @@ devices:
     params: { capacity_kwh: 7.4, max_charge_kw: 3.0, max_discharge_kw: 3.0 }
 ```
 
-- **Categories:** `grid_meter`, `meter`, `pv`, `battery`, `charger`,
+- **Categories:** `meter` (the one meter without `metered_by` is the grid
+  connection, the others are sub-meters), `pv`, `battery`, `charger`,
   `thermal_load`, `switch`, `consumer`, `vehicle`, `sensor`. Each category's
   schema (`core/device_model.py`) lists the capabilities it needs or may bind
   (`power_w`, `soc_pct`, `temperature_c`, `switch`, …), its `params` and the
   connections it may have.
-- **Connections:** `metered_by` builds the metering tree (the grid meter is the
-  root; it replaces the old `topology:` section), `controlled_by` names the
+- **Connections:** `metered_by` builds the metering tree (its root is the meter
+  at the grid connection, which also carries the grid limit `max_import_kw`), `controlled_by` names the
   switch executing a device's plan, `included_in` marks a consumer whose load
   is inside another consumer's meter.
 - **Checked at startup:** unknown categories, params or capabilities, missing
-  required ones, plugins that can't serve a category and broken `metered_by`
-  chains stop the start with a list of everything to fix.
+  required ones, plugins that can't serve a category, unknown or ill-typed
+  plugin settings and broken `metered_by` chains stop the start with a list of
+  everything to fix.
+
+### Configuring in the UI
+
+The **Config** tab edits everything in `config.yaml` and `secrets.yaml`:
+
+| Page | What |
+|---|---|
+| Devices | the `devices:` list, grouped by category |
+| Tariffs | `tariffs:` |
+| Forecasts | `forecasts:` (system-wide, e.g. PV) |
+| Connections | `backends:` (Home Assistant, MQTT broker) |
+| System | `optimizer:`, `controller:`, `energy_dashboard:`, `server:`, `logging:` |
+| Secrets | the entries of `secrets.yaml` |
+
+Every form is built from the same schemas the loader checks the file against,
+with an editor per kind of value: dropdowns for devices, tariffs and choices,
+entity pickers for Home Assistant, tables for charge curves, PV planes and
+exclusion rules, a load-profile editor per day type, and nested forms for a
+forecast and its fallback.
+
+Fields carry a readable name; the `config.yaml` key is shown small in the hint
+below. Dropdowns offer the real values with the default marked "(default)";
+choosing the default leaves the key out of the file. Settings that only matter
+for another choice appear with that choice (a Zendure cloud key only for the
+cloud connection), and rarely needed ones are under "More settings".
+
+- **Save and apply** checks the change with the same rules as the start,
+  writes it to `config.yaml` and applies it right away, without a restart.
+  Problems are listed in the form and nothing is written.
+- Only the lines of the edited entry or section change in `config.yaml`; your
+  comments and the rest of the file stay as they are. The previous file is
+  kept in `config_backups/` next to it (the newest 20).
+- **Secrets:** a password or token field holds the *name* of a secret. Pick an
+  existing one or create one right in the field; the value goes to
+  `secrets.yaml` (mode 600) and is never shown again. The Secrets page lists
+  where each secret is used and lets you replace or remove values. Replacing a
+  secret that is in use applies the configuration again.
+- A device, tariff or forecast id cannot be changed afterwards. Removing a
+  device keeps its history in the database.
+- Devices imported from the Home Assistant Energy dashboard are listed
+  read-only.
+- `server.port`, `server.api_token` and `server.trusted_hosts` are marked
+  "needs a restart"; everything else applies live. Applying takes a few
+  seconds: control pauses, then a fresh plan is made.
+- If you edit `config.yaml` by hand, the tab offers **Apply now** (or
+  `POST /api/config/reload`) instead of restarting the add-on.
+- The whole file is checked at startup too: an unknown section, an unknown or
+  ill-typed setting of a section, tariff, forecast or plugin stops the start
+  with a list of everything to fix.
 
 ### Thermal loads and switches
 
@@ -201,10 +253,9 @@ sensor is only shown.
   sets openWB's vehicle for that chargepoint (`set/chargepoint/<n>/config/ev`;
   a guest is openWB's vehicle 0).
 - **Needs on the car:** weekly plans, day overrides, force charge and "disable"
-  belong to the vehicle; the charger only executes.  `params.previous_ids:
-  [<old asset id>]` moves stored plans from a former `assets:` EV entry once,
-  and keeps its Home Assistant entities (ids, history, area): only their MQTT
-  topics move to `energy_assistant/vehicle/<id>/…`.
+  belong to the vehicle; the charger only executes.  Its Home Assistant
+  entities are published per vehicle id; entities of a vehicle that is no
+  longer configured are removed from Home Assistant at the next start.
 - **Savings** are still kept per charger (whichever car charged there).
 
 ### Tasmota meters and plugs
@@ -239,7 +290,7 @@ are tested against real devices; the others follow the scripts in the docs.
 devices:
   # Main grid meter (Z1) via a Tasmota IR head
   - id: main_grid_meter
-    category: grid_meter
+    category: meter
     type: tasmota
     tariff: grid
     host: 192.168.1.20
@@ -249,7 +300,7 @@ devices:
 
   # The same meter mapped by hand: paths below StatusSNS
   - id: main_grid_meter
-    category: grid_meter
+    category: meter
     type: tasmota
     host: 192.168.1.20
     fields:

@@ -39,6 +39,7 @@ import certifi
 import httpx
 
 from ...core.models import TariffPoint
+from ...core.plugin_registry import SharedPool
 
 _log = logging.getLogger(__name__)
 
@@ -419,15 +420,11 @@ class LiveStream:
 # Shared instances
 # ---------------------------------------------------------------------------
 
-_apis: dict[tuple[str, str, str], TibberApi] = {}
+_apis: SharedPool[tuple[str, str, str], TibberApi] = SharedPool(stop=lambda api: api.close())
 
 
 def get_api(
     token: str, resolution: str = "QUARTER_HOURLY", api_url: str | None = None
 ) -> TibberApi:
     key = (token, resolution, api_url or API_URL)
-    api = _apis.get(key)
-    if api is None:
-        api = TibberApi(token, resolution=resolution, api_url=api_url)
-        _apis[key] = api
-    return api
+    return _apis.get(key, lambda: TibberApi(token, resolution=resolution, api_url=api_url))

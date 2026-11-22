@@ -226,9 +226,9 @@ def test_charger_ids_and_soc_push_target() -> None:
     assert fleet_app()._fleet.charger_vehicle_id("ev1", "wallbox") is None
 
 
-def test_previous_ids() -> None:
-    app = fleet_app({"previous_ids": ["ev_bandit"]})
-    assert app._fleet.previous_ids() == {"ev_bandit": "ev1"}
+def test_previous_ids_is_rejected_with_a_hint() -> None:
+    with pytest.raises(DeviceConfigError, match="previous_ids is no longer used"):
+        fleet_app({"previous_ids": ["ev_bandit"]})
 
 
 def test_empty_fleet() -> None:
@@ -303,7 +303,7 @@ def test_vehicle_and_charger_schemas() -> None:
     })
     assert errors({"car": {**car, "params": {"capacity_kwh": 50, "charge_curve": [
         {"soc_pct": 90, "efficiency": 1.4}]}}}) == [
-        "device 'car': params.charge_curve efficiency must be in (0, 1], got 1.4"
+        "device 'car': params.charge_curve [1] efficiency must be <= 1, got 1.4"
     ]
     assert "params.guest_mode must be one of pv_only, instant, off" in errors({
         "cp": {"category": "charger", "type": "openwb_mqtt", "chargepoint_id": 1,
@@ -381,7 +381,6 @@ async def test_session_storage_and_id_migration(tmp_path) -> None:
 
 
 async def _check_storage(db) -> None:
-    from energy_assistant.assets.ev import EvWeeklyTarget
 
     sid = await db.open_vehicle_session("cp5", "bandit", T0, T0, "default")
     await db.open_vehicle_session("cp4", None, T0, T0, "default")
@@ -396,15 +395,6 @@ async def _check_storage(db) -> None:
         ("cp5", True), ("cp4", False),
     ]
 
-    await db.set_ev_weekly_plan("ev_bandit", [
-        EvWeeklyTarget(weekday=1, enabled=True, target_soc_pct=80.0, target_by="06:00"),
-    ])
-    await db.set_ev_force_charge("ev_bandit", 90.0)
-    moved = await db.rename_ev_ids({"ev_bandit": "bandit"})
-    assert moved == {"ev_weekly_plan": 1, "ev_force_charge": 1}
-    assert "bandit" in await db.load_all_ev_weekly_plans()
-    assert await db.load_all_ev_force_charge() == {"bandit": 90.0}
-    assert await db.rename_ev_ids({"ev_bandit": "bandit"}) == {}   # idempotent
 
 
 # ── Pre-selection for the next plug-in ───────────────────────────────────────

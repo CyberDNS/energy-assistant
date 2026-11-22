@@ -97,7 +97,7 @@ class TestYamlConfigLoader:
         removed = "was removed with the ioBroker support"
         assert exc.value.errors == [
             f"devices: zen: type 'zendure_iobroker' {removed} — use zendure",
-            f"tariffs: household: type 'tibber_iobroker' {removed} — use tibber",
+            f"tariffs: household: type 'tibber_iobroker' {removed} — use tibber (tariff) or tibber_cloud (meter)",
         ]
 
     def test_parses_tariffs(self, tmp_path: Path) -> None:
@@ -118,7 +118,7 @@ class TestYamlConfigLoader:
         yaml_text = dedent("""\
             devices:
               main_grid_meter:
-                category: grid_meter
+                category: meter
                 type: tasmota
                 host: 192.168.1.46
                 profile: iskra_mt175
@@ -128,7 +128,7 @@ class TestYamlConfigLoader:
 
         cfg = YamlConfigLoader(config_file).load()
         spec = cfg.devices["main_grid_meter"]
-        assert spec.category is DeviceCategory.GRID_METER
+        assert spec.category is DeviceCategory.METER
         assert spec.type == "tasmota"
         assert spec.settings["host"] == "192.168.1.46"
 
@@ -152,13 +152,13 @@ class TestYamlConfigLoader:
             tariffs:
               tibber:
                 type: tibber
-                home_id: !secret mytoken
+                token: !secret mytoken
         """)
         config_file = tmp_path / "config.yaml"
         config_file.write_text(yaml_text)
 
         cfg = YamlConfigLoader(config_file).load()
-        assert cfg.tariffs["tibber"]["home_id"] == "secret-value-123"
+        assert cfg.tariffs["tibber"]["token"] == "secret-value-123"
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +187,7 @@ def _messkonzept8_config(tmp_path: Path) -> AppConfig:
 
         devices:
           main_grid_meter:
-            category: grid_meter
+            category: meter
             type: generic_homeassistant
             capabilities:
               power_w: { import_entity: sensor.grid_import, export_entity: sensor.grid_export }
@@ -229,7 +229,7 @@ class TestDeviceLoaderMesskonzept8:
         cfg = _messkonzept8_config(tmp_path)
         registry, _, _ = build(cfg)
 
-        assert registry.get("main_grid_meter").category == DeviceCategory.GRID_METER
+        assert registry.get("main_grid_meter").category == DeviceCategory.METER
         assert registry.get("household_meter").category == DeviceCategory.METER
         assert registry.get("heatpump").category == DeviceCategory.CONSUMER
 
@@ -270,7 +270,7 @@ class TestDeviceLoaderMesskonzept8:
         cfg = _messkonzept8_config(tmp_path)
         registry, _, _ = build(cfg)
 
-        meters = registry.by_category(DeviceCategory.GRID_METER, DeviceCategory.METER)
+        meters = registry.by_category(DeviceCategory.METER)
         consumers = registry.by_category(DeviceCategory.CONSUMER)
 
         assert [m.device_id for m in meters] == ["main_grid_meter", "household_meter"]

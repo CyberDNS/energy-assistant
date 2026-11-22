@@ -22,12 +22,23 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...core.device_model import ParamSpec
 from ...core.plugin_registry import BuildContext, PluginRegistry
 
 
 def register(registry: PluginRegistry) -> None:
     """Register the static_profile forecast factory."""
-    registry.register_forecast("static_profile", _build)
+    registry.register_forecast(
+        "static_profile", _build,
+        title="Static profile",
+        description="Fixed consumption per time of day and day type.",
+        scopes=("device",),
+        settings={
+            "profile": ParamSpec(object, required=True, widget="load_profile", label="Load profile",
+                                 description="kWh consumed from each hour until the next entry, "
+                                             "per day type"),
+        },
+    )
 
 
 def _build(forecast_id: str, cfg: dict[str, Any], ctx: BuildContext) -> object:

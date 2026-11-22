@@ -9,7 +9,7 @@ The entity is bound to the ``power_w`` capability::
         power_w: { entity: sensor.power_production_pv, invert_sign: true }
 
     - id: grid
-      category: grid_meter
+      category: meter
       type: generic_homeassistant
       capabilities:
         power_w: { import_entity: sensor.grid_import_w, export_entity: sensor.grid_export_w }
@@ -21,7 +21,7 @@ import logging
 from typing import Any
 
 from ...core.device_model import Capability as Cap
-from ...core.device_model import DeviceCategory, DeviceConfigError
+from ...core.device_model import DeviceCategory, DeviceConfigError, ParamSpec
 from ...core.device_model import DeviceCategory as C
 from ...core.plugin_registry import BuildContext, PluginRegistry
 
@@ -31,8 +31,20 @@ _log = logging.getLogger(__name__)
 def register(registry: PluginRegistry) -> None:
     registry.register_device(
         "generic_homeassistant", _build,
-        categories={C.GRID_METER, C.METER, C.PV, C.CONSUMER},
+        title="Home Assistant power sensor",
+        categories={C.METER, C.PV, C.CONSUMER},
         bindable={Cap.POWER_W},
+        settings={},
+        binding={
+            "entity": ParamSpec(str, entity=True, label="Power sensor",
+                                description="Sensor in W or kW"),
+            "import_entity": ParamSpec(str, advanced=True, entity=True,
+                                       description="Import power sensor (with export_entity, "
+                                                   "instead of entity)"),
+            "export_entity": ParamSpec(str, advanced=True, entity=True, description="Export power sensor"),
+            "invert_sign": ParamSpec(bool, default=False, label="Invert sign",
+                                     description="The sensor counts production as positive"),
+        },
     )
 
 

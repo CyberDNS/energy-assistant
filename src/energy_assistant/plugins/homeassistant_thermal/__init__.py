@@ -54,10 +54,12 @@ def register(registry: PluginRegistry) -> None:
     # Deferred: needs the switch device it is controlled_by.
     registry.register_device(
         "homeassistant_thermal", _build,
+        title="Home Assistant temperature sensor",
         deferred=True,
         categories={C.THERMAL_LOAD},
         provides={Cap.POWER_W},
         bindable={Cap.TEMPERATURE_C},
+        settings={},
     )
 
 

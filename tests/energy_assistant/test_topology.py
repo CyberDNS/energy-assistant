@@ -49,19 +49,24 @@ def _meter(device_id: str, category: str = "meter", **kw) -> dict:
 
 
 class TestBuildTopology:
-    def test_no_grid_meter_returns_none(self) -> None:
+    def test_no_meter_returns_none(self) -> None:
         assert build_topology({}) is None
-        assert build_topology(_devices(_meter("household_meter"))) is None
+
+    def test_the_meter_without_metered_by_is_the_root(self) -> None:
+        root = build_topology(_devices(
+            _meter("household_meter", metered_by="main_grid_meter"), _meter("main_grid_meter"),
+        ))
+        assert root is not None and root.device_id == "main_grid_meter"
 
     def test_grid_meter_without_children(self) -> None:
-        root = build_topology(_devices(_meter("main_grid_meter", "grid_meter")))
+        root = build_topology(_devices(_meter("main_grid_meter")))
         assert root is not None
         assert root.device_id == "main_grid_meter"
         assert root.children == []
 
     def test_children_keep_config_order(self) -> None:
         root = build_topology(_devices(
-            _meter("main_grid_meter", "grid_meter"),
+            _meter("main_grid_meter"),
             _meter("household_meter", metered_by="main_grid_meter"),
             {"id": "heatpump", "category": "consumer", "type": "differential",
              "minuend": "main_grid_meter", "subtrahend": "household_meter",
@@ -72,7 +77,7 @@ class TestBuildTopology:
 
     def test_nested_children(self) -> None:
         root = build_topology(_devices(
-            _meter("main_grid_meter", "grid_meter"),
+            _meter("main_grid_meter"),
             _meter("household_meter", metered_by="main_grid_meter"),
             _meter("sub_circuit_a", metered_by="household_meter"),
         ))
@@ -83,7 +88,7 @@ class TestBuildTopology:
 
     def test_devices_without_metered_by_are_not_in_the_tree(self) -> None:
         root = build_topology(_devices(
-            _meter("main_grid_meter", "grid_meter"),
+            _meter("main_grid_meter"),
             {"id": "baseline", "category": "consumer", "type": "generic_consumer"},
         ))
         assert root is not None
@@ -91,7 +96,7 @@ class TestBuildTopology:
 
     def test_grid_limit_from_grid_meter_params(self) -> None:
         root = build_topology(_devices(
-            _meter("main_grid_meter", "grid_meter", params={
+            _meter("main_grid_meter", params={
                 "max_import_kw": 24, "curtail_order": ["household_meter"],
                 "limit_hysteresis_kw": 1.0,
             }),
@@ -105,7 +110,7 @@ class TestBuildTopology:
     def test_messkonzept8_tree(self) -> None:
         """The live installation: Z1 → Z2 → PV + batteries."""
         root = build_topology(_devices(
-            _meter("main_grid_meter", "grid_meter"),
+            _meter("main_grid_meter"),
             _meter("household_meter", metered_by="main_grid_meter"),
             {"id": "pv_production", "category": "pv", "type": "generic_homeassistant",
              "metered_by": "household_meter",

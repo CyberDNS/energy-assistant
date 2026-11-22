@@ -80,18 +80,41 @@ import logging
 from typing import Any
 
 from ...core.device_model import Capability as Cap
-from ...core.device_model import DeviceCategory
+from ...core.device_model import DeviceCategory, ParamSpec
 from ...core.device_model import DeviceCategory as C
 from ...core.plugin_registry import BuildContext, PluginRegistry
 
 _log = logging.getLogger(__name__)
 
 
+SETTINGS = {
+    "host": ParamSpec(str, required=True, description="Host name, IP address or URL"),
+    "profile": ParamSpec(str, label="Meter profile",
+                         description="Built-in profile (e.g. iskra_mt175, energy for plugs) or "
+                                     "path to a profile file"),
+    "sensor": ParamSpec(str, advanced=True, description="Sensor name in the Tasmota status (default: the "
+                                         "profile's, or detected)"),
+    "fields": ParamSpec(dict, advanced=True, values=ParamSpec(object), label="Field mapping", description="Capability → Tasmota field, e.g. {power_w: MT631.P}"),
+    "invert_sign": ParamSpec(bool, description="The meter counts production as positive"),
+    "user": ParamSpec(str, advanced=True, default="admin", label="Web user"),
+    "password": ParamSpec(str, secret=True, label="Web password",
+                          description="Only if the device has one"),
+    "poll_interval_s": ParamSpec(float, advanced=True, minimum=0, exclusive_minimum=True,
+                                 description="Seconds between reads (default 2 for meters, else 10)"),
+    "stale_after_s": ParamSpec(float, advanced=True, minimum=0, exclusive_minimum=True,
+                               description="Seconds without a valid reading until the device "
+                                           "counts as unavailable"),
+}
+
+
 def register(registry: PluginRegistry) -> None:
     registry.register_device(
         "tasmota", _build_device,
-        categories={C.GRID_METER, C.METER, C.PV, C.CONSUMER},
+        title="Tasmota (meter reader or plug)",
+        description="A Tasmota device on the LAN: IR reading head on a meter, or a metering plug.",
+        categories={C.METER, C.PV, C.CONSUMER},
         provides={Cap.POWER_W},
+        settings=SETTINGS,
     )
 
 

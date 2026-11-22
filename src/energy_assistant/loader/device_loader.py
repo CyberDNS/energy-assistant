@@ -30,36 +30,53 @@ import logging
 from collections.abc import Mapping
 
 from ..core.config import AppConfig
-from ..core.device_model import CATEGORY_SCHEMAS, DeviceConfigError, DeviceSpec
+from ..core.device_model import (
+    CATEGORY_SCHEMAS,
+    DeviceConfigError,
+    DeviceSpec,
+    ParamSpec,
+)
 from ..core.plugin_registry import BuildContext
 from ..core.registry import DeviceRegistry
 from ..core.tariff import TariffModel
 from ..core.topology import TopologyNode, build_topology
 from ..plugins import registry as plugin_registry
 from ..plugins._homeassistant.client import HAClient
+from .config_validation import forecast_errors, learning_errors
 from .forecast_config import effective_forecast_configs
 
 _log = logging.getLogger(__name__)
 
 
-def make_build_context(app_config: AppConfig) -> BuildContext:
+def make_build_context(
+    app_config: AppConfig, previous: BuildContext | None = None
+) -> BuildContext:
     """Create a ``BuildContext`` with live backend connections from *app_config*.
 
     Call this once and share the resulting context across all build functions
     so that all plugins reuse the same backend client instances.
+
+    *previous* is the context of a runtime that is being replaced (config
+    reload): its Home Assistant client is kept when the backend settings are
+    unchanged, and its Modbus connections are reused.
     """
     ha_client: HAClient | None = None
     if app_config.backends.homeassistant:
         ha_cfg = app_config.backends.homeassistant
-        ha_client = HAClient(
-            url=ha_cfg.url,
-            token=ha_cfg.token,
-            timeout=ha_cfg.timeout_s,
-        )
+        if (previous is not None and previous.ha_client is not None
+                and previous.backends.homeassistant == ha_cfg):
+            ha_client = previous.ha_client
+        else:
+            ha_client = HAClient(
+                url=ha_cfg.url,
+                token=ha_cfg.token,
+                timeout=ha_cfg.timeout_s,
+            )
 
     return BuildContext(
         backends=app_config.backends,
         ha_client=ha_client,
+        modbus_pool=previous.modbus_pool if previous is not None else None,
     )
 
 
@@ -174,8 +191,11 @@ def build_device_forecasts(
     return list(build_device_forecast_map(app_config, ctx).values())
 
 
-def validate_plugins(devices: Mapping[str, DeviceSpec]) -> None:
-    """Check *devices* against their plugins' metadata.
+def validate_plugins(
+    devices: Mapping[str, DeviceSpec], tariffs: Mapping[str, object] | None = None
+) -> None:
+    """Check *devices* against their plugins' metadata (and, when *tariffs*
+    is given, their ``tariff:`` against the configured tariff ids).
 
     Raises ``DeviceConfigError`` listing every problem.
     """
@@ -192,11 +212,23 @@ def validate_plugins(devices: Mapping[str, DeviceSpec]) -> None:
             errors.append(f"{where}: plugin {spec.type!r} cannot be a "
                           f"{spec.category.value!r} (allowed: {allowed})")
             continue
-        for cap in spec.capabilities:
+        for cap, binding in spec.capabilities.items():
             if cap not in info.bindable:
                 bindable = ", ".join(sorted(c.value for c in info.bindable)) or "none"
                 errors.append(f"{where}: plugin {spec.type!r} cannot bind capability "
                               f"{cap.value!r} (bindable: {bindable})")
+                continue
+            errors.extend(_spec_errors(
+                f"{where}: capabilities.{cap.value}", binding, info.binding, kind="key",
+            ))
+        if info.settings is not None:
+            errors.extend(_spec_errors(where, spec.settings, info.settings, kind="setting",
+                                       plugin=spec.type))
+        errors.extend(forecast_errors(spec))
+        errors.extend(learning_errors(spec))
+        if spec.tariff is not None and tariffs is not None and spec.tariff not in tariffs:
+            errors.append(f"{where}: tariff {spec.tariff!r} is not a configured tariff "
+                          f"(one of {', '.join(tariffs) or 'none'})")
         provided = info.provides | set(spec.capabilities)
         missing = CATEGORY_SCHEMAS[spec.category].required_capabilities - provided
         for cap in sorted(missing, key=lambda c: c.value):
@@ -206,6 +238,34 @@ def validate_plugins(devices: Mapping[str, DeviceSpec]) -> None:
                           f"{cap.value!r}, which plugin {spec.type!r} does not provide{hint}")
     if errors:
         raise DeviceConfigError(errors)
+
+
+def _spec_errors(
+    where: str,
+    values: Mapping[str, object],
+    specs: Mapping[str, ParamSpec],
+    *,
+    kind: str,
+    plugin: str | None = None,
+) -> list[str]:
+    """Problems of *values* (plugin settings or one binding) against *specs*."""
+    errors: list[str] = []
+    of_plugin = f" of plugin {plugin!r}" if plugin else ""
+    by_plugin = f" by plugin {plugin!r}" if plugin else ""
+    for name, value in values.items():
+        spec = specs.get(name)
+        if spec is None:
+            allowed = ", ".join(specs) or "none"
+            errors.append(f"{where}: unknown {kind} {name!r}{of_plugin} (allowed: {allowed})")
+        elif value is None:
+            continue  # an empty key counts as left out
+        elif (problem := spec.check(value)) is not None:
+            errors.append(f"{where}: {name} {problem}")
+    for name, spec in specs.items():
+        if spec.required and values.get(name) in (None, ""):
+            errors.append(f"{where}: {kind} {name!r} is required{by_plugin}"
+                          + (f" ({spec.description})" if spec.description else ""))
+    return errors
 
 
 def build(
@@ -242,7 +302,7 @@ def build(
             tariffs[name] = tariff
 
     # --- Devices (validated, then built in two passes) ---
-    validate_plugins(app_config.devices)
+    validate_plugins(app_config.devices, app_config.tariffs)
     device_registry = DeviceRegistry()
     deferred: list[DeviceSpec] = []
 

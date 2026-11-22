@@ -25,6 +25,7 @@ dependencies = [
     "pymodbus>=3.8",
     "mcp>=1.10",
     "smllib>=1.7",
+    "ruamel-yaml>=0.18",
 ]
 
 [project.scripts]

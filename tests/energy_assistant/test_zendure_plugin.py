@@ -12,7 +12,7 @@ import pytest
 from energy_assistant.core.config import BackendsConfig, MqttConfig
 from energy_assistant.core.device_model import DeviceCategory
 from energy_assistant.core.models import DeviceCommand
-from energy_assistant.core.plugin_registry import BuildContext
+from energy_assistant.core.plugin_registry import BuildContext, SharedPool
 from energy_assistant.plugins import zendure as zendure_plugin
 from energy_assistant.plugins.zendure import cloud
 from energy_assistant.plugins.zendure.bridge import BrokerParams, ZendureBridge
@@ -255,7 +255,10 @@ async def test_soc_limits_scaled(fake: FakeBridge) -> None:
 
 @pytest.fixture(autouse=True)
 def _fresh_bridges(monkeypatch) -> None:
-    monkeypatch.setattr(zendure_plugin, "_bridges", {})
+    async def _stop(bridge) -> None:
+        await bridge.stop()
+
+    monkeypatch.setattr(zendure_plugin, "_bridges", SharedPool(stop=_stop))
 
 
 def test_build_cloud_accepts_hub_id_and_device_serial() -> None:

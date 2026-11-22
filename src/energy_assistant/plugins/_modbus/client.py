@@ -137,9 +137,20 @@ class ModbusConnectionPool:
 
     def __init__(self) -> None:
         self._pool: dict[tuple[str, int], ModbusTcpClient] = {}
+        self._used: set[tuple[str, int]] = set()
+
+    def begin_build(self) -> None:
+        """Start a rebuild of all devices; see ``sweep``."""
+        self._used.clear()
+
+    async def sweep(self) -> None:
+        """Close the connections no device asked for since ``begin_build``."""
+        for key in [k for k in self._pool if k not in self._used]:
+            await self._pool.pop(key).close()
 
     def get(self, host: str, port: int = 502, timeout: float = 3.0) -> ModbusTcpClient:
         key = (host, port)
+        self._used.add(key)
         if key not in self._pool:
             self._pool[key] = ModbusTcpClient(host, port, timeout)
         return self._pool[key]

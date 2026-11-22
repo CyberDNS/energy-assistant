@@ -29,9 +29,11 @@ per plane is made and the forecasts are summed.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from typing import Any
 
+from ...core.device_model import ParamSpec
 from ...core.plugin_registry import BuildContext, PluginRegistry
 
 _log = logging.getLogger(__name__)
@@ -39,8 +41,42 @@ _log = logging.getLogger(__name__)
 _MIN_REFRESH_MIN = 10.0
 
 
+_PLANE = {
+    "declination": ParamSpec(float, required=True, minimum=0, maximum=90, label="Tilt (°)",
+                             description="Tilt in degrees: 0 = flat, 90 = vertical"),
+    "azimuth": ParamSpec(float, required=True, minimum=-180, maximum=180, label="Azimuth (°)",
+                         description="-180 = north, -90 = east, 0 = south, 90 = west"),
+    "kwp": ParamSpec(float, required=True, minimum=0, exclusive_minimum=True, label="Peak power (kWp)",
+                     description="Peak power (kWp)"),
+}
+
+
 def register(registry: PluginRegistry) -> None:
-    registry.register_forecast("forecast_solar", _build)
+    registry.register_forecast(
+        "forecast_solar", _build,
+        title="Forecast.Solar",
+        description="PV generation forecast from forecast.solar.",
+        scopes=("system",),
+        settings={
+            "latitude": ParamSpec(float, required=True, minimum=-90, maximum=90),
+            "longitude": ParamSpec(float, required=True, minimum=-180, maximum=180),
+            "planes": ParamSpec(list, label="Roof planes",
+                                description="One row per plane; the forecasts are summed",
+                                items=ParamSpec(dict, fields=_PLANE)),
+            # A single plane may be written at the top level instead of 'planes'.
+            **{name: dataclasses.replace(spec, required=False, legacy=True,
+                                         description=f"Single plane: {spec.description}")
+               for name, spec in _PLANE.items()},
+            "damping_morning": ParamSpec(float, minimum=0, maximum=1, default=0, advanced=True),
+            "damping_evening": ParamSpec(float, minimum=0, maximum=1, default=0, advanced=True),
+            "refresh_minutes": ParamSpec(float, minimum=_MIN_REFRESH_MIN, default=60, advanced=True,
+                                         description="Minutes between requests per plane "
+                                                     "(the free API allows 12 requests per hour)"),
+            "api_key": ParamSpec(str, secret=True, advanced=True,
+                                 description="API key of a paid plan (optional)"),
+            "api_url": ParamSpec(str, advanced=True, description="Tests only"),
+        },
+    )
 
 
 def _num(value: Any) -> float:

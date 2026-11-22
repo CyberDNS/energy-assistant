@@ -37,7 +37,7 @@ tariffs:
   # Declared on the main grid meter so the optimizer can account for revenue.
   export_tariff:
     type: flat_rate
-    price_eur_per_kwh: 0.082        # adjust to your actual feed-in rate
+    export_price_eur_per_kwh: 0.082        # adjust to your actual feed-in rate
 
   # Household tariff: Tibber dynamic spot pricing billed to the household
   # sub-circuit (Z2), read straight from the Tibber API.
@@ -51,7 +51,7 @@ tariffs:
   # Lower than the household tariff — that's the value of Messkonzept 8.
   heatpump_tariff:
     type: flat_rate
-    price_eur_per_kwh: 0.150        # adjust to your actual Wärmepumpe rate
+    import_price_eur_per_kwh: 0.150        # adjust to your actual Wärmepumpe rate
 
 # ---------------------------------------------------------------------------
 # Devices — every meter and load in the energy system
@@ -59,7 +59,7 @@ tariffs:
 
 devices:
 
-  # Every device has a category (what it is: grid_meter, meter, pv, battery,
+  # Every device has a category (what it is: meter, pv, battery,
   # charger, thermal_load, consumer, …), a plugin type (how to talk to it) and
   # the plugin's own settings.  Model parameters go under params:, and
   # metered_by: names the meter a device sits behind — together these build
@@ -72,7 +72,7 @@ devices:
   # extra["import_w"] to avoid sign errors when PV is exporting (net power
   # would be negative in that case).
   main_grid_meter:
-    category: grid_meter
+    category: meter
     type: generic_homeassistant
     capabilities:
       power_w:
@@ -80,7 +80,7 @@ devices:
         export_entity: sensor.grid_export_power   # W, ≥ 0
     # Or the live Pulse/Watty stream from the Tibber API (import/export also
     # land in extra[...]):
-    # type: tibber
+    # type: tibber_cloud
     # token: !secret tibber_token
     # Or read the Tibber Pulse Bridge on the LAN (no cloud needed; optional
     # token adds the cloud stream as fallback):

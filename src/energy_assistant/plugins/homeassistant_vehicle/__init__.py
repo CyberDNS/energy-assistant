@@ -35,7 +35,7 @@ from typing import Any
 
 from ...core.device_model import Capability as Cap
 from ...core.device_model import DeviceCategory as C
-from ...core.device_model import DeviceConfigError
+from ...core.device_model import DeviceConfigError, ParamSpec
 from ...core.plugin_registry import BuildContext, PluginRegistry
 
 _log = logging.getLogger(__name__)
@@ -46,8 +46,17 @@ _BINDABLE = {Cap.SOC_PCT, Cap.RANGE_KM, Cap.PLUGGED, Cap.LOCATION_HOME}
 def register(registry: PluginRegistry) -> None:
     registry.register_device(
         "homeassistant_vehicle", _build,
+        title="Car from Home Assistant",
+        description="SoC, range, plug and location from the car integration in Home Assistant.",
         categories={C.VEHICLE},
         bindable=_BINDABLE,
+        settings={
+            "refresh_entity": ParamSpec(str, entity=True, label="Refresh button",
+                                        description="Button entity that makes the car report "
+                                                    "fresh values"),
+            "poll_interval_s": ParamSpec(float, advanced=True, minimum=0, exclusive_minimum=True, default=30.0,
+                                         description="Seconds between reads"),
+        },
     )
 
 

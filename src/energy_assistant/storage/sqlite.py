@@ -768,32 +768,6 @@ class SqliteStorageBackend:
             rows = await cursor.fetchall()
         return {row[0] for row in rows}
 
-    async def rename_ev_ids(self, renames: dict[str, str]) -> dict[str, int]:
-        """Move stored EV rows from old asset ids to vehicle ids, once.
-
-        *renames* maps old id → new id.  An old id is only moved when the new
-        id has no rows yet in that table, so running it again is a no-op.
-        Returns the number of rows moved per table.
-        """
-        assert self._db is not None
-        moved: dict[str, int] = {}
-        for table in _EV_ID_TABLES:
-            for old, new in renames.items():
-                if old == new:
-                    continue
-                async with self._db.execute(
-                    f"SELECT COUNT(*) FROM {table} WHERE asset_id = ?", (new,)
-                ) as cur:
-                    if (await cur.fetchone())[0]:
-                        continue
-                cur = await self._db.execute(
-                    f"UPDATE {table} SET asset_id = ? WHERE asset_id = ?", (new, old)
-                )
-                if cur.rowcount:
-                    moved[table] = moved.get(table, 0) + cur.rowcount
-        await self._db.commit()
-        return moved
-
     # ------------------------------------------------------------------
     # Vehicle sessions
     # ------------------------------------------------------------------
