@@ -4,7 +4,7 @@ Phase 1 — YAML config
 ----------------------
 ``AppConfig`` is the fully-parsed representation of the 6-section YAML file:
 
-    backends:    connection parameters for ioBroker and Home Assistant
+    backends:    connection parameters for Home Assistant and the MQTT broker
     tariffs:     pricing models, keyed by name
     devices:     device declarations (``DeviceSpec``), keyed by device_id;
                  their ``metered_by`` connections form the metering tree
@@ -56,18 +56,6 @@ class ConfigManager(Protocol):
 
 
 @dataclass
-class IoBrokerConfig:
-    """Connection parameters for the ioBroker simple-api."""
-
-    host: str
-    port: int = 8087
-    api_token: str | None = None
-    username: str | None = None
-    password: str | None = None
-    timeout_s: float = 5.0
-
-
-@dataclass
 class HomeAssistantConfig:
     """Connection parameters for the Home Assistant REST API."""
 
@@ -90,7 +78,6 @@ class MqttConfig:
 class BackendsConfig:
     """Connection parameters for all configured backends."""
 
-    iobroker: IoBrokerConfig | None = None
     homeassistant: HomeAssistantConfig | None = None
     mqtt: MqttConfig | None = None
 

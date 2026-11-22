@@ -13,6 +13,10 @@ export const planVersion = ref(0)
 export const planning = ref(false)
 export function markPlanning() { planning.value = true }
 
+// Display name per device id (the config's label), from the last status.
+export const deviceLabels = ref({})
+export function labelOf(id) { return deviceLabels.value[id] ?? id }
+
 // Polling fallback interval — only active while the SSE stream is down
 // (the EventSource reconnects automatically).
 const FALLBACK_POLL_MS = 30_000
@@ -25,10 +29,16 @@ export function useStatus() {
   let es = null
   let streamAlive = false
 
+  function setStatus(s) {
+    status.value = s
+    planning.value = !!s.planning
+    deviceLabels.value = Object.fromEntries(
+      (s.devices ?? []).map(d => [d.device_id, d.label ?? d.device_id]))
+  }
+
   async function refresh() {
     try {
-      status.value  = await fetchStatus()
-      planning.value = !!status.value.planning
+      setStatus(await fetchStatus())
       error.value   = null
     } catch (e) {
       error.value = e.message
@@ -47,8 +57,7 @@ export function useStatus() {
       es = new EventSource(streamUrl)
       es.addEventListener('status', (e) => {
         streamAlive   = true
-        status.value  = JSON.parse(e.data)
-        planning.value = !!status.value.planning
+        setStatus(JSON.parse(e.data))
         error.value   = null
         loading.value = false
       })

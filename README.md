@@ -77,8 +77,10 @@ The MCP endpoint is `http://<host>:<port>/mcp` (streamable HTTP, stateless).
 Its tools are read-only wrappers around the REST API: `get_status`,
 `get_plan` (full per-slot flows), `get_forecast`, `get_savings`,
 `get_savings_slots` (real vs. simulated uncontrolled house per accounting
-slot, with all cost components), `get_history`, `get_ledger`, `get_config`, `get_ev`,
-`get_ev_plan`, `get_controllable`, `get_learned_forecasts`, `get_plan_inputs`.
+slot, with all cost components), `get_history`, `get_execution`,
+`list_plan_snapshots` / `get_plan_snapshot`, `get_ledger`, `get_config`,
+`get_vehicles`, `get_vehicle_plan`, `get_chargers`, `get_controllable`,
+`get_learned_forecasts`, `get_plan_inputs`.
 For Claude Code:
 
 ```bash
@@ -94,7 +96,7 @@ The Plan tab can be deep-linked and embedded (e.g. in an iframe / webpage card):
 |---|---|
 | `#/plan` | Plan tab |
 | `#/savings` | Savings tab: savings against an uncontrolled house over rolling windows (24 h – 1 y) |
-| `#/plan/<vehicle>` or `#/plan?vehicle=<vehicle>` | One EV only: target, 7-day strip, weekly plan, "Charge now" and its charging-plan chart. `<vehicle>` is the EV's asset id (case-insensitive). |
+| `#/plan/<vehicle>` or `#/plan?vehicle=<vehicle>` | One EV only: target, 7-day strip, weekly plan, "Charge now" and its charging-plan chart. `<vehicle>` is the vehicle id or label (case-insensitive). |
 | `…?embed=1` | Hides the header, KPI tiles and tab bar. Combine with any route, e.g. `#/plan/bandit?embed=1`. |
 
 Hosts that drop the URL fragment (the Home Assistant ingress panel does) can
@@ -175,12 +177,17 @@ says.  Stored thermal models and savings are keyed by the thermal load's id.
 A car is a `vehicle` device read from its own Home Assistant integration
 (`type: homeassistant_vehicle`, see `config.yaml.example`); a wallbox is a
 `charger`.  When a charger reports a car plugged in, a **charging session**
-starts with the charger's `default_vehicle`.  While plugged in, the car can be
-reassigned to another vehicle or to a **guest** (UI: Plan tab; API: `PUT
-/api/chargers/<charger>/vehicle?vehicle_id=<id|guest>`; Home Assistant: the
-charger's "Vehicle" select).  A guest car follows the charger's `guest_mode`
-(`pv_only`, `instant`, `off`).  The charger's plug state is authoritative; the
-car's own plug sensor is only shown.
+starts with the charger's `default_vehicle`.  Each car has a **charger
+selector** (UI: the car card on the Plan tab; Home Assistant: the car's
+"Charger" select; API: `PUT /api/vehicles/<vehicle|guest>/charger?charger_id=<id|none>`).
+The last selection wins: a car plugged in at that charger is reassigned now,
+a free charger expects the selected car at its next plug-in, and a car whose
+default charger is taken shows it greyed out until it is free again.  A
+**guest** car charges with PV only or "Charge now" (UI: the guest card; Home
+Assistant: "Guest car charger" / "Guest car mode"; API: `PUT
+/api/guest/mode?mode=<pv_only|instant>`), by default the charger's
+`guest_mode`.  The charger's plug state is authoritative; the car's own plug
+sensor is only shown.
 
 - **SoC:** the car's integration reports every 15–60 min.  In between, the SoC
   is estimated from the energy the charger delivered and the vehicle's charge

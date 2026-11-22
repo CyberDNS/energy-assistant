@@ -1,5 +1,6 @@
 import { defineComponent, ref, inject, computed, watch, onMounted, onUnmounted } from 'vue'
 import { fetchLedger, setLedgerBasis } from '../api.js'
+import { labelOf } from '../composables/useStatus.js'
 
 function fmt(v, dec = 0) {
   return v == null ? '—' : Number(v).toFixed(dec)
@@ -141,7 +142,7 @@ export default defineComponent({
 
     return { status, ledger, devices, setpoints, editBasis, basisBusy,
              flowTiles, deviceCards, updatedAgo, modePill,
-             fmt, fmtPower, fmtSetpointW, startEdit, cancelEdit, saveBasis }
+             fmt, fmtPower, fmtSetpointW, startEdit, cancelEdit, saveBasis, labelOf }
   },
 
   template: `
@@ -200,7 +201,7 @@ export default defineComponent({
             </thead>
             <tbody>
               <tr v-for="l in ledger" :key="l.device_id">
-                <td>{{ l.device_id }}</td>
+                <td>{{ labelOf(l.device_id) }}</td>
                 <td class="ledger-stored">
                   <span class="num">{{ fmt(l.stored_energy_kwh, 1) }} / {{ fmt(l.capacity_kwh, 1) }} kWh</span>
                   <div class="soc-bar" v-if="l.capacity_kwh">

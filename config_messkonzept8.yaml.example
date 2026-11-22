@@ -15,7 +15,7 @@
 # To use this example:
 #   1. Copy to config.yaml (already gitignored)
 #   2. Create secrets.yaml with the required secret keys (see below)
-#   3. Replace placeholder OIDs and IDs with your real values
+#   3. Replace placeholder entity ids and IDs with your real values
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
@@ -23,14 +23,9 @@
 # ---------------------------------------------------------------------------
 
 backends:
-  iobroker:
-    host: "192.168.x.x"      # ioBroker host on your local network
-    port: 8087
-    # api_token: !secret iobroker_api_token   # uncomment if token auth is enabled
-
-  # homeassistant:
-  #   url: "https://your-ha-instance.example.com"
-  #   token: !secret ha_token
+  homeassistant:
+    url: "https://your-ha-instance.example.com"
+    token: !secret ha_token
 
 # ---------------------------------------------------------------------------
 # Tariffs — pricing models referenced by name from devices
@@ -45,13 +40,10 @@ tariffs:
     price_eur_per_kwh: 0.082        # adjust to your actual feed-in rate
 
   # Household tariff: Tibber dynamic spot pricing billed to the household
-  # sub-circuit (Z2). Prices are read from the ioBroker tibberlink adapter.
+  # sub-circuit (Z2), read straight from the Tibber API.
   household_tariff:
-    type: tibber_iobroker
-    home_id: !secret tibber_home_id  # find under tibberlink.0.Homes.* in ioBroker
-    # Without ioBroker — read prices straight from the Tibber API:
-    # type: tibber
-    # token: !secret tibber_token      # https://developer.tibber.com/settings/access-token
+    type: tibber
+    token: !secret tibber_token      # https://developer.tibber.com/settings/access-token
     # home_id: !secret tibber_home_id  # optional — defaults to the account's first home
     # resolution: QUARTER_HOURLY       # or HOURLY
 
@@ -75,18 +67,19 @@ devices:
 
   # Z1 — Main grid meter at the grid connection point.
   #
-  # Reads import (powerImport) and export (powerExport) separately so the
-  # optimizer has access to gross import via extra["import_w"].
-  # The heat pump differential uses extra["import_w"] to avoid sign errors
-  # when PV is exporting (net power would be negative in that case).
+  # Reads import and export separately so the optimizer has access to gross
+  # import via extra["import_w"].  The heat pump differential uses
+  # extra["import_w"] to avoid sign errors when PV is exporting (net power
+  # would be negative in that case).
   main_grid_meter:
     category: grid_meter
-    type: generic_iobroker
-    # Tibber live measurement — replace <home-id> with your Tibber Home ID
-    power_import: "tibberlink.0.Homes.<home-id>.LiveMeasurement.powerImport"
-    power_export: "tibberlink.0.Homes.<home-id>.LiveMeasurement.powerExport"
-    # Without ioBroker — live Pulse/Watty stream from the Tibber API
-    # (replaces type + the two oids; import/export also land in extra[...]):
+    type: generic_homeassistant
+    capabilities:
+      power_w:
+        import_entity: sensor.grid_import_power   # W, ≥ 0
+        export_entity: sensor.grid_export_power   # W, ≥ 0
+    # Or the live Pulse/Watty stream from the Tibber API (import/export also
+    # land in extra[...]):
     # type: tibber
     # token: !secret tibber_token
     # Or read the Tibber Pulse Bridge on the LAN (no cloud needed; optional
@@ -115,15 +108,18 @@ devices:
   #
   # Measures only the household load (NOT the heat pump circuit).
   # In a typical Messkonzept 8 setup this is a dedicated sub-meter.
-  # Replace the OID with the one for your physical household meter.
+  # Replace the entity with the one for your physical household meter.
   household_meter:
     category: meter
-    type: generic_iobroker
+    type: generic_homeassistant
     metered_by: main_grid_meter
     # Example: a SMA Energy Manager or a Shelly EM on the household circuit
-    power: "<your-household-sub-circuit-oid>"
-    # Alternatively, if your meter exposes import only (always ≥ 0):
-    # power: "sma-em.0.<serial>.wirkleistung_bezug"
+    capabilities:
+      power_w: { entity: sensor.household_power }
+    # Or a Tibber Pulse Bridge on this meter, read on the LAN:
+    # type: tibber_local
+    # host: 192.168.1.52
+    # password: !secret tibber_pulse_password
     tariff: household_tariff
 
   # HP — Heat pump consumption (Messkonzept 8 derived value).
@@ -173,8 +169,6 @@ optimizer:
   # and a solve time limit (5 s at 0.0 → 60 s near 1.0; 1.0 = unlimited).
   # On timeout the best plan found so far is used.
   precision: 0.5
-  baseline_load_kw: 0.3           # assumed household background load (no forecast)
-  feed_in_eur_per_kwh: 0.082      # must match export_tariff above
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -188,7 +182,6 @@ logging:
 # ---------------------------------------------------------------------------
 # secrets.yaml keys required by this config:
 #
-#   tibber_home_id:  <your Tibber Home ID from tibberlink.0.Homes.*>
-#   iobroker_api_token:  <optional — only if token auth is enabled>
-#   ha_token:  <optional — only if Home Assistant is configured>
+#   ha_token:      <Home Assistant long-lived access token>
+#   tibber_token:  <Tibber API token>
 # ---------------------------------------------------------------------------

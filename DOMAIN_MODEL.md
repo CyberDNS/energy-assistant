@@ -19,7 +19,7 @@ model (categories, capabilities, connections) is designed in issue #97.
 
 | Section     | Purpose |
 |-------------|---------|
-| `backends`  | Connection parameters for ioBroker and Home Assistant |
+| `backends`  | Connections to Home Assistant and the MQTT broker |
 | `tariffs`   | Pricing models defined once, referenced by name from devices |
 | `devices`   | Everything in the house — meters, PV, batteries, chargers, vehicles, thermal loads, switches, consumers — with category, capabilities, params and connections; `metered_by` forms the metering tree |
 | `optimizer` | Single holistic solver: algorithm, horizon, schedule |
@@ -30,9 +30,12 @@ For a complete annotated example covering all sections, see [`config.yaml.exampl
 
 ## Layer 1 — `backends`
 
-Connection parameters for the two supported data backends. These are
-referenced implicitly by all device sources that use `type: generic_iobroker`
-or `type: generic_ha`.
+Connections shared by the plugins: `homeassistant` (REST/WebSocket API, for
+HA-backed devices such as `generic_homeassistant`, `homeassistant_vehicle`,
+learned forecasts and the Energy dashboard import) and `mqtt` (the broker for
+`openwb_mqtt`, local `zendure` and the Home Assistant discovery entities).
+Devices that talk to hardware directly (`tasmota`, `tibber_local`, `modbus`,
+`zendure` via the cloud) need no backend.
 
 ---
 

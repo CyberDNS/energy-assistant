@@ -1,7 +1,7 @@
 import { defineComponent, ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
-import { fetchPlan, fetchForecast, fetchEv, fetchControllable, fetchChargers, triggerPlanRefresh } from '../api.js'
-import { planVersion, planning } from '../composables/useStatus.js'
+import { fetchPlan, fetchForecast, fetchVehicles, fetchControllable, fetchChargers, triggerPlanRefresh } from '../api.js'
+import { planVersion, planning, labelOf } from '../composables/useStatus.js'
 import PlotlyChart from '../components/PlotlyChart.js'
 import EvCard from '../components/EvCard.js'
 import GuestCard from '../components/GuestCard.js'
@@ -123,7 +123,7 @@ function buildSocTraces(intents, forecast, evDeviceIds) {
     const y = devIntents.map(i => i.stored_energy_kwh / caps.capacity_kwh * 100)
 
     if (x.length) {
-      traces.push({ name: did, mode: 'lines', x, y, hovertemplate: '%{x|%H:%M}  %{y:.1f}%<extra></extra>' })
+      traces.push({ name: labelOf(did), mode: 'lines', x, y, hovertemplate: '%{x|%H:%M}  %{y:.1f}%<extra></extra>' })
     }
   }
   return traces
@@ -135,7 +135,7 @@ export default defineComponent({
 
   setup() {
     // Single-vehicle view: #/plan/<vehicle> or #/plan?vehicle=<vehicle>.
-    // Matches the EV's asset_id (or label), case-insensitively.
+    // Matches the vehicle id (or label), case-insensitively.
     const route = useRoute()
     const vehicle = computed(() => {
       const v = route.params.vehicle ?? route.query.vehicle
@@ -163,7 +163,7 @@ export default defineComponent({
     async function refresh() {
       try {
         const [plan, forecast, evs, ctrl, chs] = await Promise.all([
-          fetchPlan(), fetchForecast(), fetchEv(), fetchControllable(),
+          fetchPlan(), fetchForecast(), fetchVehicles(), fetchControllable(),
           fetchChargers().catch(() => []),
         ])
         chargers.value = chs
@@ -174,7 +174,7 @@ export default defineComponent({
           : 'No plan yet'
 
         evList.value = evs
-        const evDeviceIds = new Set(evs.map(e => e.device_id))
+        const evDeviceIds = new Set(evs.map(e => e.charger_id).filter(Boolean))
         const { flowTraces: ft, forecastTraces: fct, priceTraces: pt } =
           buildFlowTraces(plan.intents, forecast, evDeviceIds, plan.flows)
 
@@ -190,10 +190,10 @@ export default defineComponent({
     }
 
     const vehicleEv = computed(() => vehicle.value && evList.value.find(e =>
-      e.asset_id.toLowerCase() === vehicle.value || e.label?.toLowerCase() === vehicle.value
+      e.vehicle_id.toLowerCase() === vehicle.value || e.label?.toLowerCase() === vehicle.value
     ))
     const vehicleDevice = computed(() => vehicleEv.value &&
-      controllable.value.find(d => d.device_id === vehicleEv.value.device_id)
+      controllable.value.find(d => d.vehicle_id === vehicleEv.value.vehicle_id)
     )
 
     onMounted(() => { refresh(); timer = setInterval(refresh, 60_000) })
@@ -214,7 +214,7 @@ export default defineComponent({
       </transition>
       <template v-if="vehicleEv">
         <div class="full">
-          <EvCard :key="vehicleEv.asset_id" :ev="vehicleEv" :chargers="chargers" @refresh="refresh" />
+          <EvCard :key="vehicleEv.vehicle_id" :ev="vehicleEv" :chargers="chargers" @refresh="refresh" />
         </div>
         <div v-if="vehicleDevice" class="full panel">
           <h2>Charging Plan</h2>
@@ -225,7 +225,7 @@ export default defineComponent({
       </template>
       <p v-else-if="loaded" class="footnote">
         Unknown vehicle “{{ vehicle }}”.
-        <template v-if="evList.length">Available: {{ evList.map(e => e.asset_id).join(', ') }}</template>
+        <template v-if="evList.length">Available: {{ evList.map(e => e.vehicle_id).join(', ') }}</template>
       </p>
     </div>
 
@@ -245,7 +245,7 @@ export default defineComponent({
       <div v-if="evList.length" class="full panel" style="margin-bottom:10px">
         <h2>Cars</h2>
         <div class="ev-cards">
-          <EvCard v-for="ev in evList" :key="ev.asset_id" :ev="ev" :chargers="chargers" collapsible @refresh="refresh" />
+          <EvCard v-for="ev in evList" :key="ev.vehicle_id" :ev="ev" :chargers="chargers" collapsible @refresh="refresh" />
         </div>
         <GuestCard v-if="chargers.length" :chargers="chargers" style="margin-top:10px" @refresh="refresh" />
       </div>

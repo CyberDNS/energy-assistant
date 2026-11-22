@@ -684,18 +684,19 @@ class ControlLoop:
                         contributor.device_id,
                     )
 
-            # Update ledger from *actual* measured power, not from setpoint.
-            # This correctly accounts for partial delivery, SoC clamping, etc.
+            # Update the battery ledger from *actual* measured power, not from
+            # the setpoint (partial delivery, SoC clamping, …).  Only batteries
+            # store energy whose cost matters later; cars and thermal loads
+            # are accounted for by the savings (core/savings.py).
             state = live.device_states.get(contributor.device_id)
-            if state is not None and state.power_w is not None and live.dt_hours > 0:
+            if (
+                isinstance(contributor, StorageControlContributor)
+                and state is not None and state.power_w is not None and live.dt_hours > 0
+            ):
                 actual_kwh = state.power_w / 1000.0 * live.dt_hours
                 if actual_kwh > 0.0:
                     price = contributor.charge_price_eur_per_kwh(intent, live)
-                    eta_c = (
-                        contributor._constraints.charge_efficiency
-                        if isinstance(contributor, StorageControlContributor)
-                        else 0.95
-                    )
+                    eta_c = contributor._constraints.charge_efficiency
                     self._ledger.record_charge(
                         contributor.device_id,
                         delta_kwh=actual_kwh,

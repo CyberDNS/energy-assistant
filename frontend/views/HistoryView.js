@@ -1,5 +1,6 @@
 import { defineComponent, ref, onMounted } from 'vue'
 import { fetchHistory, fetchLedger } from '../api.js'
+import { labelOf } from '../composables/useStatus.js'
 import PlotlyChart from '../components/PlotlyChart.js'
 
 function localTs(isoArr) {
@@ -51,7 +52,7 @@ export default defineComponent({
       const soc = []
       for (const [did, rows] of Object.entries(hist)) {
         if (!rows.some(r => r.soc_pct != null)) continue
-        soc.push({ name: did, mode: 'lines',
+        soc.push({ name: labelOf(did), mode: 'lines',
           x: localTs(rows.map(r => r.t)),
           y: rows.map(r => r.soc_pct),
           hovertemplate: '%{x|%H:%M}  %{y:.1f}%<extra></extra>' })
@@ -63,7 +64,7 @@ export default defineComponent({
       for (const [did, rows] of Object.entries(hist)) {
         if (rows.some(r => r.soc_pct != null)) continue
         if (!rows.some(r => r.power_w != null)) continue
-        pwr.push({ name: did, mode: 'lines',
+        pwr.push({ name: labelOf(did), mode: 'lines',
           x: localTs(rows.filter(r => r.power_w != null).map(r => r.t)),
           y: rows.filter(r => r.power_w != null).map(r => r.power_w),
           hovertemplate: '%{x|%H:%M}  %{y:.0f} W<extra></extra>' })
@@ -76,7 +77,7 @@ export default defineComponent({
         if (!rows.some(r => r.soc_pct != null)) continue
         const x = localTs(rows.filter(r => r.power_w != null).map(r => r.t))
         const y = rows.filter(r => r.power_w != null).map(r => r.power_w)
-        if (x.length) batPwr.push({ name: did, mode: 'lines', x, y, hovertemplate: '%{x|%H:%M}  %{y:.0f} W<extra></extra>' })
+        if (x.length) batPwr.push({ name: labelOf(did), mode: 'lines', x, y, hovertemplate: '%{x|%H:%M}  %{y:.0f} W<extra></extra>' })
       }
       batPwrTraces.value = batPwr
 
@@ -84,7 +85,7 @@ export default defineComponent({
       const basis = []
       for (const [did, rows] of Object.entries(ledHist)) {
         if (!rows.length) continue
-        basis.push({ name: did + ' basis', mode: 'lines',
+        basis.push({ name: labelOf(did) + ' basis', mode: 'lines',
           x: localTs(rows.map(r => r.t)),
           y: rows.map(r => r.cost_basis_eur_per_kwh),
           hovertemplate: '%{x|%H:%M}  %{y:.4f} €/kWh<extra></extra>' })
@@ -93,7 +94,7 @@ export default defineComponent({
       if (!basis.length && ledgerSnap.length) {
         const now = new Date().toLocaleString()
         for (const s of ledgerSnap) {
-          basis.push({ name: s.device_id + ' (current)', mode: 'markers',
+          basis.push({ name: labelOf(s.device_id) + ' (current)', mode: 'markers',
             x: [now], y: [s.cost_basis_eur_per_kwh], hovertemplate: '%{y:.4f} €/kWh<extra></extra>' })
         }
       }

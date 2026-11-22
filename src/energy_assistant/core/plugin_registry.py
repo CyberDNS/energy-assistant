@@ -10,7 +10,6 @@ Every factory receives a ``BuildContext`` with all infrastructure objects
 needed to construct a device or tariff:
 
     ctx.backends        — parsed BackendsConfig (host, port, tokens)
-    ctx.iobroker_pool   — shared IoBrokerConnectionPool (or None)
     ctx.ha_client       — HAClient (or None)
     ctx.modbus_pool     — shared ModbusConnectionPool, created on first use
     ctx.device_registry — populated DeviceRegistry (set in second pass,
@@ -73,7 +72,6 @@ class BuildContext:
     """Carries all infrastructure objects into plugin factory functions."""
 
     backends: BackendsConfig
-    iobroker_pool: Any = None    # IoBrokerConnectionPool | None
     ha_client: Any = None        # HAClient | None
     modbus_pool: Any = None      # ModbusConnectionPool | None (created lazily)
     device_registry: Any = None  # DeviceRegistry | None  (deferred pass only)

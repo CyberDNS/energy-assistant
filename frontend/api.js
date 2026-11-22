@@ -16,7 +16,7 @@ export const fetchPlan     = ()           => call('/api/plan')
 export const fetchForecast = ()           => call('/api/forecast')
 export const fetchHistory  = (hours)      => call(`/api/history?hours=${hours}`)
 export const fetchLedger   = ()           => call('/api/ledger')
-export const fetchEv           = ()           => call('/api/ev')
+export const fetchVehicles     = ()           => call('/api/vehicles')
 export const fetchControllable = ()           => call('/api/controllable')
 export const fetchConfig   = ()           => call('/api/config')
 export const fetchLearned  = ()           => call('/api/learned')
@@ -29,20 +29,20 @@ const _json = (method, body) => ({
   body: JSON.stringify(body),
 })
 
-export const fetchEvPlan = (id) => call(`/api/ev/${encodeURIComponent(id)}/plan`)
+export const fetchEvPlan = (id) => call(`/api/vehicles/${encodeURIComponent(id)}/plan`)
 export const saveEvWeeklyPlan = (id, weekly) =>
-  call(`/api/ev/${encodeURIComponent(id)}/plan`, _json('PUT', { weekly }))
+  call(`/api/vehicles/${encodeURIComponent(id)}/plan`, _json('PUT', { weekly }))
 export const setEvDayOverride = (id, date, override) =>
-  call(`/api/ev/${encodeURIComponent(id)}/plan/${date}`, _json('PUT', override))
+  call(`/api/vehicles/${encodeURIComponent(id)}/plan/${date}`, _json('PUT', override))
 export const clearEvDayOverride = (id, date) =>
-  call(`/api/ev/${encodeURIComponent(id)}/plan/${date}`, { method: 'DELETE' })
+  call(`/api/vehicles/${encodeURIComponent(id)}/plan/${date}`, { method: 'DELETE' })
 export const startForceCharge = (id, socPct) =>
-  call(`/api/ev/${encodeURIComponent(id)}/force_charge?target_soc_pct=${socPct}`, { method: 'POST' })
+  call(`/api/vehicles/${encodeURIComponent(id)}/force_charge?target_soc_pct=${socPct}`, { method: 'POST' })
 export const stopForceCharge = (id) =>
-  call(`/api/ev/${encodeURIComponent(id)}/force_charge`, { method: 'DELETE' })
+  call(`/api/vehicles/${encodeURIComponent(id)}/force_charge`, { method: 'DELETE' })
 
-export const disableChargepoint  = (id) => call(`/api/ev/${encodeURIComponent(id)}/disable`, { method: 'POST' })
-export const enableChargepoint   = (id) => call(`/api/ev/${encodeURIComponent(id)}/disable`, { method: 'DELETE' })
+export const disableChargepoint  = (id) => call(`/api/vehicles/${encodeURIComponent(id)}/disable`, { method: 'POST' })
+export const enableChargepoint   = (id) => call(`/api/vehicles/${encodeURIComponent(id)}/disable`, { method: 'DELETE' })
 export const setLedgerBasis      = (deviceId, basis) =>
   call(`/api/ledger/set_basis?device_id=${encodeURIComponent(deviceId)}&cost_basis_eur_per_kwh=${basis}`, { method: 'POST' })
 
@@ -51,8 +51,8 @@ export const triggerPlanRefresh  = () => call('/api/plan/refresh', { method: 'PO
 export const fetchChargers = () => call('/api/chargers')
 // Put a car (or "guest") on a charger; "none" drops its selection.
 export const selectEvCharger = (vehicleId, chargerId) =>
-  call(`/api/ev/${encodeURIComponent(vehicleId)}/charger?charger_id=${encodeURIComponent(chargerId)}`,
+  call(`/api/vehicles/${encodeURIComponent(vehicleId)}/charger?charger_id=${encodeURIComponent(chargerId)}`,
        { method: 'PUT' })
 // How the guest car charges: "pv_only" or "instant".
 export const setGuestMode = (mode) =>
-  call(`/api/ev/guest/mode?mode=${encodeURIComponent(mode)}`, { method: 'PUT' })
+  call(`/api/guest/mode?mode=${encodeURIComponent(mode)}`, { method: 'PUT' })

@@ -19,8 +19,8 @@ Example config::
       category: battery
       type: zendure
       cloud_key: !secret zendure_cloud_key
-      product_key: "aBc1dE"      # alias: hub_id
-      device_key: "AB12cd34"     # alias: device_serial
+      product_key: "aBc1dE"      # (also accepted: hub_id)
+      device_key: "AB12cd34"     # (also accepted: device_serial)
       capacity_kwh: 7.6
       max_charge_kw: 1.2
       max_discharge_kw: 0.8

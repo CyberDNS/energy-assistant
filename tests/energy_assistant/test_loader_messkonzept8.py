@@ -18,7 +18,7 @@ from energy_assistant.core.topology import TopologyNode
 from energy_assistant.loader.device_loader import build
 from energy_assistant.plugins.differential.device import DifferentialDevice
 from energy_assistant.plugins.flat_rate.tariff import FlatRateTariff
-from energy_assistant.plugins.generic_iobroker.device import GenericIoBrokerDevice
+from energy_assistant.plugins.generic_homeassistant.device import GenericHADevice
 
 # ---------------------------------------------------------------------------
 # YamlConfigLoader tests
@@ -61,17 +61,44 @@ class TestYamlConfigLoader:
     def test_parses_backends(self, tmp_path: Path) -> None:
         yaml_text = dedent("""\
             backends:
-              iobroker:
-                host: "192.168.1.10"
-                port: 8087
+              homeassistant:
+                url: "http://192.168.1.10:8123"
+                token: t
+              mqtt:
+                host: "192.168.1.11"
         """)
         config_file = tmp_path / "config.yaml"
         config_file.write_text(yaml_text)
 
         cfg = YamlConfigLoader(config_file).load()
-        assert cfg.backends.iobroker is not None
-        assert cfg.backends.iobroker.host == "192.168.1.10"
-        assert cfg.backends.iobroker.port == 8087
+        assert cfg.backends.homeassistant is not None
+        assert cfg.backends.homeassistant.url == "http://192.168.1.10:8123"
+        assert cfg.backends.mqtt is not None and cfg.backends.mqtt.port == 1883
+
+    def test_iobroker_backend_is_ignored_with_a_warning(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("backends:\n  iobroker:\n    host: h\n")
+        cfg = YamlConfigLoader(config_file).load()
+        assert not hasattr(cfg.backends, "iobroker")
+        assert "backends.iobroker is no longer used" in caplog.text
+
+    def test_removed_iobroker_types_are_rejected(self, tmp_path: Path) -> None:
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(dedent("""\
+            tariffs:
+              household: { type: tibber_iobroker }
+            devices:
+              - { id: zen, category: battery, type: zendure_iobroker }
+        """))
+        with pytest.raises(DeviceConfigError) as exc:
+            YamlConfigLoader(config_file).load()
+        removed = "was removed with the ioBroker support"
+        assert exc.value.errors == [
+            f"devices: zen: type 'zendure_iobroker' {removed} — use zendure",
+            f"tariffs: household: type 'tibber_iobroker' {removed} — use tibber",
+        ]
 
     def test_parses_tariffs(self, tmp_path: Path) -> None:
         yaml_text = dedent("""\
@@ -92,9 +119,9 @@ class TestYamlConfigLoader:
             devices:
               main_grid_meter:
                 category: grid_meter
-                type: generic_iobroker
-                power_import: "tibberlink.0.Homes.abc.powerImport"
-                power_export: "tibberlink.0.Homes.abc.powerExport"
+                type: tasmota
+                host: 192.168.1.46
+                profile: iskra_mt175
         """)
         config_file = tmp_path / "config.yaml"
         config_file.write_text(yaml_text)
@@ -102,8 +129,8 @@ class TestYamlConfigLoader:
         cfg = YamlConfigLoader(config_file).load()
         spec = cfg.devices["main_grid_meter"]
         assert spec.category is DeviceCategory.GRID_METER
-        assert spec.type == "generic_iobroker"
-        assert spec.settings["power_import"] == "tibberlink.0.Homes.abc.powerImport"
+        assert spec.type == "tasmota"
+        assert spec.settings["host"] == "192.168.1.46"
 
     def test_topology_section_is_rejected(self, tmp_path: Path) -> None:
         config_file = tmp_path / "config.yaml"
@@ -124,7 +151,7 @@ class TestYamlConfigLoader:
         yaml_text = dedent("""\
             tariffs:
               tibber:
-                type: tibber_iobroker
+                type: tibber
                 home_id: !secret mytoken
         """)
         config_file = tmp_path / "config.yaml"
@@ -143,9 +170,9 @@ def _messkonzept8_config(tmp_path: Path) -> AppConfig:
     """Build an AppConfig representing the Messkonzept 8 setup."""
     yaml_text = dedent("""\
         backends:
-          iobroker:
-            host: "192.168.1.5"
-            port: 8087
+          homeassistant:
+            url: "http://192.168.1.5:8123"
+            token: t
 
         tariffs:
           export_tariff:
@@ -161,16 +188,17 @@ def _messkonzept8_config(tmp_path: Path) -> AppConfig:
         devices:
           main_grid_meter:
             category: grid_meter
-            type: generic_iobroker
-            power_import: "tibberlink.0.Homes.abc.powerImport"
-            power_export: "tibberlink.0.Homes.abc.powerExport"
+            type: generic_homeassistant
+            capabilities:
+              power_w: { import_entity: sensor.grid_import, export_entity: sensor.grid_export }
             tariff: export_tariff
 
           household_meter:
             category: meter
-            type: generic_iobroker
+            type: generic_homeassistant
             metered_by: main_grid_meter
-            power: "sma-em.0.12345.wirkleistung_bezug"
+            capabilities:
+              power_w: { entity: sensor.household_power }
             tariff: household_tariff
 
           heatpump:
@@ -209,8 +237,8 @@ class TestDeviceLoaderMesskonzept8:
         cfg = _messkonzept8_config(tmp_path)
         registry, _, _ = build(cfg)
 
-        assert isinstance(registry.get("main_grid_meter"), GenericIoBrokerDevice)
-        assert isinstance(registry.get("household_meter"), GenericIoBrokerDevice)
+        assert isinstance(registry.get("main_grid_meter"), GenericHADevice)
+        assert isinstance(registry.get("household_meter"), GenericHADevice)
         assert isinstance(registry.get("heatpump"), DifferentialDevice)
 
     def test_all_three_tariffs_built(self, tmp_path: Path) -> None:
@@ -249,21 +277,20 @@ class TestDeviceLoaderMesskonzept8:
         assert len(consumers) == 1
         assert consumers[0].device_id == "heatpump"
 
-    def test_missing_backend_skips_iobroker_devices(self, tmp_path: Path) -> None:
-        """When no ioBroker backend is configured, generic_iobroker devices are skipped."""
+    def test_missing_backend_skips_ha_devices(self, tmp_path: Path) -> None:
+        """Without a Home Assistant backend, generic_homeassistant devices are skipped."""
         from energy_assistant.core.config import AppConfig
 
         cfg = AppConfig(
             devices=parse_devices({
                 "main_grid_meter": {
                     "category": "meter",
-                    "type": "generic_iobroker",
-                    "power": "some.oid",
+                    "type": "generic_homeassistant",
+                    "capabilities": {"power_w": {"entity": "sensor.p"}},
                 }
             })
         )
         registry, _, _ = build(cfg)
-        # Device skipped because no ioBroker backend configured
         assert registry.get("main_grid_meter") is None
 
 
@@ -279,7 +306,8 @@ def test_example_config_is_valid(name: str, monkeypatch: pytest.MonkeyPatch) -> 
     from energy_assistant.core.topology import build_topology
     from energy_assistant.loader.device_loader import validate_plugins
 
-    for secret in ("TIBBER_HOME_ID", "TIBBER_PULSE_PASSWORD", "ZENDURE_CLOUD_KEY"):
+    for secret in ("HA_TOKEN", "MQTT_USER", "MQTT_PASSWORD", "TIBBER_TOKEN", "TIBBER_HOME_ID",
+                   "TIBBER_PULSE_PASSWORD", "ZENDURE_CLOUD_KEY"):
         monkeypatch.setenv(f"ENERGY_ASSISTANT_SECRET_{secret}", "x")
     cfg = YamlConfigLoader(_REPO / name).load()
     validate_plugins(cfg.devices)

@@ -150,17 +150,17 @@ def build_mcp_server(api: FastAPI) -> MCPServer:
         return await get("/api/config")
 
     @mcp.tool(annotations=_READ_ONLY)
-    async def get_ev() -> dict[str, Any]:
+    async def get_vehicles() -> dict[str, Any]:
         """Vehicles: where each one is (charger and since when, or away), its
         SoC (the car's last report, or estimated from the charger's energy
         since then), charging goal and its status."""
-        return await get("/api/ev")
+        return await get("/api/vehicles")
 
     @mcp.tool(annotations=_READ_ONLY)
-    async def get_ev_plan(vehicle_id: str) -> dict[str, Any]:
+    async def get_vehicle_plan(vehicle_id: str) -> dict[str, Any]:
         """One vehicle's weekly charging plan, day overrides and the resulting
         7-day targets."""
-        return await get(f"/api/ev/{vehicle_id}/plan")
+        return await get(f"/api/vehicles/{vehicle_id}/plan")
 
     @mcp.tool(annotations=_READ_ONLY)
     async def get_chargers() -> dict[str, Any]:

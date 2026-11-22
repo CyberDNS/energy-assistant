@@ -2,7 +2,7 @@
 
 Expected top-level sections
 ----------------------------
-``backends``   Connection parameters for ioBroker and Home Assistant.
+``backends``   Connection parameters for Home Assistant and the MQTT broker.
 ``tariffs``    Pricing models keyed by name, e.g. ``tibber``, ``export``.
 ``devices``    Device declarations (category, capabilities, params,
                connections), see ``core/device_model``.
@@ -15,12 +15,10 @@ Sensitive values (API tokens, passwords) belong in ``secrets.yaml``,
 referenced with the ``!secret`` tag::
 
     backends:
-      iobroker:
-        api_token: !secret iobroker_api_token
-        username: !secret iobroker_user
-        password: !secret iobroker_password
       homeassistant:
         token: !secret ha_token
+      mqtt:
+        password: !secret mqtt_password
 
 ``secrets.yaml`` lives alongside ``config.yaml`` and must be gitignored.
 See ``energy_assistant.secrets.SecretsManager`` for the full resolution rules.
@@ -42,7 +40,6 @@ from ..core.config import (
     AppConfig,
     BackendsConfig,
     HomeAssistantConfig,
-    IoBrokerConfig,
     MqttConfig,
 )
 from ..core.device_model import DeviceConfigError, parse_devices
@@ -112,6 +109,9 @@ class YamlConfigLoader:
                 "params.rated_power_w) and the thermal_load with type homeassistant_thermal, "
                 "'controlled_by: <switch>' and the thresholds / rates under 'params:'"
             )])
+        removed = _removed_types(raw)
+        if removed:
+            raise DeviceConfigError(removed)
         backends = _parse_backends(raw.get("backends") or {})
         raw_tariffs: dict[str, Any] = raw.get("tariffs") or {}
         default_tariff_id = _find_default_tariff(raw_tariffs)
@@ -127,6 +127,33 @@ class YamlConfigLoader:
             energy_dashboard=raw.get("energy_dashboard") or {},
             default_tariff_id=default_tariff_id,
         )
+
+
+#: Plugin types that were removed, with what to use instead.
+_REMOVED_TYPES = {
+    "generic_iobroker": "generic_homeassistant (capabilities.power_w), tasmota or tibber_local",
+    "sma_modbus_iobroker": "modbus (profile: sma_sunny_boy_storage)",
+    "zendure_iobroker": "zendure",
+    "tibber_iobroker": "tibber",
+    "pvforecast_iobroker": "forecast_solar",
+}
+
+
+def _removed_types(raw: dict[str, Any]) -> list[str]:
+    """Errors for devices, tariffs and forecasts that use a removed plugin type."""
+    sections = {
+        "devices": _normalize_devices(raw.get("devices") or {}),
+        "tariffs": raw.get("tariffs") or {},
+        "forecasts": _normalize_forecasts(raw.get("forecasts") or {}),
+    }
+    errors = []
+    for section, entries in sections.items():
+        for entry_id, cfg in entries.items():
+            type_name = cfg.get("type") if isinstance(cfg, dict) else None
+            if type_name in _REMOVED_TYPES:
+                errors.append(f"{section}: {entry_id}: type {type_name!r} was removed with the "
+                              f"ioBroker support — use {_REMOVED_TYPES[type_name]}")
+    return errors
 
 
 def _assets_hint(assets: Any) -> str:
@@ -163,15 +190,15 @@ def _normalize_forecasts(raw: Any) -> dict[str, dict[str, Any]]:
 
         forecasts:
           - id: pv
-            type: pvforecast_iobroker
-            oid: "pvforecast.0.plants.pv.JSONData"
+            type: forecast_solar
+            kwp: 7.4
 
     Dict format::
 
         forecasts:
           pv:
-            type: pvforecast_iobroker
-            oid: "pvforecast.0.plants.pv.JSONData"
+            type: forecast_solar
+            kwp: 7.4
     """
     if isinstance(raw, list):
         result: dict[str, dict[str, Any]] = {}
@@ -196,7 +223,7 @@ def _normalize_devices(raw: Any) -> dict[str, dict[str, Any]]:
         devices:
           my_device:
             category: meter
-            type: generic_iobroker
+            type: tasmota
             ...
 
     List format (used in config.yaml)::
@@ -204,7 +231,7 @@ def _normalize_devices(raw: Any) -> dict[str, dict[str, Any]]:
         devices:
           - id: my_device
             category: meter
-            type: generic_iobroker
+            type: tasmota
             ...
 
     Nested ``source:`` wrappers are also flattened so every plugin factory
@@ -214,14 +241,14 @@ def _normalize_devices(raw: Any) -> dict[str, dict[str, Any]]:
         my_device:
           category: meter
           source:
-            type: generic_iobroker
-            power: "..."
+            type: tasmota
+            host: "..."
 
         # after normalisation
         my_device:
           category: meter
-          type: generic_iobroker
-          power: "..."
+          type: tasmota
+          host: "..."
     """
     if isinstance(raw, list):
         result: dict[str, dict[str, Any]] = {}
@@ -253,17 +280,13 @@ def _flatten_device_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
 
 
 def _parse_backends(cfg: dict[str, Any]) -> BackendsConfig:
-    iobroker: IoBrokerConfig | None = None
     homeassistant: HomeAssistantConfig | None = None
 
-    if iob_cfg := cfg.get("iobroker"):
-        iobroker = IoBrokerConfig(
-            host=iob_cfg["host"],
-            port=int(iob_cfg.get("port", 8087)),
-            api_token=iob_cfg.get("api_token"),
-            username=iob_cfg.get("username"),
-            password=iob_cfg.get("password"),
-            timeout_s=float(iob_cfg.get("timeout_s", 5.0)),
+    if "iobroker" in cfg:
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "backends.iobroker is no longer used (the ioBroker plugins were removed) — "
+            "remove it from config.yaml"
         )
 
     if ha_cfg := cfg.get("homeassistant"):
@@ -288,4 +311,4 @@ def _parse_backends(cfg: dict[str, Any]) -> BackendsConfig:
             password=mqtt_cfg.get("password"),
         )
 
-    return BackendsConfig(iobroker=iobroker, homeassistant=homeassistant, mqtt=mqtt)
+    return BackendsConfig(homeassistant=homeassistant, mqtt=mqtt)
