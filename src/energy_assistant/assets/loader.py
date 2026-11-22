@@ -15,7 +15,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ..core.device_model import DeviceCategory, DeviceSpec
-from ..core.models import DeviceState, ThresholdConstraints
+from ..core.models import DeviceState
 from .ev import (
     _FEASIBILITY_MARGIN,
     ChargeCurvePoint,
@@ -28,7 +28,6 @@ from .ev import (
 
 _log = logging.getLogger(__name__)
 
-_THRESHOLD_TYPE = "threshold"
 _DEFAULT_MAX_CHARGE_KW = 11.0
 _DEFAULT_MIN_CHARGE_KW = 1.38  # 6 A × 230 V single phase
 _GUEST_CAPACITY_KWH = 50.0
@@ -94,73 +93,6 @@ def guest_asset(charger: DeviceSpec) -> EvChargingAsset:
     return EvChargingAsset(
         asset_id=f"guest@{charger.id}", device_id=charger.id, label="Guest",
         capacity_kwh=_GUEST_CAPACITY_KWH, max_charge_kw=max_kw, min_charge_kw=min_kw,
-    )
-
-
-def parse_threshold_assets(
-    raw_assets: dict[str, Any],
-    devices: Mapping[str, DeviceSpec] | None = None,
-) -> list[ThresholdConstraints]:
-    """Parse ``type: threshold`` entries from the ``assets:`` config section.
-
-    Each entry must supply:
-    - ``device``            — device_id matching a registered device.
-    - ``bottom_threshold``  — lower bound of the allowed range.
-    - ``top_threshold``     — upper bound of the allowed range.
-    - ``active_rate_per_h`` — rate of value change while running (units/h).
-    - ``drift_rate_per_h``  — rate of natural drift when off (units/h).
-
-    Optional:
-    - ``rated_power_kw``    — electrical power when running (kW).  Falls back
-      to the referenced device's ``params.rated_power_w`` (from *devices*) so the
-      value only needs to be declared once, on the device.
-    - ``unit``          — display unit (default "").
-    - ``direction``     — "reduces" (default) or "increases".
-    - ``min_runtime_h`` — minimum on-time for compressor protection (h).
-    - ``min_offtime_h`` — minimum off-time for compressor protection (h).
-    """
-    result: list[ThresholdConstraints] = []
-    for asset_id, cfg in raw_assets.items():
-        if not isinstance(cfg, dict):
-            continue
-        if cfg.get("type") != _THRESHOLD_TYPE:
-            continue
-        try:
-            result.append(_parse_threshold_one(asset_id, cfg, devices or {}))
-        except Exception as exc:  # noqa: BLE001
-            _log.warning("assets[%r] (threshold): parse failed — %s", asset_id, exc)
-    return result
-
-
-def _parse_threshold_one(
-    asset_id: str,
-    cfg: dict[str, Any],
-    devices: Mapping[str, DeviceSpec],
-) -> ThresholdConstraints:
-    device_id = str(cfg.get("device") or asset_id)
-
-    rated_power_kw = cfg.get("rated_power_kw")
-    if rated_power_kw is None:
-        spec = devices.get(device_id)
-        rated_power_w = spec.params.get("rated_power_w") if spec is not None else None
-        if rated_power_w is None:
-            raise ValueError(
-                f"no rated_power_kw on the asset and no rated_power_w on device {device_id!r}"
-            )
-        rated_power_kw = float(rated_power_w) / 1000.0
-
-    return ThresholdConstraints(
-        device_id=device_id,
-        bottom_threshold=float(cfg["bottom_threshold"]),
-        top_threshold=float(cfg["top_threshold"]),
-        unit=str(cfg.get("unit", "")),
-        direction=str(cfg.get("direction", "reduces")),  # type: ignore[arg-type]
-        rated_power_kw=float(rated_power_kw),
-        active_rate_per_h=float(cfg["active_rate_per_h"]),
-        drift_rate_per_h=float(cfg["drift_rate_per_h"]),
-        min_runtime_h=float(cfg.get("min_runtime_h", 0.0)),
-        min_offtime_h=float(cfg.get("min_offtime_h", 0.0)),
-        label=str(cfg.get("label", "")),
     )
 
 

@@ -412,8 +412,8 @@ export default defineComponent({
       <div v-if="loading" class="panel">Loading…</div>
       <div v-else-if="!items.length" class="panel">
         No learned models configured. Give a consumer device a
-        <code>forecast:</code> section with <code>type: learned</code>, add a threshold
-        device (aquarium cooler, AC, …) or a battery to see it here.
+        <code>forecast:</code> section with <code>type: learned</code>, add a thermal load
+        (aquarium cooler, AC, …) or a battery to see it here.
       </div>
 
       <template v-else-if="item">

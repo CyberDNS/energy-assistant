@@ -29,6 +29,8 @@ from . import (  # noqa: E402
     generic_consumer,
     generic_homeassistant,
     generic_iobroker,
+    homeassistant_switch,
+    homeassistant_thermal,
     homeassistant_vehicle,
     learned,
     modbus,
@@ -38,7 +40,6 @@ from . import (  # noqa: E402
     sma_modbus_iobroker,
     static_profile,
     tasmota,
-    threshold_homeassistant,
     tibber,
     tibber_iobroker,
     tibber_local,
@@ -52,6 +53,8 @@ forecast_solar.register(registry)
 generic_consumer.register(registry)
 generic_homeassistant.register(registry)
 generic_iobroker.register(registry)
+homeassistant_switch.register(registry)
+homeassistant_thermal.register(registry)
 homeassistant_vehicle.register(registry)
 learned.register(registry)
 modbus.register(registry)
@@ -61,7 +64,6 @@ pvforecast_iobroker.register(registry)
 sma_modbus_iobroker.register(registry)
 static_profile.register(registry)
 tasmota.register(registry)
-threshold_homeassistant.register(registry)
 tibber.register(registry)
 tibber_iobroker.register(registry)
 tibber_local.register(registry)
