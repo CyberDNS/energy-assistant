@@ -1,12 +1,12 @@
 """TopologyNode — tree structure representing the physical wiring of meters.
 
 The tree is built from the ``metered_by`` connection of each device
-(``core/device_model``): the ``grid_meter`` is the root, and every device
-lists the meter it sits behind::
+(``core/device_model``): the meter without ``metered_by`` is the root (the
+grid connection), and every other device lists the meter it sits behind::
 
     devices:
       - id: main_grid_meter
-        category: grid_meter
+        category: meter            # no metered_by: the grid connection
         params:
           max_import_kw: 24        # optional grid connection limit
           curtail_order: [home_battery, wallbox]   # optional: curtailed first → last
@@ -43,7 +43,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from .device_model import DeviceCategory
+from .device_model import is_grid_meter
 
 if TYPE_CHECKING:
     from .device_model import DeviceSpec
@@ -92,12 +92,10 @@ def build_topology(devices: Mapping[str, DeviceSpec]) -> TopologyNode | None:
     """Build the metering tree from the devices' ``metered_by`` connections.
 
     *devices* must be validated (``device_model.parse_devices``): at most one
-    grid meter, and every ``metered_by`` chain ends at it.  Returns ``None``
-    without a grid meter.
+    grid connection meter, and every ``metered_by`` chain ends at it.  Returns
+    ``None`` without a meter.
     """
-    root_spec = next(
-        (s for s in devices.values() if s.category is DeviceCategory.GRID_METER), None
-    )
+    root_spec = next((s for s in devices.values() if is_grid_meter(s)), None)
     if root_spec is None:
         return None
     children: dict[str, list[str]] = {}

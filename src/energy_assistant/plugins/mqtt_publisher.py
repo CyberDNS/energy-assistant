@@ -219,15 +219,14 @@ class EvMqttPublisher:
         on_set_weekly: Callable[[str, int, dict[str, Any]], Awaitable[None]] | None = None,
         savings_kpis: bool = False,
         devices: list[DiscoveryDevice] | None = None,
-        uid_slugs: Mapping[str, str] | None = None,
+        remove_stale_vehicles: bool = False,
         chargers: list[tuple[str, str]] | None = None,
         on_select_charger: Callable[[str | None, str | None], Awaitable[None]] | None = None,
         on_set_guest_mode: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
-        # Vehicle id → id used in unique ids / config topics.  A vehicle that
-        # replaces an asset keeps the asset's, so Home Assistant updates its
-        # existing entities (entity ids, history, area) instead of new ones.
-        self._uid_slugs = dict(uid_slugs or {})
+        # Remove vehicle entities from Home Assistant that this configuration
+        # no longer has (see _stale_vehicle_topics).
+        self._remove_stale_vehicles = remove_stale_vehicles
         # (charger id, label) of every charger, for the charger selects.
         self._chargers = list(chargers or [])
         self._on_select_charger = on_select_charger
@@ -628,16 +627,27 @@ class EvMqttPublisher:
     # ------------------------------------------------------------------
 
     async def _publish_discovery(self, client: aiomqtt.Client) -> None:
+        vehicle_configs: list[tuple[str, dict]] = []
         for asset in self._assets:
-            uid = self._uid_slugs.get(asset.asset_id, asset.asset_id)
             device = {
-                "identifiers": [f"energy_assistant_ev_{uid}"],
+                "identifiers": [f"energy_assistant_ev_{asset.asset_id}"],
                 "name": asset.label,
                 "manufacturer": "Energy Assistant",
                 "model": "Vehicle",
             }
-            for config_topic, config_payload in _discovery_configs(asset, device, uid, self._chargers):
-                await client.publish(config_topic, json.dumps(config_payload), retain=True)
+            vehicle_configs.extend(_discovery_configs(asset, device, chargers=self._chargers))
+        if self._remove_stale_vehicles:
+            # First remove what is no longer configured, so that a vehicle that
+            # comes back under another id finds its entity ids free.
+            stale = await _stale_vehicle_topics(client, {topic for topic, _ in vehicle_configs})
+            for topic in sorted(stale):
+                await client.publish(topic, "", retain=True)
+            if stale:
+                _log.info("MQTT discovery: removed %d entities of vehicles that are no longer "
+                          "configured", len(stale))
+                await asyncio.sleep(1.0)  # let Home Assistant drop them before the new ones
+        for config_topic, config_payload in vehicle_configs:
+            await client.publish(config_topic, json.dumps(config_payload), retain=True)
         if self._chargers:
             for config_topic, config_payload in (_guest_select_config(self._chargers),
                                                  _guest_mode_select_config()):
@@ -661,13 +671,45 @@ class EvMqttPublisher:
 # Pure helpers — Discovery config generation
 # ------------------------------------------------------------------
 
+#: Prefix of the discovery object ids of vehicle entities.
+_VEHICLE_OBJECT_PREFIX = "ea_ev_"
+
+
+async def _stale_vehicle_topics(
+    client: aiomqtt.Client, current: set[str], quiet_s: float = 1.0
+) -> set[str]:
+    """Retained discovery topics of vehicle entities that are not in *current*.
+
+    They belong to vehicles that were removed from the configuration (or
+    renamed); clearing them makes Home Assistant remove the entities.  Reads
+    the broker's retained discovery messages until none arrives for *quiet_s*.
+    """
+    pattern = f"{_DISC}/+/+/config"
+    stale: set[str] = set()
+    await client.subscribe(pattern)
+    try:
+        messages = aiter(client.messages)
+        while True:
+            try:
+                message = await asyncio.wait_for(anext(messages), timeout=quiet_s)
+            except (TimeoutError, StopAsyncIteration):
+                break
+            topic = str(message.topic)
+            parts = topic.split("/")
+            if (len(parts) == 4 and parts[2].startswith(_VEHICLE_OBJECT_PREFIX)
+                    and message.retain and message.payload and topic not in current):
+                stale.add(topic)
+    finally:
+        await client.unsubscribe(pattern)
+    return stale
+
+
 def _discovery_configs(
     asset: EvChargingAsset, device: dict, uid: str | None = None,
     chargers: list[tuple[str, str]] | None = None,
 ) -> list[tuple[str, dict]]:
     """Discovery configs of one vehicle.  *uid* is the id used in unique ids
-    and config topics (default: the vehicle id) — kept from the former asset
-    id so Home Assistant keeps its entities (see ``EvMqttPublisher``)."""
+    and config topics (default: the vehicle id)."""
     slug = uid or asset.asset_id
     base = f"{_BASE}/{asset.asset_id}"
     # Bridge-only availability for entities that don't depend on live data

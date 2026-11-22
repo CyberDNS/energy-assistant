@@ -196,7 +196,7 @@ def test_auto_subtract_takes_learned_consumers_on_the_same_tariff():
             "lamp": _ha_consumer("sensor.lamp", included_in="it_rack"),
             "opted_out": _ha_consumer("sensor.tv", learning=False),
             "static_only": {"category": "consumer", "type": "generic_consumer", "forecast": STATIC},
-            "grid": {"category": "grid_meter", "type": "generic_homeassistant",
+            "grid": {"category": "meter", "type": "generic_homeassistant",
                      "capabilities": {"power_w": {"entity": "sensor.g"}}},
         }),
     )

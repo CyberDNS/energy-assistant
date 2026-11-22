@@ -38,11 +38,12 @@ src/
       constraint.py    # Constraint base class
       registry.py      # DeviceRegistry
       config.py        # ConfigEntry model + ConfigManager protocol
+      config_schema.py # schemas of the sections other than devices
       storage.py       # StorageBackend protocol
       topology.py      # TopologyNode tree built from metered_by
-    config/            # Config manager implementations
-      yaml.py          # YamlConfigManager (phase 1)
-      json.py          # JsonConfigManager (phase 2, UI-configured)
+    config/            # Config file handling
+      yaml.py          # YamlConfigLoader: config.yaml → AppConfig
+      store.py         # DeviceConfigStore: edits device entries of config.yaml in place
     storage/           # Storage backend implementations
       sqlite.py        # SqliteStorageBackend (aiosqlite)
     plugins/           # Built-in device & service integrations
@@ -99,7 +100,7 @@ class Device(Protocol):
     async def send_command(self, command: DeviceCommand) -> None: ...
 ```
 
-`DeviceCategory` (`core/device_model.py`) says what a device is: `GRID_METER`,
+`DeviceCategory` (`core/device_model.py`) says what a device is:
 `METER`, `PV`, `BATTERY`, `CHARGER`, `THERMAL_LOAD`, `SWITCH`, `CONSUMER`,
 `VEHICLE`, `SENSOR`.  It comes from the `category:` of the device's config
 entry (`DeviceSpec`); see DOMAIN_MODEL.md for the category schemas.
@@ -186,36 +187,95 @@ class Constraint:
 
 ## Configuration
 
-### Phase 1 — YAML
+### One file: `config.yaml`
 
-Devices and the energy model are declared in a YAML config file read at
-startup. Config is read-only at runtime; changes require a restart.
+Devices and the energy model are declared in `config.yaml`, which is the
+single source of truth — whether it is edited by hand or from the web UI.
 See [`DOMAIN_MODEL.md`](DOMAIN_MODEL.md) for the full reference and
 [`config.yaml.example`](config.yaml.example) for a complete annotated example.
 
 The main top-level sections are: `backends`, `tariffs`, `devices` (with
 `metered_by` connections forming the metering tree), and `optimizer`.
 
-### Phase 2 — JSON files
+### Editing from the UI
 
-UI-configured setups persist config entries as JSON files in the config
-directory (similar to Home Assistant's `.storage/` directory). No restart
-required; entries are hot-reloaded.
+The **Config** tab covers the whole file and `secrets.yaml`. Every form is
+generated from the schemas the loader validates against, so the UI offers
+exactly what the loader accepts:
 
-### ConfigManager protocol
+| Part of the file | Schema |
+|---|---|
+| devices: capabilities, params, allowed connections | `CATEGORY_SCHEMAS` (`core/device_model.py`) |
+| devices: plugin settings, bindable capabilities, binding keys | each plugin's `register_device(..., settings=…, binding=…)` |
+| `tariffs:`, `forecasts:`, a device's `forecast:` | each plugin's `register_tariff` / `register_forecast(..., settings=…)` |
+| `backends`, `optimizer`, `controller`, `server`, `logging`, `energy_dashboard` | `SECTION_SCHEMAS` (`core/config_schema.py`) |
+| a device's `learning:` options | `LEARNING_OPTIONS` (`plugins/learned`), `THERMAL_LEARNING` (`core/config_schema.py`) |
 
-Both phases implement the same interface, so nothing else in the platform
-needs to change when moving from YAML to JSON:
+All of them are built from `ParamSpec`: a kind (`float`, `int`, `bool`, `str`,
+`list`, `dict`), limits and choices, and for structured values `items` (list
+items), `fields` (a mapping with fixed keys) or `values` (a mapping with free
+keys). Flags say what a value refers to (`ref` a device, `tariff`, `entity`,
+`secret`, `plugin`), when it applies (`when`: only while sibling settings have
+given values, which also limits `required`) and how the UI treats it
+(`label`, `default`, `advanced`, `legacy`, `restart`). Plugins, categories and
+capabilities have a `title`; a setting without a `label` gets one derived from
+its key (`max_charge_kw` → "Max charge (kW)"). `loader/config_validation.py`
+checks the sections and collections; `validate_plugins` checks the devices.
 
-```python
-class ConfigManager(Protocol):
-    async def load_entries(self) -> list[ConfigEntry]: ...
-    async def save_entry(self, entry: ConfigEntry) -> None: ...
-    async def delete_entry(self, entry_id: str) -> None: ...
-```
+**Frontend components** (`frontend/config/`). The editors are reusable and
+schema-driven; a form is a `SchemaForm` over a `{key: spec}` mapping.
 
-`ConfigEntry` is a Pydantic model with a stable `id`, `plugin` reference,
-and a freeform `data` dict validated by the plugin itself.
+| Component | Edits |
+|---|---|
+| `fields/FieldInput` | picks the editor for a spec (`editorFor`) |
+| `fields/SchemaField`, `fields/SchemaForm` | a labelled field; a grid of fields for a mapping |
+| `fields/ScalarInput`, `OptionSelect`, `EntityPicker` | single values, dropdowns, HA entities |
+| `fields/SecretPicker` | a reference to a secret, with creating / replacing it in place |
+| `fields/ListEditor`, `TableEditor`, `MapEditor` | lists, lists of records, free mappings |
+| `fields/PluginEditor` | `type` + that plugin's settings (tariff, forecast, fallback) |
+| `fields/LearningEditor`, `LoadProfileEditor`, `JsonEditor` | `learning:`, static profiles, raw fallback |
+| `FormShell` + `useConfigForm` | the frame of a form: live validation, save, remove |
+| `DeviceForm`, `CollectionPanel`, `SectionForm`, `SecretsPanel` | the pages, composed from the above |
+
+A new kind of value needs one editor component and one line in `editorFor`; a
+new setting only needs its `ParamSpec`.
+
+A save (`PUT /api/config/…`, `server/config_api.py`) goes through these steps:
+
+1. `config/store.py` applies the change to the file text in memory. Only the
+   lines of that entry or section are rewritten, in the list style the file
+   already uses; comments, `!secret` tags and all other lines stay byte for
+   byte. The result is parsed again and must hold exactly what was asked for.
+2. The new text is checked exactly as a start with it would be. Problems are
+   returned as a list and nothing is written.
+3. The file is written atomically; the previous version is kept in
+   `config_backups/` next to it (the newest 20).
+4. `Application.reload_config()` applies it without a restart.
+
+**Secrets** never reach the UI. A `!secret name` value is exchanged as its
+name; a plain value of a setting declared `secret` is exchanged as a
+placeholder that means "keep what is in the file". `SecretsStore` sets and
+removes entries of `secrets.yaml` (write-only values, mode 600); a secret
+that is in use cannot be removed, and replacing one applies the
+configuration again.
+
+### Reload without a restart
+
+`reload_config()` validates the file first (an invalid file changes nothing),
+then stops the polling, planning and control loops, rebuilds everything that
+is built from the configuration (`_build_runtime`: devices, tariffs,
+forecasts, fleet, control loop, learners, MQTT publisher) and starts the
+loops again. The API server and the database stay up; connections that the
+new configuration still uses (Home Assistant client, Modbus, MQTT bridges,
+Tibber) are kept, the others are closed. Stored data is keyed by device id
+and is picked up again. It is the same sequence as a restart, so it has the
+same effects: no control ticks for a few seconds, a fresh plan right after,
+and in-memory control state (e.g. minimum run times) starts over.
+
+`POST /api/config/reload` does the same for a file edited by hand; the
+Devices tab offers it when the file on disk differs from what is running.
+`server.port`, `server.api_token` and `server.trusted_hosts` still need a
+restart.
 
 ---
 

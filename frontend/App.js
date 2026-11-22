@@ -76,6 +76,7 @@ export default defineComponent({
         <RouterLink class="tab-btn" to="/plan">Plan</RouterLink>
         <RouterLink class="tab-btn" to="/learning">Learning</RouterLink>
         <RouterLink class="tab-btn" to="/savings">Savings</RouterLink>
+        <RouterLink class="tab-btn" to="/config" :class="{ 'router-link-active': $route.path.startsWith('/config') }">Config</RouterLink>
       </div>
 
       <RouterView />

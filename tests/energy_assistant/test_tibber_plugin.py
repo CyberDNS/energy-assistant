@@ -215,7 +215,7 @@ def test_registry_builds_tibber_tariff_and_device() -> None:
     from energy_assistant.plugins import registry
 
     assert "tibber" in registry._tariff
-    assert "tibber" in registry._device
+    assert "tibber_cloud" in registry._device
 
 
 async def test_live_backoff_grows_without_data_and_resets_after_data(monkeypatch: pytest.MonkeyPatch) -> None:

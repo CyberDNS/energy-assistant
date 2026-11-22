@@ -41,6 +41,10 @@ class TibberLocalDevice:
     def category(self) -> DeviceCategory:
         return self._category
 
+    async def close(self) -> None:
+        """Stop the background poller (the device is being replaced)."""
+        await self._poller.stop()
+
     async def get_state(self) -> DeviceState:
         self._poller.ensure_started()
         cloud = await self._fallback.get_state() if self._fallback is not None else None

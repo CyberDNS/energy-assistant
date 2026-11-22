@@ -39,7 +39,8 @@ from typing import Any
 from ...core.config import MqttConfig
 from ...core.device_model import Capability as Cap
 from ...core.device_model import DeviceCategory as C
-from ...core.plugin_registry import BuildContext, PluginRegistry
+from ...core.device_model import ParamSpec
+from ...core.plugin_registry import BuildContext, PluginRegistry, SharedPool
 from .bridge import BrokerParams, ZendureBridge
 from .cloud import cloud_login, decode_cloud_key
 from .device import ZendureDevice
@@ -48,46 +49,70 @@ _log = logging.getLogger(__name__)
 
 # One bridge per broker connection — the cloud hands out a single client id
 # per account, so devices on the same account must share the connection.
-_bridges: dict[tuple[Any, ...], ZendureBridge] = {}
+_bridges: SharedPool[tuple[Any, ...], ZendureBridge] = SharedPool(
+    stop=lambda bridge: bridge.stop()
+)
+
+
+SETTINGS = {
+    "product_key": ParamSpec(str, description="Product key of the device"),
+    "device_key": ParamSpec(str, description="Device key (serial)"),
+    "hub_id": ParamSpec(str, legacy=True, description="Old name of product_key"),
+    "device_serial": ParamSpec(str, legacy=True, description="Old name of device_key"),
+    "connection": ParamSpec(str, choices=("cloud", "local"), default="cloud",
+                            description="Zendure cloud broker or the local MQTT backend"),
+    "cloud_key": ParamSpec(str, secret=True, required=True, when={"connection": "cloud"},
+                           description="Authorization cloud key from the Zendure app (cloud mode)"),
+    "maintenance_charge_w": ParamSpec(float, minimum=0, default=300.0,
+                                      label="Maintenance charge power (W)",
+                                      description="Charge power while the device asks for a "
+                                                  "maintenance charge (W)"),
+    "smart_mode": ParamSpec(bool, advanced=True, default=False, description="Enable the device's smartMode on start-up, so limit "
+                                                 "writes do not wear its flash"),
+    "poll_interval_s": ParamSpec(float, advanced=True, minimum=0, exclusive_minimum=True, default=60.0,
+                                 description="Seconds between full reads"),
+    "stale_after_s": ParamSpec(float, advanced=True, minimum=0, exclusive_minimum=True, default=300.0,
+                               description="Seconds without a report until the device counts as "
+                                           "unavailable"),
+}
 
 
 def register(registry: PluginRegistry) -> None:
     registry.register_device(
         "zendure", _build,
+        title="Zendure battery",
+        description="SolarFlow / Hyper battery over the Zendure cloud broker or the local MQTT broker.",
         categories={C.BATTERY},
         provides={Cap.POWER_W, Cap.SOC_PCT, Cap.POWER_SETPOINT},
+        settings=SETTINGS,
     )
 
 
 def cloud_bridge(cloud_key: str, *, poll_interval_s: float = 60.0) -> ZendureBridge:
-    key = ("cloud", cloud_key)
-    bridge = _bridges.get(key)
-    if bridge is None:
-        async def params() -> BrokerParams:
-            login = await cloud_login(cloud_key)
-            m = login.mqtt
-            return BrokerParams(
-                host=m.host, port=m.port, username=m.username, password=m.password,
-                client_id=m.client_id, mqtt_v5=True,
-            )
+    async def params() -> BrokerParams:
+        login = await cloud_login(cloud_key)
+        m = login.mqtt
+        return BrokerParams(
+            host=m.host, port=m.port, username=m.username, password=m.password,
+            client_id=m.client_id, mqtt_v5=True,
+        )
 
-        bridge = ZendureBridge("cloud", params, poll_interval_s=poll_interval_s)
-        _bridges[key] = bridge
-    return bridge
+    return _bridges.get(
+        ("cloud", cloud_key),
+        lambda: ZendureBridge("cloud", params, poll_interval_s=poll_interval_s),
+    )
 
 
 def local_bridge(cfg: MqttConfig, *, poll_interval_s: float = 60.0) -> ZendureBridge:
-    key = ("local", cfg.host, cfg.port)
-    bridge = _bridges.get(key)
-    if bridge is None:
-        async def params() -> BrokerParams:
-            return BrokerParams(
-                host=cfg.host, port=cfg.port, username=cfg.username, password=cfg.password,
-            )
+    async def params() -> BrokerParams:
+        return BrokerParams(
+            host=cfg.host, port=cfg.port, username=cfg.username, password=cfg.password,
+        )
 
-        bridge = ZendureBridge(f"{cfg.host}:{cfg.port}", params, poll_interval_s=poll_interval_s)
-        _bridges[key] = bridge
-    return bridge
+    return _bridges.get(
+        ("local", cfg.host, cfg.port),
+        lambda: ZendureBridge(f"{cfg.host}:{cfg.port}", params, poll_interval_s=poll_interval_s),
+    )
 
 
 def _build(device_id: str, cfg: dict[str, Any], ctx: BuildContext) -> ZendureDevice | None:

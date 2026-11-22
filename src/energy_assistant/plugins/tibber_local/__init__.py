@@ -58,18 +58,41 @@ import logging
 from typing import Any
 
 from ...core.device_model import Capability as Cap
-from ...core.device_model import DeviceCategory
+from ...core.device_model import DeviceCategory, ParamSpec
 from ...core.device_model import DeviceCategory as C
 from ...core.plugin_registry import BuildContext, PluginRegistry
 
 _log = logging.getLogger(__name__)
 
 
+SETTINGS = {
+    "host": ParamSpec(str, required=True, description="Host name or IP address of the bridge"),
+    "password": ParamSpec(str, required=True, secret=True, label="Bridge password",
+                          description="Code printed on the bridge"),
+    "user": ParamSpec(str, advanced=True, default="admin", description="Web user"),
+    "node_id": ParamSpec(int, advanced=True, minimum=0, default=1, description="Node of the Pulse on the bridge"),
+    "poll_interval_s": ParamSpec(float, advanced=True, minimum=0, exclusive_minimum=True, default=1.0,
+                                 description="Seconds between reads"),
+    "stale_after_s": ParamSpec(float, advanced=True, minimum=0, exclusive_minimum=True, default=30.0,
+                               description="Seconds without a valid reading until the device "
+                                           "counts as unavailable"),
+    "token": ParamSpec(str, secret=True, label="Tibber API token (fallback)",
+                       description="Tibber API token: cloud live stream as fallback"),
+    "home_id": ParamSpec(str, when={"token": "*"}, label="Tibber home ID",
+                         description="For the fallback (default: the account's first home)"),
+    "api_url": ParamSpec(str, advanced=True, when={"token": "*"}, label="Tibber API URL",
+                         description="Tests only"),
+}
+
+
 def register(registry: PluginRegistry) -> None:
     registry.register_device(
         "tibber_local", _build_device,
-        categories={C.GRID_METER, C.METER},
+        title="Tibber Pulse (local bridge)",
+        description="Live meter data straight from the Tibber Pulse Bridge on the LAN.",
+        categories={C.METER},
         provides={Cap.POWER_W, Cap.ENERGY_IN_KWH, Cap.PHASE_POWER_W},
+        settings=SETTINGS,
     )
 
 

@@ -23,7 +23,7 @@ function fmtSetpointW(s) {
   return `${fmt(s.setpoint_w, 0)} W`
 }
 
-const CATEGORY_ORDER = { battery: 0, charger: 1, thermal_load: 2, switch: 3, consumer: 4, pv: 5, meter: 6, grid_meter: 7 }
+const CATEGORY_ORDER = { battery: 0, charger: 1, thermal_load: 2, switch: 3, consumer: 4, pv: 5, meter: 6 }
 const IDLE_W = 10  // below this magnitude a flow is shown as idle
 
 export default defineComponent({

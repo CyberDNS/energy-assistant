@@ -104,6 +104,22 @@ class HAClient:
         resp.raise_for_status()
         return resp.json().get("state")
 
+    async def list_entities(self) -> list[dict[str, str]]:
+        """Every entity as ``{entity_id, name}``, sorted by id."""
+        resp = await self._client.get("/api/states")
+        resp.raise_for_status()
+        return sorted(
+            (
+                {
+                    "entity_id": str(item.get("entity_id")),
+                    "name": str((item.get("attributes") or {}).get("friendly_name") or ""),
+                }
+                for item in resp.json()
+                if item.get("entity_id")
+            ),
+            key=lambda e: e["entity_id"],
+        )
+
     async def get_entity(self, entity_id: str) -> EntityState | None:
         """Return state, attributes and timestamps of *entity_id* (None if unknown)."""
         resp = await self._client.get(f"/api/states/{entity_id}")

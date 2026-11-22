@@ -1,5 +1,6 @@
 """Tests for EV MQTT Discovery: availability semantics and weekly-plan entities."""
 
+import asyncio
 import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -22,6 +23,7 @@ from energy_assistant.plugins.mqtt_publisher import (
     _discovery_configs,
     _parse_weekly_command,
     _reading_messages,
+    _stale_vehicle_topics,
     _weekly_discovery_configs,
     _weekly_state_messages,
     charging_mode_from_setpoint,
@@ -475,3 +477,78 @@ async def test_guest_mode_select() -> None:
     queued = dict(pub._queue.get_nowait()[:2] for _ in range(pub._queue.qsize()))
     assert queued["energy_assistant/guest/charger_select"] == "Grouss Garage"
     assert queued["energy_assistant/guest/mode"] == "Charge now"
+
+
+class _Msg:
+    def __init__(self, topic: str, payload: bytes = b"{}", retain: bool = True) -> None:
+        self.topic, self.payload, self.retain = topic, payload, retain
+
+
+class _RetainedClient:
+    """An MQTT client whose broker holds the given retained messages."""
+
+    def __init__(self, retained: list[_Msg]) -> None:
+        self._retained = retained
+        self.published: list[tuple[str, str, bool]] = []
+        self.subscribed: list[str] = []
+        self.unsubscribed: list[str] = []
+
+    async def subscribe(self, topic: str) -> None:
+        self.subscribed.append(topic)
+
+    async def unsubscribe(self, topic: str) -> None:
+        self.unsubscribed.append(topic)
+
+    async def publish(self, topic, payload, qos=0, retain=False) -> None:
+        self.published.append((topic, payload, retain))
+
+    @property
+    def messages(self):
+        async def gen():
+            for msg in self._retained:
+                yield msg
+            await asyncio.sleep(3600)   # the broker has nothing more
+        return gen()
+
+
+async def test_stale_vehicle_topics_are_the_retained_ones_no_longer_published() -> None:
+    client = _RetainedClient([
+        _Msg("homeassistant/sensor/ea_ev_ev_banzert_soc/config"),       # former id
+        _Msg("homeassistant/switch/ea_ev_ev_banzert_weekly_mon_enabled/config"),
+        _Msg("homeassistant/sensor/ea_ev_banzert_soc/config"),          # still published
+        _Msg("homeassistant/sensor/ea_ev_gone_soc/config", b""),        # already cleared
+        _Msg("homeassistant/sensor/ea_dev_meter_power_w/config"),       # not a vehicle
+        _Msg("homeassistant/sensor/zigbee_thing/config"),               # someone else's
+        _Msg("homeassistant/sensor/ea_ev_live_soc/config", retain=False),
+    ])
+
+    stale = await _stale_vehicle_topics(
+        client, {"homeassistant/sensor/ea_ev_banzert_soc/config"}, quiet_s=0.05
+    )
+
+    assert stale == {
+        "homeassistant/sensor/ea_ev_ev_banzert_soc/config",
+        "homeassistant/switch/ea_ev_ev_banzert_weekly_mon_enabled/config",
+    }
+    assert client.subscribed == client.unsubscribed == ["homeassistant/+/+/config"]
+
+
+async def test_discovery_removes_stale_vehicle_entities_before_publishing() -> None:
+    pub = _noop_pub([])
+    pub._assets = [_asset()]
+    pub._remove_stale_vehicles = True
+    old = "homeassistant/sensor/ea_ev_old_car_soc/config"
+    client = _RetainedClient([_Msg(old)])
+
+    await pub._publish_discovery(client)
+
+    topics = [t for t, _p, _r in client.published]
+    assert client.published[0] == (old, "", True)
+    own = f"homeassistant/sensor/ea_ev_{_asset().asset_id}_soc/config"
+    assert topics.index(old) < topics.index(own)
+
+    # A dry run leaves other instances' entities alone.
+    pub._remove_stale_vehicles = False
+    client = _RetainedClient([_Msg(old)])
+    await pub._publish_discovery(client)
+    assert old not in [t for t, _p, _r in client.published]

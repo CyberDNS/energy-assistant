@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from ...core.device_model import Capability as Cap
 from ...core.device_model import DeviceCategory as C
+from ...core.device_model import ParamSpec
 from ...core.plugin_registry import PluginRegistry
 from .device import OpenWBMqttDevice, get_bridge
 
@@ -31,8 +32,23 @@ from .device import OpenWBMqttDevice, get_bridge
 def register(registry: PluginRegistry) -> None:
     registry.register_device(
         "openwb_mqtt", _build,
+        title="openWB (MQTT)",
+        description="openWB chargepoint over its MQTT API (needs the MQTT connection).",
         categories={C.CHARGER},
         provides={Cap.POWER_W, Cap.PLUGGED, Cap.POWER_SETPOINT},
+        settings={
+            "chargepoint_id": ParamSpec(int, required=True, minimum=0, label="Chargepoint number",
+                                        description="openWB chargepoint number"),
+            "root_topic": ParamSpec(str, default="openWB", label="MQTT root topic", description="MQTT root topic of openWB"),
+            "phases": ParamSpec(int, minimum=1, maximum=3, default=3,
+                                description="Phases the chargepoint charges with"),
+            "voltage_v": ParamSpec(float, advanced=True, minimum=0, exclusive_minimum=True, default=230.0),
+            "min_current_a": ParamSpec(float, advanced=True, minimum=0, default=6),
+            "max_current_a": ParamSpec(float, advanced=True, minimum=0, exclusive_minimum=True, default=16),
+            "mode_instant": ParamSpec(str, advanced=True, default="instant", description="openWB mode name"),
+            "mode_pv": ParamSpec(str, advanced=True, default="pv", description="openWB mode name"),
+            "mode_stop": ParamSpec(str, advanced=True, default="stop", description="openWB mode name"),
+        },
     )
 
 
