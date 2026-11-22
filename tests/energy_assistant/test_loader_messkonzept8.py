@@ -33,6 +33,31 @@ class TestYamlConfigLoader:
         assert cfg.devices == {}
         assert cfg.tariffs == {}
 
+    def test_rejects_the_assets_section(self, tmp_path: Path) -> None:
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(dedent("""\
+            assets:
+              aquarium_cooler: { type: threshold, device: aquarium_cooler }
+              ev_car: { device: cp5, capacity_kwh: 50 }
+        """))
+        with pytest.raises(DeviceConfigError) as exc:
+            YamlConfigLoader(config_file).load()
+        [msg] = exc.value.errors
+        assert msg.startswith("the 'assets:' section was removed")
+        assert "'category: vehicle'" in msg and "'category: thermal_load'" in msg
+
+    def test_rejects_threshold_homeassistant(self, tmp_path: Path) -> None:
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(dedent("""\
+            devices:
+              - id: aquarium_cooler
+                category: thermal_load
+                type: threshold_homeassistant
+        """))
+        with pytest.raises(DeviceConfigError, match="aquarium_cooler: type 'threshold_homeassistant' "
+                                                    "was replaced"):
+            YamlConfigLoader(config_file).load()
+
     def test_parses_backends(self, tmp_path: Path) -> None:
         yaml_text = dedent("""\
             backends:

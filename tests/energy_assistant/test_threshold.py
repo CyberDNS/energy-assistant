@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from energy_assistant.assets.loader import parse_threshold_assets
 from energy_assistant.assets.threshold import ThresholdControlContributor
+from energy_assistant.core.composition import threshold_constraints
 from energy_assistant.core.control import ControlIntent, LiveSituation
-from energy_assistant.core.device_model import parse_devices
+from energy_assistant.core.device_model import DeviceConfigError, parse_devices
 from energy_assistant.core.models import (
     DeviceState,
     ForecastPoint,
@@ -96,7 +96,7 @@ def _live(
     extra = {"measured_value": measured_value} if measured_value is not None else {}
     state = DeviceState(device_id=device_id, power_w=power_w, extra=extra)
     return LiveSituation(
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
         grid_power_w=grid_power_w,
         dt_hours=30 / 3600,
         device_states={device_id: state},
@@ -107,7 +107,7 @@ def _live(
 def _intent(device_id: str, mode: str) -> ControlIntent:
     return ControlIntent(
         device_id=device_id,
-        timestep=datetime.now(timezone.utc),
+        timestep=datetime.now(UTC),
         power_kw=1.0 if mode == "run" else 0.0,
     )
 
@@ -121,7 +121,7 @@ class TestThresholdMilp:
     async def test_returns_run_and_standby_intents(self) -> None:
         """Optimizer produces both 'run' and 'standby' intents for a threshold device."""
         optimizer = MilpHigsOptimizer(step_minutes=60)
-        now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        now = datetime.now(UTC).replace(second=0, microsecond=0)
         tc = _cooler()
         ctx = OptimizationContext(
             device_states={
@@ -146,7 +146,7 @@ class TestThresholdMilp:
     async def test_near_top_threshold_forces_more_running(self) -> None:
         """Value near top threshold causes optimizer to schedule more runtime than mid-range."""
         optimizer = MilpHigsOptimizer(step_minutes=60)
-        now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        now = datetime.now(UTC).replace(second=0, microsecond=0)
         tc = _cooler(active_rate=2.0, drift_rate=1.0)
 
         def _ctx(measured: float) -> OptimizationContext:
@@ -174,7 +174,7 @@ class TestThresholdMilp:
     async def test_cheap_hours_preferred_for_runtime(self) -> None:
         """Optimizer schedules runtime in cheap hours when value is in the safe zone."""
         optimizer = MilpHigsOptimizer(step_minutes=60)
-        now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        now = datetime.now(UTC).replace(second=0, microsecond=0)
         # 24 hours: hours 0-11 expensive (0.40), hours 12-23 cheap (0.10)
         prices = [0.40] * 12 + [0.10] * 12
         # Active rate 4 /h, drift 1 /h — needs to run ≈ 1/5 of the time to stay level.
@@ -208,7 +208,7 @@ class TestThresholdMilp:
         """With 15-min steps and 0.5 h min run/off time, every planned run and
         off block spans at least two steps — no single-slot blips in the plan."""
         optimizer = MilpHigsOptimizer(step_minutes=15)
-        now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        now = datetime.now(UTC).replace(second=0, microsecond=0)
         # Aquarium-cooler-like physics: ~31% duty cycle, must cycle repeatedly.
         tc = _cooler(
             bottom=18.0, top=20.5,
@@ -268,7 +268,7 @@ class TestThresholdMilp:
         """A live value past the top threshold is clamped for planning instead
         of making the MILP infeasible (which would return an empty plan)."""
         optimizer = MilpHigsOptimizer(step_minutes=60)
-        now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        now = datetime.now(UTC).replace(second=0, microsecond=0)
         tc = _cooler(bottom=24.0, top=28.0)
         ctx = OptimizationContext(
             device_states={
@@ -292,7 +292,7 @@ class TestThresholdMilp:
     async def test_no_threshold_devices_still_works(self) -> None:
         """Plan succeeds when no threshold constraints are passed (backward compat)."""
         optimizer = MilpHigsOptimizer(step_minutes=60)
-        now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        now = datetime.now(UTC).replace(second=0, microsecond=0)
         ctx = OptimizationContext(
             device_states={"bat": DeviceState(device_id="bat", soc_pct=50.0)},
             storage_constraints=[_battery()],
@@ -306,7 +306,7 @@ class TestThresholdMilp:
     async def test_two_threshold_devices_independent(self) -> None:
         """Cooler and dehumidifier each get their own intents with correct device_id."""
         optimizer = MilpHigsOptimizer(step_minutes=60)
-        now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        now = datetime.now(UTC).replace(second=0, microsecond=0)
         ctx = OptimizationContext(
             device_states={
                 "bat": DeviceState(device_id="bat", soc_pct=50.0),
@@ -328,41 +328,61 @@ class TestThresholdMilp:
 # ── Config parsing tests ─────────────────────────────────────────────────────
 
 
-class TestParseThresholdAssets:
-    """Tests for rated power resolution between asset and device config."""
+_PLUG = {
+    "category": "switch", "type": "homeassistant_switch",
+    "capabilities": {"switch": {"entity": "switch.c"}},
+    "params": {"rated_power_w": 150},
+}
+_COOLER = {
+    "category": "thermal_load", "type": "homeassistant_thermal", "label": "Cooler",
+    "capabilities": {"temperature_c": {"entity": "sensor.t"}},
+    "controlled_by": "plug",
+    "params": {"bottom_threshold": 18.0, "top_threshold": 20.5,
+               "active_rate_per_h": 0.417, "drift_rate_per_h": 0.185,
+               "min_runtime_h": 0.5, "min_offtime_h": 0.5},
+}
 
-    _BASE_ASSET = {
-        "type": "threshold",
-        "device": "cooler",
-        "bottom_threshold": 18.0,
-        "top_threshold": 20.5,
-        "active_rate_per_h": 0.417,
-        "drift_rate_per_h": 0.185,
-    }
 
-    def test_rated_power_falls_back_to_device(self) -> None:
-        devices = parse_devices({"cooler": {
-            "category": "thermal_load", "type": "threshold_homeassistant",
-            "capabilities": {"temperature_c": {"entity": "sensor.t"}, "switch": {"entity": "switch.c"}},
-            "params": {"rated_power_w": 150},
-        }})
-        parsed = parse_threshold_assets({"aquarium": dict(self._BASE_ASSET)}, devices)
-        assert len(parsed) == 1
-        assert parsed[0].rated_power_kw == pytest.approx(0.150)
+def _config_errors(raw: dict) -> list[str]:
+    with pytest.raises(DeviceConfigError) as exc:
+        parse_devices(raw)
+    return exc.value.errors
 
-    def test_asset_rated_power_overrides_device(self) -> None:
-        asset = dict(self._BASE_ASSET, rated_power_kw=0.2)
-        devices = parse_devices({"cooler": {
-            "category": "thermal_load", "type": "threshold_homeassistant",
-            "capabilities": {"temperature_c": {"entity": "sensor.t"}, "switch": {"entity": "switch.c"}},
-            "params": {"rated_power_w": 150},
-        }})
-        parsed = parse_threshold_assets({"aquarium": asset}, devices)
-        assert parsed[0].rated_power_kw == pytest.approx(0.2)
 
-    def test_missing_rated_power_everywhere_skips_asset(self) -> None:
-        parsed = parse_threshold_assets({"aquarium": dict(self._BASE_ASSET)}, {})
-        assert parsed == []
+class TestComposeThermalLoads:
+    """ThresholdConstraints from a thermal_load and the switch it is controlled_by."""
+
+    def test_needs_from_the_load_rated_power_from_the_switch(self) -> None:
+        [tc] = threshold_constraints(parse_devices({"plug": _PLUG, "cooler": _COOLER}))
+        assert tc == ThresholdConstraints(
+            device_id="cooler", label="Cooler", unit="°C", direction="reduces",
+            bottom_threshold=18.0, top_threshold=20.5, rated_power_kw=0.150,
+            active_rate_per_h=0.417, drift_rate_per_h=0.185,
+            min_runtime_h=0.5, min_offtime_h=0.5,
+        )
+
+    def test_switch_without_rated_power_is_an_error(self) -> None:
+        plug = {**_PLUG, "params": {}}
+        assert _config_errors({"plug": plug, "cooler": _COOLER}) == [(
+            "device 'cooler': its switch 'plug' needs 'params: {rated_power_w: …}' "
+            "(the power the load draws while on)"
+        )]
+
+    def test_bottom_must_be_below_top(self) -> None:
+        cooler = {**_COOLER, "params": {**_COOLER["params"], "bottom_threshold": 21.0}}
+        assert _config_errors({"plug": _PLUG, "cooler": cooler}) == [
+            "device 'cooler': params.bottom_threshold (21) must be below top_threshold (20.5)"
+        ]
+
+    def test_one_switch_controls_one_device(self) -> None:
+        errors = _config_errors({"plug": _PLUG, "a": _COOLER, "b": _COOLER})
+        assert errors == ["device 'plug' controls more than one device: a, b"]
+
+    def test_thresholds_and_rates_are_required(self) -> None:
+        cooler = {**_COOLER, "params": {"bottom_threshold": 18.0}}
+        errors = _config_errors({"plug": _PLUG, "cooler": cooler})
+        assert any("top_threshold" in e for e in errors)
+        assert any("active_rate_per_h" in e for e in errors)
 
 
 # ── ThresholdControlContributor tests ────────────────────────────────────────
@@ -437,7 +457,7 @@ class TestThresholdControlContributor:
             min_runtime_h=0.25,  # 15 minutes
         )
         contrib = ThresholdControlContributor(tc)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         # Simulate: device just started 5 min ago
         contrib._running_since = now - timedelta(minutes=5)
         contrib._stopped_since = None
@@ -466,7 +486,7 @@ class TestThresholdControlContributor:
             min_offtime_h=0.083,  # 5 minutes
         )
         contrib = ThresholdControlContributor(tc)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         # Simulate: device stopped 2 min ago
         contrib._stopped_since = now - timedelta(minutes=2)
         contrib._running_since = None
@@ -481,19 +501,13 @@ class TestThresholdControlContributor:
         assert result == 0.0, "Should stay off — min_offtime not elapsed"
 
 
-class TestThresholdHADeviceReconciliation:
+class TestHASwitchDeviceReconciliation:
     """send_command must check the actual switch state before calling HA."""
 
     @staticmethod
     def _device(client):
-        from energy_assistant.plugins.threshold_homeassistant.device import (
-            ThresholdHADevice,
-        )
-        return ThresholdHADevice(
-            "cooler", client,
-            entity_sensor="sensor.temp", entity_switch="switch.cooler",
-            rated_power_w=150.0,
-        )
+        from energy_assistant.plugins.homeassistant_switch.device import HASwitchDevice
+        return HASwitchDevice("plug", client, entity_switch="switch.cooler", rated_power_w=150.0)
 
     async def test_skips_service_call_when_already_in_desired_state(self) -> None:
         from helpers.fake_ha_client import FakeHAClient
@@ -529,3 +543,55 @@ class TestThresholdHADeviceReconciliation:
         assert client.calls == [
             ("homeassistant", "turn_off", {"entity_id": "switch.cooler"}),
         ]
+
+    async def test_power_from_rated_or_measured(self) -> None:
+        from helpers.fake_ha_client import FakeHAClient
+
+        from energy_assistant.plugins.homeassistant_switch.device import HASwitchDevice
+        client = FakeHAClient(states={"switch.cooler": "on", "sensor.p": "142.5"})
+        st = await self._device(client).get_state()
+        assert (st.power_w, st.available, st.extra["on"]) == (150.0, True, True)
+        measured = HASwitchDevice("plug", client, entity_switch="switch.cooler",
+                                  entity_power="sensor.p", rated_power_w=150.0)
+        assert (await measured.get_state()).power_w == 142.5
+        client._states["switch.cooler"] = "unavailable"
+        assert (await self._device(client).get_state()).available is False
+
+
+class TestThermalLoadDevice:
+    """The thermal load reads its value and acts through its switch."""
+
+    async def test_built_with_its_switch(self) -> None:
+        from helpers.fake_ha_client import FakeHAClient
+
+        from energy_assistant.core.config import AppConfig, BackendsConfig
+        from energy_assistant.core.models import DeviceCommand
+        from energy_assistant.core.plugin_registry import BuildContext
+        from energy_assistant.loader.device_loader import build
+
+        client = FakeHAClient(states={"sensor.t": "19.4", "switch.c": "off"})
+        # The thermal load comes first in the config: it is built after its switch.
+        cfg = AppConfig(devices=parse_devices({"cooler": _COOLER, "plug": _PLUG}))
+        registry, _, _ = build(cfg, ctx=BuildContext(backends=BackendsConfig(), ha_client=client))
+        cooler = registry.get("cooler")
+        assert cooler.switch_id == "plug"
+
+        st = await cooler.get_state()
+        assert (st.power_w, st.available) == (0.0, True)
+        assert st.extra == {"measured_value": 19.4, "switch_state": "off"}
+
+        await cooler.send_command(DeviceCommand(device_id="cooler", command="set_power_w",
+                                                value=150.0))
+        assert client.calls == [("homeassistant", "turn_on", {"entity_id": "switch.c"})]
+
+    async def test_unavailable_without_a_reading(self) -> None:
+        from helpers.fake_ha_client import FakeHAClient
+
+        from energy_assistant.plugins.homeassistant_switch.device import HASwitchDevice
+        from energy_assistant.plugins.homeassistant_thermal.device import (
+            ThermalLoadDevice,
+        )
+        client = FakeHAClient(states={"sensor.t": "unavailable", "switch.c": "on"})
+        switch = HASwitchDevice("plug", client, entity_switch="switch.c", rated_power_w=150.0)
+        st = await ThermalLoadDevice("cooler", client, "sensor.t", switch).get_state()
+        assert (st.available, st.power_w, st.extra["measured_value"]) == (False, 150.0, None)

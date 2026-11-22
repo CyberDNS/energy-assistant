@@ -255,18 +255,28 @@ class TestLearner:
 
     def test_build_from_config(self) -> None:
         tc = _cooler(device_id="aquarium_cooler")
-        assets = {"aquarium": {"type": "threshold", "device": "aquarium_cooler"}}
-        devices = parse_devices({"aquarium_cooler": {
-            "category": "thermal_load", "type": "threshold_homeassistant",
-            "capabilities": {"temperature_c": {"entity": "sensor.t"}, "switch": {"entity": "switch.c"}},
-            "params": {"rated_power_w": 150},
-        }})
-        learners = build_thermal_learners([tc], assets, devices, object(), None)
+        raw = {
+            "plug": {"category": "switch", "type": "homeassistant_switch",
+                     "capabilities": {"switch": {"entity": "switch.c"}},
+                     "params": {"rated_power_w": 150}},
+            "aquarium_cooler": {
+                "category": "thermal_load", "type": "homeassistant_thermal",
+                "capabilities": {"temperature_c": {"entity": "sensor.t"}},
+                "controlled_by": "plug",
+                "params": {"bottom_threshold": 18.0, "top_threshold": 20.5,
+                           "active_rate_per_h": 0.417, "drift_rate_per_h": 0.185},
+            },
+        }
+        learners = build_thermal_learners([tc], parse_devices(raw), object(), None)
         assert list(learners) == ["aquarium_cooler"]
-        assets["aquarium"]["model"] = "fixed"
-        assert build_thermal_learners([tc], assets, devices, object(), None) == {}
-        del assets["aquarium"]["model"]
-        assert build_thermal_learners([tc], assets, devices, None, None) == {}  # no HA backend
+        lr = learners["aquarium_cooler"]
+        assert (lr._value_entity, lr._mode_entities) == ("sensor.t", {COOL: "switch.c"})
+        raw["aquarium_cooler"]["learning"] = False
+        assert build_thermal_learners([tc], parse_devices(raw), object(), None) == {}
+        raw["aquarium_cooler"]["learning"] = {"switch_entity": "switch.other"}
+        learners = build_thermal_learners([tc], parse_devices(raw), object(), None)
+        assert learners["aquarium_cooler"]._mode_entities == {COOL: "switch.other"}
+        assert build_thermal_learners([tc], parse_devices(raw), None, None) == {}  # no HA backend
 
 
 class TestPlanner:

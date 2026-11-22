@@ -8,12 +8,14 @@ their shape; this step derives their inputs from the ``DeviceSpec`` list
 devices                     composed into
 ==========================  ==========================================
 ``battery``                 ``StorageConstraints`` (from ``params``)
+``thermal_load`` + switch   ``ThresholdConstraints`` (thresholds and rates
+                            from the load, rated power from its switch)
 ``metered_by`` connections  the metering tree (``TopologyNode``)
 grid meter ``params``       the grid connection limit on the tree root
 ==========================  ==========================================
 
-EVs and threshold loads still come from the ``assets:`` section until
-vehicles, chargers, thermal loads and switches are composed here as well.
+Vehicles and chargers are composed at runtime by ``assets/fleet.py``
+(their sessions change while the app runs).
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from .device_model import DeviceCategory, DeviceSpec
-from .models import StorageConstraints
+from .models import StorageConstraints, ThresholdConstraints
 from .topology import TopologyNode, build_topology
 
 
@@ -32,6 +34,7 @@ class Composition:
 
     topology: TopologyNode | None
     storage_constraints: list[StorageConstraints]
+    threshold_constraints: list[ThresholdConstraints]
 
 
 def compose(devices: Mapping[str, DeviceSpec]) -> Composition:
@@ -39,6 +42,7 @@ def compose(devices: Mapping[str, DeviceSpec]) -> Composition:
     return Composition(
         topology=build_topology(devices),
         storage_constraints=storage_constraints(devices),
+        threshold_constraints=threshold_constraints(devices),
     )
 
 
@@ -69,3 +73,34 @@ def _storage_constraint(spec: DeviceSpec) -> StorageConstraints:
         no_grid_charge=bool(p.get("no_grid_charge", False)),
         standby_w=float(p.get("standby_w", 50.0)),
     )
+
+
+def threshold_constraints(devices: Mapping[str, DeviceSpec]) -> list[ThresholdConstraints]:
+    """``ThresholdConstraints`` for every ``thermal_load``, in config order.
+
+    The rated power is the switch's (``controlled_by``): the switch is the
+    means, the thermal load holds the needs (thresholds, rates, run times).
+    """
+    out = []
+    for spec in devices.values():
+        if spec.category is not DeviceCategory.THERMAL_LOAD:
+            continue
+        p = spec.params
+        switch = devices[spec.controlled_by] if spec.controlled_by else None
+        rated_w = switch.params.get("rated_power_w") if switch is not None else None
+        if rated_w is None:  # validate_connections reports this
+            continue
+        out.append(ThresholdConstraints(
+            device_id=spec.id,
+            bottom_threshold=float(p["bottom_threshold"]),
+            top_threshold=float(p["top_threshold"]),
+            unit=str(p.get("unit", "°C")),
+            direction=str(p.get("direction", "reduces")),  # type: ignore[arg-type]
+            rated_power_kw=float(rated_w) / 1000.0,
+            active_rate_per_h=float(p["active_rate_per_h"]),
+            drift_rate_per_h=float(p["drift_rate_per_h"]),
+            min_runtime_h=float(p.get("min_runtime_h", 0.0)),
+            min_offtime_h=float(p.get("min_offtime_h", 0.0)),
+            label=spec.label or "",
+        ))
+    return out

@@ -351,44 +351,44 @@ devices:
           weekdays: [{ hour: 0, consumed_kwh: 10.0 }]
           weekends: [{ hour: 0, consumed_kwh: 10.0 }]
 
-  # --- Aquarium cooler: kept between two temperatures (see assets below) ---
+  # --- Aquarium cooler: kept between two temperatures ---
+  # A thermal_load keeps a measured value between two thresholds (aquarium
+  # cooler, fridge, AC, water heater, dehumidifier); the planner schedules its
+  # runtime in cheap or PV hours.  The switch it is controlled_by executes
+  # the plan and holds the rated power.  How fast the value moves is learned
+  # from Home Assistant's history (the Learning tab shows the model); the
+  # rates below are used until a model is learned, and with learning: false.
+  # - id: aquarium_cooler_plug
+  #   category: switch
+  #   type: homeassistant_switch
+  #   capabilities:
+  #     switch: { entity: switch.aquarium_cooler }
+  #     # power_w: { entity: sensor.aquarium_cooler_power }   # optional: measured power
+  #   params:
+  #     rated_power_w: 150             # power drawn while on
+  #
   # - id: aquarium_cooler
   #   category: thermal_load
-  #   type: threshold_homeassistant
+  #   type: homeassistant_thermal
+  #   label: Aquarium Cooler
   #   capabilities:
   #     temperature_c: { entity: sensor.aquarium_temperature }
-  #     switch: { entity: switch.aquarium_cooler }
+  #   controlled_by: aquarium_cooler_plug
   #   params:
-  #     rated_power_w: 150
-
-
-# ── Threshold devices (assets) ────────────────────────────────────────────────
-# An on/off device that keeps a measured value between two thresholds
-# (aquarium cooler, fridge, AC, water heater, dehumidifier).  The planner
-# schedules its runtime in cheap or PV hours.  How fast the value moves is
-# learned from Home Assistant's history (the Learning tab shows the model);
-# the rates below are used until a model is learned, and with model: fixed.
-#
-# assets:
-#   aquarium_cooler:
-#     type: threshold
-#     device: aquarium_cooler          # a thermal_load device (see devices above)
-#     label: "Aquarium Cooler"
-#     bottom_threshold: 18.0
-#     top_threshold: 20.5
-#     unit: "°C"
-#     direction: reduces               # reduces (cooler) | increases (heater)
-#     drift_rate_per_h: 0.185          # change per hour while off
-#     active_rate_per_h: 0.417         # net change per hour while running
-#     min_runtime_h: 0.5
-#     min_offtime_h: 0.5
-#     model: learned                   # learned (default) | fixed
-#     learning:                        # all optional
-#       # value_entity / switch_entity default to the device's
-#       # temperature_c / switch capability entities.
-#       ambient_entity: sensor.living_room_temperature   # learn the pull towards ambient
-#       ambient_weather_entity: weather.home             # ambient forecast (else last value held)
-#       history_days: 10               # HA keeps state history 10 days by default
-#       refit_interval_h: 6
-#       # Two-mode devices (AC) name one switch per mode instead of switch_entity:
-#       # modes: { cool: switch.ac_cooling, heat: switch.ac_heating }
+  #     bottom_threshold: 18.0
+  #     top_threshold: 20.5
+  #     # unit: "°C"                   # default °C
+  #     direction: reduces             # reduces (cooler, default) | increases (heater)
+  #     drift_rate_per_h: 0.185        # change per hour while off
+  #     active_rate_per_h: 0.417       # net change per hour while running
+  #     min_runtime_h: 0.5             # compressor protection
+  #     min_offtime_h: 0.5
+  #   learning:                        # all optional; learning: false keeps the rates above
+  #     # value_entity / switch_entity default to the temperature_c entity and
+  #     # the switch's entity.
+  #     ambient_entity: sensor.living_room_temperature   # learn the pull towards ambient
+  #     ambient_weather_entity: weather.home             # ambient forecast (else last value held)
+  #     history_days: 10               # HA keeps state history 10 days by default
+  #     refit_interval_h: 6
+  #     # Two-mode devices (AC) name one switch per mode instead of switch_entity:
+  #     # modes: { cool: switch.ac_cooling, heat: switch.ac_heating }

@@ -257,6 +257,22 @@ _CHARGER_PARAMS = {
                             description="Behaviour for an unknown car (default pv_only)"),
 }
 
+_THERMAL_PARAMS = {
+    "bottom_threshold": ParamSpec(float, required=True,
+                                  description="Lower bound of the allowed range (e.g. °C)"),
+    "top_threshold": ParamSpec(float, required=True,
+                               description="Upper bound of the allowed range"),
+    "direction": ParamSpec(str, choices=("reduces", "increases"),
+                           description="reduces (cooler, default) or increases (heater) the value"),
+    "unit": ParamSpec(str, description="Display unit (default °C)"),
+    "active_rate_per_h": ParamSpec(float, required=True, minimum=0, exclusive_minimum=True,
+                                   description="Change per hour while running (fallback model)"),
+    "drift_rate_per_h": ParamSpec(float, required=True, minimum=0,
+                                  description="Drift per hour while off (fallback model)"),
+    "min_runtime_h": ParamSpec(float, minimum=0, description="Minimum on-time (compressor)"),
+    "min_offtime_h": ParamSpec(float, minimum=0, description="Minimum off-time (compressor)"),
+}
+
 CATEGORY_SCHEMAS: dict[DeviceCategory, CategorySchema] = {
     s.category: s
     for s in (
@@ -313,15 +329,10 @@ CATEGORY_SCHEMAS: dict[DeviceCategory, CategorySchema] = {
         ),
         CategorySchema(
             _K.THERMAL_LOAD,
-            "Load kept between two thresholds (aquarium cooler, fridge, heater).",
+            "Load kept between two thresholds (aquarium cooler, fridge, heater); "
+            "switched by the switch it is controlled_by.",
             required_capabilities=_caps(_C.TEMPERATURE_C),
-            # switch: bound on the device itself until thermal loads are
-            # controlled_by a switch device of their own.
-            optional_capabilities=_caps(_C.SWITCH, _C.POWER_W),
-            params={
-                "rated_power_w": ParamSpec(float, required=True, minimum=0, exclusive_minimum=True,
-                                           description="Power drawn while running (W)"),
-            },
+            params=_THERMAL_PARAMS,
             connections={**_METERED, ConnectionType.CONTROLLED_BY: frozenset({_K.SWITCH})},
         ),
         CategorySchema(
@@ -329,7 +340,8 @@ CATEGORY_SCHEMAS: dict[DeviceCategory, CategorySchema] = {
             "On/off switch (plug, relay); executes another device's plan.",
             required_capabilities=_caps(_C.SWITCH),
             optional_capabilities=_caps(_C.POWER_W, _C.ENERGY_IN_KWH),
-            params={"rated_power_w": ParamSpec(float, minimum=0, exclusive_minimum=True)},
+            params={"rated_power_w": ParamSpec(float, minimum=0, exclusive_minimum=True,
+                                               description="Power drawn by the load while on (W)")},
             connections=_METERED,
         ),
         CategorySchema(
@@ -404,12 +416,15 @@ class DeviceSpec:
 
     def plugin_config(self) -> dict[str, Any]:
         """The flat dict handed to the plugin factory: settings, params,
-        ``category``, ``tariff`` and ``capabilities`` (keyed by name)."""
+        ``category``, ``tariff``, connections and ``capabilities`` (keyed by name)."""
         cfg: dict[str, Any] = {**self.settings, **self.params}
         cfg["type"] = self.type
         cfg["category"] = self.category.value
         if self.tariff is not None:
             cfg["tariff"] = self.tariff
+        for conn in ConnectionType:
+            if (target := getattr(self, conn.value)) is not None:
+                cfg[conn.value] = target
         cfg["capabilities"] = {c.value: dict(b) for c, b in self.capabilities.items()}
         return cfg
 
@@ -591,6 +606,25 @@ def parse_devices(raw: Mapping[str, Mapping[str, Any]]) -> dict[str, DeviceSpec]
     return specs
 
 
+def _thermal_load_errors(spec: DeviceSpec, specs: Mapping[str, DeviceSpec]) -> list[str]:
+    """A thermal load needs a switch with a rated power, and a valid range."""
+    errors: list[str] = []
+    where = f"device {spec.id!r}"
+    bottom, top = spec.params.get("bottom_threshold"), spec.params.get("top_threshold")
+    if isinstance(bottom, (int, float)) and isinstance(top, (int, float)) and bottom >= top:
+        errors.append(f"{where}: params.bottom_threshold ({bottom:g}) must be below "
+                      f"top_threshold ({top:g})")
+    if not spec.controlled_by:
+        errors.append(f"{where}: a thermal_load needs 'controlled_by: <switch device>'")
+        return errors
+    switch = specs.get(spec.controlled_by)
+    if (switch is not None and switch.category is DeviceCategory.SWITCH
+            and switch.params.get("rated_power_w") is None):
+        errors.append(f"{where}: its switch {switch.id!r} needs 'params: {{rated_power_w: …}}' "
+                      "(the power the load draws while on)")
+    return errors
+
+
 def validate_connections(specs: Mapping[str, DeviceSpec]) -> list[str]:
     """Check connection targets, the metering tree and the grid meter params."""
     errors: list[str] = []
@@ -611,13 +645,7 @@ def validate_connections(specs: Mapping[str, DeviceSpec]) -> list[str]:
                               f"{_names(schema.connections[conn])}")
 
         if spec.category is DeviceCategory.THERMAL_LOAD:
-            has_switch = Capability.SWITCH in spec.capabilities
-            if has_switch and spec.controlled_by:
-                errors.append(f"device {spec.id!r}: bind the 'switch' capability or set "
-                              "'controlled_by', not both")
-            elif not has_switch and not spec.controlled_by:
-                errors.append(f"device {spec.id!r}: a thermal_load needs 'controlled_by: "
-                              "<switch device>' (or a 'switch' capability binding)")
+            errors.extend(_thermal_load_errors(spec, specs))
 
         if spec.category is DeviceCategory.CHARGER:
             default = spec.params.get("default_vehicle")
@@ -625,6 +653,15 @@ def validate_connections(specs: Mapping[str, DeviceSpec]) -> list[str]:
             if default and (target is None or target.category is not DeviceCategory.VEHICLE):
                 errors.append(f"device {spec.id!r}: params.default_vehicle {default!r} is not a "
                               "configured vehicle")
+
+    controllers: dict[str, list[str]] = {}
+    for spec in specs.values():
+        if spec.controlled_by:
+            controllers.setdefault(spec.controlled_by, []).append(spec.id)
+    for switch_id, users in controllers.items():
+        if len(users) > 1:
+            errors.append(f"device {switch_id!r} controls more than one device: "
+                          + ", ".join(users))
 
     grid_meters = [s for s in specs.values() if s.category is DeviceCategory.GRID_METER]
     if len(grid_meters) > 1:
