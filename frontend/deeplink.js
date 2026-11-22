@@ -2,7 +2,7 @@
 //
 // Hash routes are the canonical form:
 //   #/plan                    Plan tab
-//   #/plan/<vehicle>          one vehicle only (asset_id, case-insensitive)
+//   #/plan/<vehicle>          one vehicle only (vehicle id, case-insensitive)
 //   #/plan?vehicle=<vehicle>  same
 //   #/learning                Learning tab (learned consumption models)
 //   #/savings                 Savings tab (predicted vs. real savings)

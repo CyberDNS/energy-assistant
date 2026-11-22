@@ -115,12 +115,12 @@ export default defineComponent({
     }
 
     const onSkipDay = () => withBusy(async () => {
-      await setEvDayOverride(props.ev.asset_id, editDay.value.date, { skip: true })
+      await setEvDayOverride(props.ev.vehicle_id, editDay.value.date, { skip: true })
       editDay.value = null
     })
 
     const onSaveDay = () => withBusy(async () => {
-      await setEvDayOverride(props.ev.asset_id, editDay.value.date, {
+      await setEvDayOverride(props.ev.vehicle_id, editDay.value.date, {
         skip: false,
         target_soc_pct: Number(editDaySoc.value),
         target_by: editDayTime.value,
@@ -129,7 +129,7 @@ export default defineComponent({
     })
 
     const onRevertDay = () => withBusy(async () => {
-      await clearEvDayOverride(props.ev.asset_id, editDay.value.date)
+      await clearEvDayOverride(props.ev.vehicle_id, editDay.value.date)
       editDay.value = null
     })
 
@@ -139,7 +139,7 @@ export default defineComponent({
       busy.value = true
       errMsg.value = null
       try {
-        const plan = await fetchEvPlan(props.ev.asset_id)
+        const plan = await fetchEvPlan(props.ev.vehicle_id)
         weeklyRows.value = plan.weekly
         weeklyDirty.value = false
         weeklyOpen.value = true
@@ -151,7 +151,7 @@ export default defineComponent({
     }
 
     const onSaveWeekly = () => withBusy(async () => {
-      await saveEvWeeklyPlan(props.ev.asset_id, weeklyRows.value.map(r => ({
+      await saveEvWeeklyPlan(props.ev.vehicle_id, weeklyRows.value.map(r => ({
         weekday: r.weekday,
         enabled: r.enabled,
         target_soc_pct: Number(r.target_soc_pct),
@@ -168,14 +168,14 @@ export default defineComponent({
     }
 
     const onStartForce = () => withBusy(async () => {
-      await startForceCharge(props.ev.asset_id, Number(forceSoc.value))
+      await startForceCharge(props.ev.vehicle_id, Number(forceSoc.value))
       forceOpen.value = false
     })
 
-    const onStopForce = () => withBusy(() => stopForceCharge(props.ev.asset_id))
+    const onStopForce = () => withBusy(() => stopForceCharge(props.ev.vehicle_id))
 
-    const onDisable = () => withBusy(() => disableChargepoint(props.ev.asset_id))
-    const onEnable  = () => withBusy(() => enableChargepoint(props.ev.asset_id))
+    const onDisable = () => withBusy(() => disableChargepoint(props.ev.vehicle_id))
+    const onEnable  = () => withBusy(() => enableChargepoint(props.ev.vehicle_id))
 
     return {
       busy, errMsg, socColor, socTitle, nextTarget, open, fmt, fmtDeadline, dayLabel, WEEKDAYS,

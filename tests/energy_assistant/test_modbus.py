@@ -337,27 +337,13 @@ async def test_sma_discharge_limit_written_as_s16_percent(power_w: float, pct: i
     assert device.controls_charge is False
 
 
-async def test_sma_control_matches_iobroker_plugin() -> None:
-    """Same setpoints must yield the same percentage as sma_modbus_iobroker."""
-    from helpers.fake_iobroker_client import FakeIoBrokerClient
-
-    from energy_assistant.plugins.sma_modbus_iobroker.device import (
-        SmaSunnyBoyStorageDevice,
-    )
-
-    iob = FakeIoBrokerClient()
-    old = SmaSunnyBoyStorageDevice(
-        "sma_battery", iob, capacity_kwh=7.4, max_charge_kw=3.68, max_discharge_kw=3.9,
-        voltage_max_v=250.0,
-    )
+async def test_sma_control_percentages() -> None:
+    """Setpoint → active power limit (%), as the former sma_modbus_iobroker plugin wrote it."""
     client = _sma_client()
-    new = _controlled_sma(client, max_discharge_kw=3.9, voltage_max_v=250.0)
-
+    device = _controlled_sma(client, max_discharge_kw=3.9, voltage_max_v=250.0)
     for power_w in (-4500, -3900, -2000, -777, -1, 0, 500):
-        await old.send_command(_set_power(power_w))
-        await new.send_command(_set_power(power_w))
-
-    assert [words[0] for _, words, _ in client.written] == [value for _, value in iob.written]
+        await device.send_command(_set_power(power_w))
+    assert [words[0] for _, words, _ in client.written] == [100, 92, 47, 18, 0, 0, 0]
 
 
 async def test_control_writes_every_command_and_logs_only_changes(caplog) -> None:

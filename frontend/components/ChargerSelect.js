@@ -12,7 +12,7 @@ export default defineComponent({
   name: 'ChargerSelect',
   props: {
     who:      { type: String, required: true },   // vehicle id or "guest"
-    status:   { type: Object, default: null },    // charger_status of /api/ev (or built for the guest)
+    status:   { type: Object, default: null },    // charger_status of /api/vehicles (or built for the guest)
     chargers: { type: Array, required: true },    // /api/chargers
   },
   emits: ['refresh'],

@@ -258,7 +258,7 @@ def _fresh_bridges(monkeypatch) -> None:
     monkeypatch.setattr(zendure_plugin, "_bridges", {})
 
 
-def test_build_cloud_accepts_iobroker_key_names() -> None:
+def test_build_cloud_accepts_hub_id_and_device_serial() -> None:
     ctx = BuildContext(backends=BackendsConfig())
     dev = zendure_plugin._build("zendure", {
         "cloud_key": _key(), "hub_id": PK, "device_serial": DK,

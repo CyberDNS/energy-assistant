@@ -9,15 +9,13 @@ from energy_assistant.config.yaml import YamlConfigLoader
 from energy_assistant.loader.device_loader import build as build_from_config
 from energy_assistant.core.models import ForecastPoint, ForecastQuantity
 from energy_assistant.plugins import registry as plugin_registry
-from energy_assistant.plugins._iobroker.pool import IoBrokerConnectionPool
 from energy_assistant.core.plugin_registry import BuildContext
 
 
 async def main() -> None:
     app_config = YamlConfigLoader(Path(__file__).parents[1] / "config.yaml").load()
     device_registry, tariffs, _ = build_from_config(app_config)
-    pool = IoBrokerConnectionPool()
-    ctx = BuildContext(backends=app_config.backends, iobroker_pool=pool, ha_client=None)
+    ctx = BuildContext(backends=app_config.backends, ha_client=None)
 
     providers = []
     for fid, cfg in app_config.forecasts.items():

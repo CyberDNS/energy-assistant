@@ -228,73 +228,12 @@ _SAVINGS_SLOTS_ADDED_COLUMNS = {
 SAVINGS_KEEP_DAYS = 400
 """Savings slots are kept this long (the dashboard's longest range is 1 y)."""
 
-LEGACY_SAVINGS_KEEP_DAYS = 7
-"""Rows of the previous accounting (savings_actual / savings_predicted, no
-longer written) are kept this long for debugging, then purged."""
-
-# Legacy accounting (before #82): no longer written, read-only for debugging.
-_CREATE_SAVINGS_ACTUAL_TABLE = """
-CREATE TABLE IF NOT EXISTS savings_actual (
-    slot_start      TEXT PRIMARY KEY,
-    hours           REAL NOT NULL,
-    baseline_cost   REAL NOT NULL,
-    actual_cost     REAL NOT NULL,
-    inventory_delta REAL NOT NULL,
-    soc_correction  REAL NOT NULL DEFAULT 0
-)
-"""
-
-# Columns added after the first release, created on older DBs by start().
-_SAVINGS_ACTUAL_ADDED_COLUMNS = {
-    "soc_correction": "REAL NOT NULL DEFAULT 0",
-}
-
-# kind = 'day_ahead' (frozen once, never overwritten) or 'latest' (the last
-# plan made before the slot began).
-_CREATE_SAVINGS_PREDICTED_TABLE = """
-CREATE TABLE IF NOT EXISTS savings_predicted (
-    slot_start      TEXT NOT NULL,
-    kind            TEXT NOT NULL,
-    created_at      TEXT NOT NULL,
-    hours           REAL NOT NULL,
-    baseline_cost   REAL NOT NULL,
-    plan_cost       REAL NOT NULL,
-    inventory_delta REAL NOT NULL,
-    PRIMARY KEY (slot_start, kind)
-)
-"""
-
 _CREATE_SAVINGS_STATE_TABLE = """
 CREATE TABLE IF NOT EXISTS savings_state (
     id         INTEGER PRIMARY KEY CHECK (id = 1),
     updated_at TEXT NOT NULL,
     state      TEXT NOT NULL
 )
-"""
-
-# Only slots that have both a measurement and a day-ahead prediction are
-# compared, so the three KPIs always add up (deviation = real − predicted).
-# A prediction covers a whole slot; it is scaled to the part of the slot
-# that was actually measured.
-_QUERY_SAVINGS = """
-SELECT a.slot_start,
-       a.hours,
-       a.baseline_cost,
-       a.actual_cost,
-       a.baseline_cost - a.actual_cost + a.inventory_delta + a.soc_correction,
-       (d.baseline_cost - d.plan_cost + d.inventory_delta) * a.hours / d.hours,
-       (l.baseline_cost - l.plan_cost + l.inventory_delta) * a.hours / l.hours,
-       a.inventory_delta,
-       d.created_at, d.hours, d.baseline_cost, d.plan_cost, d.inventory_delta,
-       l.created_at, l.hours, l.baseline_cost, l.plan_cost, l.inventory_delta,
-       a.soc_correction
-FROM savings_actual a
-JOIN savings_predicted d
-  ON d.slot_start = a.slot_start AND d.kind = 'day_ahead' AND d.hours > 0
-LEFT JOIN savings_predicted l
-  ON l.slot_start = a.slot_start AND l.kind = 'latest' AND l.hours > 0
-WHERE a.slot_start >= ? AND a.slot_start < ?
-ORDER BY a.slot_start
 """
 
 # Plan fidelity diagnostics, purged with the history (see purge_before).
@@ -326,8 +265,6 @@ CREATE TABLE IF NOT EXISTS control_execution (
 
 _PURGE_SAVINGS_SQL = (
     ("DELETE FROM savings_slots WHERE slot_start < ?", SAVINGS_KEEP_DAYS),
-    ("DELETE FROM savings_actual WHERE slot_start < ?", LEGACY_SAVINGS_KEEP_DAYS),
-    ("DELETE FROM savings_predicted WHERE slot_start < ?", LEGACY_SAVINGS_KEEP_DAYS),
 )
 
 _PURGE_DIAGNOSTICS_SQL = (
@@ -448,12 +385,12 @@ class SqliteStorageBackend:
         await self._db.execute(_CREATE_VEHICLE_SESSIONS_TABLE)
         await self._db.execute(_CREATE_CHARGER_NEXT_VEHICLE_TABLE)
         await self._db.execute(_CREATE_CHARGER_GUEST_MODE_TABLE)
-        await self._db.execute(_CREATE_SAVINGS_ACTUAL_TABLE)
-        await self._db.execute(_CREATE_SAVINGS_PREDICTED_TABLE)
+        # The accounting before #82; its rows were only kept for debugging.
+        await self._db.execute("DROP TABLE IF EXISTS savings_actual")
+        await self._db.execute("DROP TABLE IF EXISTS savings_predicted")
         await self._db.execute(_CREATE_SAVINGS_STATE_TABLE)
         await self._db.execute(_CREATE_SAVINGS_SLOTS_TABLE)
         await self._add_missing_columns("savings_slots", _SAVINGS_SLOTS_ADDED_COLUMNS)
-        await self._add_missing_columns("savings_actual", _SAVINGS_ACTUAL_ADDED_COLUMNS)
         await self._db.execute(_CREATE_PLAN_SNAPSHOTS_TABLE)
         await self._db.execute(_CREATE_CONTROL_EXECUTION_TABLE)
         # Superseded by ev_weekly_plan + ev_day_overrides
@@ -1046,9 +983,30 @@ class SqliteStorageBackend:
             for r in rows
         ]
 
+    async def stored_ids(self) -> dict[str, set[str]]:
+        """Ids that per-device tables hold rows for, by table (time series
+        that are purged anyway are left out).  For the startup orphan check."""
+        assert self._db is not None, "Call start() before stored_ids()"
+        queries = {
+            "ledger_state": "SELECT device_id FROM ledger_state",
+            "ev_weekly_plan": "SELECT DISTINCT asset_id FROM ev_weekly_plan",
+            "ev_day_overrides": "SELECT DISTINCT asset_id FROM ev_day_overrides",
+            "ev_force_charge": "SELECT asset_id FROM ev_force_charge",
+            "ev_disabled": "SELECT asset_id FROM ev_disabled",
+            "vehicle_sessions": "SELECT DISTINCT charger_id FROM vehicle_sessions"
+                                " WHERE ended_at IS NULL",
+            "charger_next_vehicle": "SELECT charger_id FROM charger_next_vehicle",
+            "charger_guest_mode": "SELECT charger_id FROM charger_guest_mode",
+        }
+        out: dict[str, set[str]] = {}
+        for table, sql in queries.items():
+            async with self._db.execute(sql) as cursor:
+                out[table] = {str(r[0]) for r in await cursor.fetchall() if r[0] is not None}
+        return out
+
     async def purge_savings(self, now: datetime) -> int:
-        """Delete savings slots past their retention (legacy rows after
-        ``LEGACY_SAVINGS_KEEP_DAYS``).  Returns the number of rows deleted."""
+        """Delete savings slots past their retention.  Returns the number of
+        rows deleted."""
         assert self._db is not None, "Call start() before purge_savings()"
         deleted = 0
         for sql, days in _PURGE_SAVINGS_SQL:
@@ -1057,33 +1015,6 @@ class SqliteStorageBackend:
                 deleted += max(cursor.rowcount, 0)
         await self._db.commit()
         return deleted
-
-    async def query_legacy_savings(self, start: datetime, end: datetime) -> list[dict]:
-        """Slots of the previous accounting (before #82) in ``[start, end)``.
-
-        Read-only, for debugging until they are purged.
-        """
-        assert self._db is not None, "Call start() before query_legacy_savings()"
-        async with self._db.execute(
-            _QUERY_SAVINGS, (_utc_iso(start), _utc_iso(end))
-        ) as cursor:
-            rows = await cursor.fetchall()
-        return [
-            {
-                "slot_start": datetime.fromisoformat(row[0]),
-                "hours": row[1],
-                "baseline_cost": row[2],
-                "actual_cost": row[3],
-                "real": row[4],
-                "predicted": row[5],
-                "predicted_latest": row[6],
-                "inventory_delta": row[7],
-                "soc_correction": row[18],
-                "day_ahead": _prediction(row[8:13]),
-                "latest": _prediction(row[13:18]),
-            }
-            for row in rows
-        ]
 
     async def save_savings_state(self, state: dict) -> None:
         """Persist the savings tracker state (single row)."""

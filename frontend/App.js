@@ -1,7 +1,7 @@
 import { defineComponent, computed, provide } from 'vue'
 import { RouterView, RouterLink, useRoute } from 'vue-router'
 import { embedFromSearch, isOn } from './deeplink.js'
-import { useStatus } from './composables/useStatus.js'
+import { useStatus, labelOf } from './composables/useStatus.js'
 
 function fmt(v, dec = 0) {
   return v == null ? '—' : Number(v).toFixed(dec)
@@ -39,7 +39,7 @@ export default defineComponent({
     const kpiDryRun = computed(() => status.value ? (status.value.dry_run ? 'ON' : 'off') : '—')
 
     const batteryKpis = computed(() => (status.value?.ledger ?? []).map(l => ({
-      label: l.device_id,
+      label: labelOf(l.device_id),
       soc: l.capacity_kwh ? fmt(l.stored_energy_kwh / l.capacity_kwh * 100, 0) + '%' : '—',
     })))
 

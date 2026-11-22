@@ -132,7 +132,7 @@ export default defineComponent({
     )
 
     const liveValue = computed(() => {
-      if (props.device.type === 'threshold') {
+      if (props.device.category === 'thermal_load') {
         const v = props.device.current_value
         return v != null ? `${fmt(v)} ${props.device.unit}` : '—'
       }

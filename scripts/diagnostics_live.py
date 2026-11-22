@@ -43,7 +43,6 @@ from energy_assistant.core.models import DeviceState
 from energy_assistant.core.optimizer import OptimizationContext
 from energy_assistant.core.plugin_registry import BuildContext
 from energy_assistant.loader.device_loader import build as build_from_config
-from energy_assistant.plugins._iobroker.pool import IoBrokerConnectionPool
 from energy_assistant.plugins.milp_highs import MilpHigsOptimizer
 
 import visualize_optimizer as _vo
@@ -188,10 +187,7 @@ async def _fetch_and_display(
     app_config = YamlConfigLoader(config_path).load()
     device_registry, tariffs, _ = build_from_config(app_config)
 
-    iobroker_pool = None
-    if app_config.backends.iobroker:
-        iobroker_pool = IoBrokerConnectionPool()
-    ctx = BuildContext(backends=app_config.backends, iobroker_pool=iobroker_pool, ha_client=None)
+    ctx = BuildContext(backends=app_config.backends, ha_client=None)
     forecast_providers = _vo._build_forecast_providers(app_config, ctx)
 
     storage_constraints = {

@@ -67,7 +67,6 @@ from energy_assistant.core.optimizer import OptimizationContext
 from energy_assistant.core.plugin_registry import BuildContext
 from energy_assistant.loader.device_loader import build as build_from_config, build_all_forecasts
 from energy_assistant.plugins import registry as plugin_registry
-from energy_assistant.plugins._iobroker.pool import IoBrokerConnectionPool
 from energy_assistant.plugins.milp_highs import MilpHigsOptimizer
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
@@ -530,14 +529,7 @@ async def _run(
     device_registry, tariffs, _topology = build_from_config(app_config)
 
     # 3. Build a shared BuildContext for forecast providers
-    iobroker_pool = None
-    if app_config.backends.iobroker:
-        iobroker_pool = IoBrokerConnectionPool()
-    ctx = BuildContext(
-        backends=app_config.backends,
-        iobroker_pool=iobroker_pool,
-        ha_client=None,
-    )
+    ctx = BuildContext(backends=app_config.backends, ha_client=None)
     forecast_providers = _build_forecast_providers(app_config, ctx)
     # forecast_providers already contains both PV and consumption providers
     # (build_all_forecasts = top-level + per-device), so no separate call needed.
