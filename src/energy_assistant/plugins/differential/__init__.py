@@ -6,20 +6,36 @@ import logging
 from typing import Any
 
 from ...core.device_model import Capability as Cap
-from ...core.device_model import DeviceCategory
+from ...core.device_model import DeviceCategory, ParamSpec
 from ...core.device_model import DeviceCategory as C
 from ...core.plugin_registry import BuildContext, PluginRegistry
 
 _log = logging.getLogger(__name__)
 
 
+SETTINGS = {
+    "minuend": ParamSpec(str, required=True, ref=("*",), label="Total",
+                         description="Device to subtract from"),
+    "subtrahend": ParamSpec(str, required=True, ref=("*",), label="Minus",
+                            description="Device that is subtracted"),
+    "minuend_field": ParamSpec(str, advanced=True, default="power_w", description="State field of the minuend"),
+    "subtrahend_field": ParamSpec(str, advanced=True, default="power_w",
+                                  description="State field of the subtrahend"),
+    "min_w": ParamSpec(float, label="Lower bound (W)", description="Clamp the result to at least this (W)"),
+    "max_w": ParamSpec(float, label="Upper bound (W)", description="Clamp the result to at most this (W)"),
+}
+
+
 def register(registry: PluginRegistry) -> None:
     # Deferred: needs other devices to be built first.
     registry.register_device(
         "differential", _build,
+        title="Difference of two devices",
+        description="Power of one device minus another, e.g. grid meter minus household meter.",
         deferred=True,
         categories={C.CONSUMER, C.METER},
         provides={Cap.POWER_W},
+        settings=SETTINGS,
     )
 
 

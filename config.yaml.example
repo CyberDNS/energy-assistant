@@ -69,7 +69,7 @@ tariffs:
 #   # A profile maps the value names of a known meter script; bundled ones are
 #   # in plugins/tasmota/profiles/ (energy, iskra_mt175, iskra_mt631, ebz_dd3, …).
 #   - id: main_grid_meter
-#     category: grid_meter
+#     category: meter
 #     type: tasmota
 #     tariff: grid
 #     host: 192.168.x.x                    # IP or hostname of the IR head
@@ -180,7 +180,7 @@ server:
 #
 # One flat list of everything in the house.  Each device has:
 #
-#   category:      what it is — grid_meter | meter | pv | battery | charger |
+#   category:      what it is — meter | pv | battery | charger |
 #                  thermal_load | switch | consumer | vehicle | sensor
 #   type:          the plugin, i.e. how to talk to it (tasmota, modbus,
 #                  generic_homeassistant, openwb_mqtt, zendure, …), followed
@@ -190,7 +190,8 @@ server:
 #   params:        model parameters of the category (battery capacity, grid
 #                  connection limit, rated power, …)
 #   metered_by:    the meter the device sits behind.  Builds the metering
-#                  tree; its root is the one grid_meter.
+#                  tree; its root is the one meter without metered_by
+#                  (the grid connection).
 #   tariff:        tariff id the device is billed on (default: the default tariff)
 #
 # The config is checked at startup: unknown categories, params or
@@ -202,7 +203,7 @@ devices:
 
   # --- Grid connection (Z1) ---
   - id: main_grid_meter
-    category: grid_meter
+    category: meter
     type: generic_homeassistant
     tariff: export_tariff
     capabilities:

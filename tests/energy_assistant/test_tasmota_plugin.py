@@ -479,7 +479,7 @@ class _StubPoller:
         return self.reading
 
 
-@pytest.mark.parametrize("category", [DeviceCategory.GRID_METER, DeviceCategory.METER])
+@pytest.mark.parametrize("category", [DeviceCategory.METER])
 async def test_meter_state(category: DeviceCategory) -> None:
     reading = map_payload(_sml(-300), build_field_map(METER_FIELDS), received_at=TS)
     poller = _StubPoller(reading)
@@ -532,10 +532,10 @@ def test_meter_built_from_config() -> None:
 def test_grid_meter_polls_like_a_meter() -> None:
     dev = registry.build_device(
         "main_grid_meter",
-        {"type": "tasmota", "category": "grid_meter", "host": "h", "fields": METER_FIELDS},
+        {"type": "tasmota", "category": "meter", "host": "h", "fields": METER_FIELDS},
         _ctx(),
     )
-    assert dev.category == DeviceCategory.GRID_METER
+    assert dev.category == DeviceCategory.METER
     assert dev._poller._poll_interval_s == 2.0
 
 

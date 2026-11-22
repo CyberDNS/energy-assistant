@@ -98,7 +98,7 @@ def _sp(loop: ControlLoop, base_w: float, measured: dict[str, float]) -> dict[st
 
 
 def _grid_devices(**params):
-    entry = {"category": "grid_meter", "type": "tasmota", "host": "h"}
+    entry = {"category": "meter", "type": "tasmota", "host": "h"}
     if params:
         entry["params"] = params
     return parse_devices({

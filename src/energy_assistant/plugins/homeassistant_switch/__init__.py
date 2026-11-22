@@ -41,8 +41,10 @@ _log = logging.getLogger(__name__)
 def register(registry: PluginRegistry) -> None:
     registry.register_device(
         "homeassistant_switch", _build,
+        title="Home Assistant switch",
         categories={C.SWITCH},
         bindable={Cap.SWITCH, Cap.POWER_W},
+        settings={},
     )
 
 

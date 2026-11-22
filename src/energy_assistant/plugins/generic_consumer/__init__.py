@@ -11,7 +11,10 @@ from ...core.plugin_registry import BuildContext, PluginRegistry
 def register(registry: PluginRegistry) -> None:
     registry.register_device(
         "generic_consumer", _build,
+        title="Virtual consumer",
+        description="A load without its own sensor; its power comes from its forecast.",
         categories={C.CONSUMER},
+        settings={},
     )
 
 

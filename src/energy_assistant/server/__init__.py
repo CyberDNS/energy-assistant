@@ -100,7 +100,7 @@ from ..core.models import (
 )
 from ..core.optimizer import OptimizationContext, SecondaryTariffLoad
 from ..core.plan_schedule import aligned_plan_period, next_plan_run
-from ..core.plugin_registry import BuildContext
+from ..core.plugin_registry import BuildContext, SharedPool
 from ..core.price_curve import PriceCurveHistory, build_price_slots
 from ..core.registry import DeviceRegistry
 from ..core.savings import (
@@ -120,10 +120,12 @@ from ..loader.device_loader import (
     build_device_forecast_map,
     build_top_level_forecasts,
     make_build_context,
+    validate_plugins,
 )
 from ..loader.energy_dashboard import import_energy_dashboard
 from ..loader.forecast_config import effective_forecast_configs
 from ..plugins import registry as plugin_registry
+from ..plugins._homeassistant.client import HAClient
 from ..plugins.milp_highs import MilpHigsOptimizer
 from ..plugins.mqtt_publisher import (
     EvMqttPublisher,
@@ -131,6 +133,7 @@ from ..plugins.mqtt_publisher import (
     select_discovery_devices,
 )
 from ..storage.sqlite import SqliteStorageBackend
+from .config_api import mount_config_api
 from .mcp_tools import mount_mcp_server
 from .remote_access import DEFAULT_TRUSTED_HOSTS, ApiAccessMiddleware
 
@@ -595,18 +598,71 @@ class Application:
         # >0 while _run_plan() is executing — surfaced in the status payload
         # so the UI can show "recalculating" after plan-affecting edits.
         self._plan_active_count = 0
+        # Bumped whenever a new plan is published (SSE clients watch it).
+        self._plan_seq = 0
+        self._display_plan: EnergyPlan | None = None
+        # Config reload at runtime (reload_config).
+        self._config_text = ""
+        self._reload_lock = asyncio.Lock()
+        self._reloading = False
+        self._runtime_tasks: list[asyncio.Task[None]] = []
+        self._service_tasks: list[asyncio.Task[None]] = []
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
-        """Build all components and launch the three async loops."""
+        """Build all components and launch the async loops."""
         _log.info("Energy Assistant starting  config=%s  db=%s",
                   self._config_path, self._db_path)
+        cfg = self._load_config()
 
+        # Persistent storage — stays open across config reloads.
+        self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._storage = SqliteStorageBackend(self._db_path)
+        await self._storage.start()
+
+        await self._build_runtime(cfg)
+
+        # API + loops.  The API and the history maintenance run for the whole
+        # process lifetime; the other loops belong to the runtime and are
+        # restarted by reload_config().
+        self._api = self._build_api()
+        port = int(os.environ.get("ENERGY_ASSISTANT_PORT", "") or self._cfg.server.get("port", 8088))
+        _log.info("API listening on http://0.0.0.0:%d", port)
+        _log.info("Web UI available at http://localhost:%d", port)
+        self._service_tasks = [
+            asyncio.create_task(self._api_task(port), name="api"),
+            asyncio.create_task(self._retention_loop(), name="retention"),
+        ]
+        self._start_loops()
+        _log.info("All loops started")
+
+    def _load_config(self) -> AppConfig:
+        """Read and parse the config file; remembers its text (``_config_text``)."""
+        text = self._config_path.read_text() if self._config_path.exists() else ""
+        cfg = YamlConfigLoader(self._config_path).load_text(text)
+        self._config_text = text
+        return cfg
+
+    def _start_loops(self) -> None:
+        self._runtime_tasks = [
+            asyncio.create_task(self._polling_loop(), name="polling"),
+            asyncio.create_task(self._planning_loop(), name="planning"),
+            asyncio.create_task(self._control_task(), name="control"),
+        ]
+        self.tasks = [*self._runtime_tasks, *self._service_tasks]
+
+    async def _build_runtime(self, cfg: AppConfig, previous: BuildContext | None = None) -> None:
+        """Build everything that depends on the configuration.
+
+        Called at startup and again by ``reload_config``; *previous* is then
+        the build context of the runtime being replaced, whose connections
+        are reused where the configuration still asks for them.
+        """
         # 1 — Config
-        self._cfg = YamlConfigLoader(self._config_path).load()
+        self._cfg = cfg
         log_level = str(os.environ.get("LOG_LEVEL") or self._cfg.logging.get("level", "INFO")).upper()
         logging.getLogger().setLevel(log_level)
         # httpx logs one INFO line per HTTP request (every device poll) —
@@ -636,7 +692,10 @@ class Application:
         self._horizon = timedelta(hours=horizon_h)
 
         # 2 — Build devices / tariffs / topology (shared connection pool)
-        ctx = make_build_context(self._cfg)
+        SharedPool.begin_build()
+        ctx = make_build_context(self._cfg, previous)
+        if ctx.modbus_pool is not None:
+            ctx.modbus_pool.begin_build()
         # Plugins that keep state across restarts (fitted forecast models)
         # store it next to the database.
         ctx.data_dir = self._db_path.parent
@@ -655,11 +714,6 @@ class Application:
             self._device_forecast_providers.values()
         )
         _log.info("Loaded %d forecast providers", len(self._forecast_providers))
-
-        # 4 — Persistent storage
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._storage = SqliteStorageBackend(self._db_path)
-        await self._storage.start()
 
         # 5 — Event bus
         self._bus = EventBus()
@@ -692,10 +746,6 @@ class Application:
 
         # 7b — Vehicles, chargers and their sessions (assets/fleet.py)
         self._fleet = VehicleFleet(self._cfg.devices)
-        if renames := self._fleet.previous_ids():
-            moved = await self._storage.rename_ev_ids(renames)
-            if moved:
-                _log.info("Moved stored EV data to vehicle ids %s: %s", renames, moved)
         self._fleet.sessions.restore(
             ChargingSession(
                 charger_id=row["charger_id"], vehicle_id=row["vehicle_id"],
@@ -779,8 +829,8 @@ class Application:
                     self._cfg.devices,
                     {d.device_id for d in self._registry.all()},
                 ),
-                # A vehicle replacing an asset keeps its HA entities.
-                uid_slugs={vid: old for old, vid in reversed(self._fleet.previous_ids().items())},
+                # A dry run must not remove the real instance's entities.
+                remove_stale_vehicles=not self._dry_run,
                 chargers=[(cid, spec.display_name) for cid, spec in self._fleet.chargers.items()],
                 on_select_charger=self.select_charger,
                 on_set_guest_mode=lambda mode: self.set_guest_mode(None, mode),
@@ -798,8 +848,7 @@ class Application:
         # plan must not actuate hardware (a spurious 'run' slot switched the
         # aquarium cooler on at startup, and the compressor min-runtime then
         # held it on for 30 min against the refined plan).
-        self._plan_seq = 0
-        self._display_plan: EnergyPlan | None = None
+        self._display_plan = None
 
         async def _on_plan_updated(event: PlanUpdatedEvent) -> None:
             self._control_loop.update_plan(event.plan)
@@ -820,7 +869,8 @@ class Application:
             None,
         )
         self._pv_opportunity_price = 0.0  # refreshed on first planning cycle
-        self._price_history = PriceCurveHistory()
+        if not hasattr(self, "_price_history"):
+            self._price_history = PriceCurveHistory()
         self._tariff_zones = self._build_tariff_zones()
         _log.info(
             "Tariff zones: %s",
@@ -832,19 +882,12 @@ class Application:
         if self._dry_run:
             _log.warning("DRY RUN — control commands will be logged but not sent")
 
-        # 10 — Build API + launch loops
-        self._api = self._build_api()
-        port = int(os.environ.get("ENERGY_ASSISTANT_PORT", "") or self._cfg.server.get("port", 8088))
-        _log.info("API listening on http://0.0.0.0:%d", port)
-        _log.info("Web UI available at http://localhost:%d", port)
-        self.tasks = [
-            asyncio.create_task(self._polling_loop(), name="polling"),
-            asyncio.create_task(self._planning_loop(), name="planning"),
-            asyncio.create_task(self._control_task(), name="control"),
-            asyncio.create_task(self._api_task(port), name="api"),
-            asyncio.create_task(self._retention_loop(), name="retention"),
-        ]
-        _log.info("All loops started")
+        # 10 — Connections the new configuration no longer uses
+        await SharedPool.sweep()
+        if ctx.modbus_pool is not None:
+            await ctx.modbus_pool.sweep()
+        if previous is not None and previous.ha_client not in (None, ctx.ha_client):
+            await previous.ha_client.close()
 
     async def stop(self) -> None:
         """Cancel all running tasks and close the storage backend."""
@@ -860,14 +903,120 @@ class Application:
         _log.info("Energy Assistant stopped")
 
     async def run_forever(self) -> None:
-        """Start and block until all tasks are done (e.g. cancelled by SIGINT)."""
+        """Start and block until a task ends (e.g. cancelled by SIGINT)."""
         await self.start()
         try:
-            await asyncio.gather(*self.tasks)
+            while True:
+                tasks = list(self.tasks)
+                await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                if self._reloading or tasks != self.tasks:
+                    # reload_config() replaced the runtime loops.
+                    async with self._reload_lock:
+                        continue
+                for task in tasks:
+                    if task.done():
+                        task.result()  # a loop must never end: raise what ended it
+                break
         except asyncio.CancelledError:
             pass
         finally:
             await self.stop()
+
+    # ------------------------------------------------------------------
+    # Config reload at runtime
+    # ------------------------------------------------------------------
+
+    @property
+    def config_path(self) -> Path:
+        return self._config_path
+
+    @property
+    def loaded_config_text(self) -> str:
+        """The config file content the running configuration was built from."""
+        return self._config_text
+
+    def running_devices(self) -> dict[str, DeviceSpec]:
+        """The device specs of the running configuration (incl. imported ones)."""
+        return self._cfg.devices
+
+    def ha_client(self) -> HAClient | None:
+        return self._build_ctx.ha_client
+
+    async def check_config_text(self, text: str) -> AppConfig:
+        """Parse and fully validate *text* as config file content, exactly as
+        a start with it would.  Raises ``DeviceConfigError`` (or another
+        exception for problems outside ``devices:``); changes nothing."""
+        cfg = YamlConfigLoader(self._config_path).load_text(text)
+        await import_energy_dashboard(cfg, self._build_ctx.ha_client, self._build_ctx.data_dir)
+        validate_plugins(cfg.devices, cfg.tariffs)
+        return cfg
+
+    async def reload_config(self) -> None:
+        """Apply the config file without restarting the process.
+
+        The file is validated first; an invalid file changes nothing.  Then
+        the polling, planning and control loops are stopped, every component
+        built from the configuration is rebuilt (connections that are still
+        needed stay open) and the loops start again — the same sequence as a
+        restart, in a few seconds, with the API and the database staying up.
+        Stored data (plans, sessions, learned models, savings) is keyed by
+        device id and is picked up again.
+
+        Not applied by a reload: ``server.port``, ``server.api_token`` /
+        ``trusted_hosts`` — they need a restart.
+        """
+        async with self._reload_lock:
+            text = self._config_path.read_text() if self._config_path.exists() else ""
+            await self.check_config_text(text)
+            cfg = YamlConfigLoader(self._config_path).load_text(text)
+            previous_text, previous_ctx = self._config_text, self._build_ctx
+            self._reloading = True
+            try:
+                await self._stop_runtime()
+                try:
+                    await self._build_runtime(cfg, previous_ctx)
+                    self._config_text = text
+                except Exception:
+                    _log.exception("Config reload failed — going back to the previous configuration")
+                    await self._close_devices()
+                    await self._build_runtime(
+                        YamlConfigLoader(self._config_path).load_text(previous_text), previous_ctx
+                    )
+                    raise
+                finally:
+                    self._start_loops()
+            finally:
+                self._reloading = False
+            _log.info("Configuration reloaded: %d devices", len(self._registry))
+
+    async def _stop_runtime(self) -> None:
+        """Stop the loops and everything built from the configuration."""
+        for task in self._runtime_tasks:
+            task.cancel()
+        await asyncio.gather(*self._runtime_tasks, return_exceptions=True)
+        # Let a plan run that is in flight finish on the old runtime.
+        deadline = time.monotonic() + 120.0
+        while self._plan_active_count and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+        try:
+            await self._storage.save_savings_state(self._savings.state.to_dict())
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("Could not save the savings state before the reload: %s", exc)
+        if self._mqtt_publisher is not None:
+            await self._mqtt_publisher.stop()
+            self._mqtt_publisher = None
+        await self._close_devices()
+
+    async def _close_devices(self) -> None:
+        """Stop the background work of devices that own some (pollers)."""
+        for device in self._registry.all():
+            close = getattr(device, "close", None)
+            if close is None:
+                continue
+            try:
+                await close()
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("Could not close device %r: %s", device.device_id, exc)
 
     # ------------------------------------------------------------------
     # EV charge-plan helpers
@@ -1290,6 +1439,8 @@ class Application:
 
     async def _run_plan(self) -> None:
         """Assemble context, optimize, publish plan, refresh price cache."""
+        if self._reloading:
+            return  # the new runtime plans as soon as it is up
         self._plan_active_count += 1
         try:
             await self._run_plan_inner()
@@ -2647,7 +2798,7 @@ class Application:
                 # Default: storage + meter + PV devices
                 ids = [sc.device_id for sc in self._storage_constraints]
                 for device in self._registry.by_category(
-                    DeviceCategory.GRID_METER, DeviceCategory.METER, DeviceCategory.PV
+                    DeviceCategory.METER, DeviceCategory.PV
                 ):
                     ids.append(device.device_id)
                 ids = list(dict.fromkeys(ids))  # deduplicate preserving order
@@ -2713,6 +2864,9 @@ class Application:
                     for sc in self._storage_constraints
                 ],
             }
+
+        # ── Configuration editor (server/config_api.py) ────────────────
+        mount_config_api(api, self)
 
         # ── EV charging targets ────────────────────────────────────────
 

@@ -23,10 +23,11 @@ referenced with the ``!secret`` tag::
 ``secrets.yaml`` lives alongside ``config.yaml`` and must be gitignored.
 See ``energy_assistant.secrets.SecretsManager`` for the full resolution rules.
 
-Read-only
----------
-Changes to ``config.yaml`` require a restart.  Phase 2 will introduce
-hot-reloadable JSON entries without changing the rest of the platform.
+Changes at runtime
+------------------
+The loader only reads.  Device entries are edited by ``config/store``
+(configuration UI); ``server.Application.reload_config`` applies a changed
+file without a restart.
 """
 
 from __future__ import annotations
@@ -43,7 +44,7 @@ from ..core.config import (
     MqttConfig,
 )
 from ..core.device_model import DeviceConfigError, parse_devices
-from ..secrets import SecretsManager
+from ..secrets import SecretNotFoundError, SecretsManager
 
 
 def _make_loader(secrets: SecretsManager) -> type[yaml.SafeLoader]:
@@ -86,15 +87,26 @@ class YamlConfigLoader:
         """
         if not self._path.exists():
             return AppConfig()
+        return self.load_text(self._path.read_text())
 
-        with self._path.open() as f:
-            raw: dict[str, Any] = yaml.load(f, Loader=self._loader) or {}  # noqa: S506
+    def load_text(self, text: str) -> AppConfig:
+        """Parse *text* as the content of the config file (``!secret`` tags are
+        resolved as for the file itself).  Used to check an edited config
+        before it is written."""
+        try:
+            raw: dict[str, Any] = yaml.load(text, Loader=self._loader) or {}
+        except SecretNotFoundError as exc:
+            raise DeviceConfigError([
+                f"secret {exc.name!r} is not defined in secrets.yaml"
+            ]) from exc
+        except yaml.YAMLError as exc:
+            raise DeviceConfigError([f"config.yaml is not valid YAML: {exc}"]) from exc
 
         if "topology" in raw:
             raise DeviceConfigError([(
                 "the 'topology:' section was removed — set 'metered_by: <meter id>' on each "
                 "device instead, and move max_import_kw / curtail_order / "
-                "limit_hysteresis_kw to the grid_meter's 'params:'"
+                "limit_hysteresis_kw to the 'params:' of the grid connection meter"
             )])
         if raw.get("assets"):
             raise DeviceConfigError([_assets_hint(raw["assets"])])
@@ -112,13 +124,26 @@ class YamlConfigLoader:
         removed = _removed_types(raw)
         if removed:
             raise DeviceConfigError(removed)
+        # Check everything and report all problems together.
+        from ..loader.config_validation import validate_sections
+
+        if not isinstance(raw, dict):
+            raise DeviceConfigError(["the config file must be a mapping of sections"])
+        errors = validate_sections(raw)
+        devices = {}
+        try:
+            devices = parse_devices(_normalize_devices(raw.get("devices") or {}))
+        except DeviceConfigError as exc:
+            errors.extend(exc.errors)
+        if errors:
+            raise DeviceConfigError(errors)
         backends = _parse_backends(raw.get("backends") or {})
         raw_tariffs: dict[str, Any] = raw.get("tariffs") or {}
         default_tariff_id = _find_default_tariff(raw_tariffs)
         return AppConfig(
             backends=backends,
             tariffs=raw_tariffs,
-            devices=parse_devices(_normalize_devices(raw.get("devices") or {})),
+            devices=devices,
             forecasts=_normalize_forecasts(raw.get("forecasts") or {}),
             optimizer=raw.get("optimizer") or {},
             controller=raw.get("controller") or {},
@@ -129,12 +154,15 @@ class YamlConfigLoader:
         )
 
 
+#: Device plugin types that were renamed: old → new.
+_RENAMED_DEVICE_TYPES = {"tibber": "tibber_cloud"}
+
 #: Plugin types that were removed, with what to use instead.
 _REMOVED_TYPES = {
     "generic_iobroker": "generic_homeassistant (capabilities.power_w), tasmota or tibber_local",
     "sma_modbus_iobroker": "modbus (profile: sma_sunny_boy_storage)",
     "zendure_iobroker": "zendure",
-    "tibber_iobroker": "tibber",
+    "tibber_iobroker": "tibber (tariff) or tibber_cloud (meter)",
     "pvforecast_iobroker": "forecast_solar",
 }
 
@@ -150,6 +178,9 @@ def _removed_types(raw: dict[str, Any]) -> list[str]:
     for section, entries in sections.items():
         for entry_id, cfg in entries.items():
             type_name = cfg.get("type") if isinstance(cfg, dict) else None
+            if section == "devices" and type_name in _RENAMED_DEVICE_TYPES:
+                errors.append(f"devices: {entry_id}: type {type_name!r} was renamed to "
+                              f"{_RENAMED_DEVICE_TYPES[type_name]!r}")
             if type_name in _REMOVED_TYPES:
                 errors.append(f"{section}: {entry_id}: type {type_name!r} was removed with the "
                               f"ioBroker support — use {_REMOVED_TYPES[type_name]}")
@@ -164,8 +195,7 @@ def _assets_hint(assets: Any) -> str:
     }
     parts = []
     if "ev" in kinds:
-        parts.append("EVs are 'category: vehicle' devices (capacity, charge curve, SoC entity; "
-                     "params.previous_ids: [<old asset id>] keeps their stored plans) with "
+        parts.append("EVs are 'category: vehicle' devices (capacity, charge curve, SoC entity) with "
                      "'params: {default_vehicle: <car>, min_power_kw, max_power_kw}' on the charger")
     if "threshold" in kinds:
         parts.append("threshold loads are 'category: thermal_load' devices (thresholds, rates "

@@ -75,6 +75,10 @@ class SecretsManager:
         self._cache = {str(k): str(v) for k, v in data.items()}
         return self._cache
 
+    def names(self) -> list[str]:
+        """Names of the secrets defined in secrets.yaml (never their values)."""
+        return sorted(self._load_file())
+
     def reload(self) -> None:
         """Invalidate the cached secrets file, forcing a fresh load."""
         self._cache = None

@@ -74,6 +74,7 @@ import aiomqtt
 from ...core.config import MqttConfig
 from ...core.device_model import DeviceCategory
 from ...core.models import DeviceCommand, DeviceState
+from ...core.plugin_registry import SharedPool
 
 _log = logging.getLogger(__name__)
 
@@ -270,16 +271,14 @@ class OpenWBMqttBridge:
 
 # Shared bridges keyed by (host, port, root_topic) so multiple chargepoints
 # on the same wallbox reuse one connection.
-_bridges: dict[tuple[str, int, str], OpenWBMqttBridge] = {}
+_bridges: SharedPool[tuple[str, int, str], OpenWBMqttBridge] = SharedPool(
+    stop=lambda bridge: bridge.stop()
+)
 
 
 def get_bridge(cfg: MqttConfig, root_topic: str) -> OpenWBMqttBridge:
     key = (cfg.host, cfg.port, root_topic.rstrip("/"))
-    bridge = _bridges.get(key)
-    if bridge is None:
-        bridge = OpenWBMqttBridge(cfg, root_topic)
-        _bridges[key] = bridge
-    return bridge
+    return _bridges.get(key, lambda: OpenWBMqttBridge(cfg, root_topic))
 
 
 # ---------------------------------------------------------------------------

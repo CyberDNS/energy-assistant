@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from ...core.device_model import Capability as Cap
 from ...core.device_model import DeviceCategory as C
+from ...core.device_model import ParamSpec
 from ...core.plugin_registry import PluginRegistry
 from .device import OpenWBDevice
 
@@ -19,8 +20,30 @@ from .device import OpenWBDevice
 def register(registry: PluginRegistry) -> None:
     registry.register_device(
         "openwb_homeassistant", _build,
+        title="openWB (via Home Assistant)",
         categories={C.CHARGER},
         provides={Cap.POWER_W, Cap.PLUGGED, Cap.POWER_SETPOINT},
+        settings={
+            "entity_mode": ParamSpec(str, required=True, entity=True, label="Charge mode entity",
+                                     description="Charge mode select entity"),
+            "entity_soc": ParamSpec(str, required=True, entity=True, label="SoC entity",
+                                    description="SoC sensor of the chargepoint"),
+            "entity_power": ParamSpec(str, entity=True, label="Power entity", description="Charging power sensor"),
+            "entity_plugged": ParamSpec(str, entity=True, label="Plug state entity", description="Plug state sensor"),
+            "entity_soc_limit_instant": ParamSpec(str, entity=True, advanced=True,
+                                                  label="Instant SoC limit entity",
+                                                  description="Instant charging SoC limit entity"),
+            "entity_current_instant": ParamSpec(str, entity=True, advanced=True,
+                                                label="Instant current entity",
+                                                description="Instant charging current entity"),
+            "phases": ParamSpec(int, minimum=1, maximum=3, default=3,
+                                description="Phases the chargepoint charges with"),
+            "voltage_v": ParamSpec(float, advanced=True, minimum=0, exclusive_minimum=True, default=230.0),
+            "mode_pv": ParamSpec(str, advanced=True, default="PV Charging", description="Option text for PV mode"),
+            "mode_instant": ParamSpec(str, advanced=True, default="Instant Charging",
+                                      description="Option text for instant mode"),
+            "mode_stop": ParamSpec(str, advanced=True, default="Stop", description="Option text for stop"),
+        },
     )
 
 

@@ -11,7 +11,7 @@ Config shape::
 
     devices:
       - id: main_grid_meter
-        category: grid_meter
+        category: meter                     # no metered_by: the grid connection
         type: tasmota                       # plugin
         host: 192.168.3.46                  # plugin settings
         profile: iskra_mt175
@@ -37,7 +37,7 @@ Connections
 -----------
 ``metered_by``     the meter this device sits behind.  Builds the metering
                    tree (``core/topology.build_topology``) whose root is the
-                   ``grid_meter``.
+                   meter without ``metered_by`` — the grid connection.
 ``controlled_by``  the switch (or charger) that executes this device's plan.
 ``included_in``    a consumer whose meter already contains this consumer's
                    load (HA Energy dashboard nesting, residual learning).
@@ -57,14 +57,13 @@ class DeviceConfigError(ValueError):
     def __init__(self, errors: list[str]) -> None:
         self.errors = list(errors)
         super().__init__(
-            "Invalid devices configuration:\n" + "\n".join(f"  - {e}" for e in self.errors)
+            "Invalid configuration:\n" + "\n".join(f"  - {e}" for e in self.errors)
         )
 
 
 class DeviceCategory(str, Enum):
     """What a device *is* in the energy system."""
 
-    GRID_METER = "grid_meter"
     METER = "meter"
     PV = "pv"
     BATTERY = "battery"
@@ -77,8 +76,8 @@ class DeviceCategory(str, Enum):
 
     @property
     def is_meter(self) -> bool:
-        """True for the grid meter and sub-meters."""
-        return self in (DeviceCategory.GRID_METER, DeviceCategory.METER)
+        """True for meters (the grid connection meter and sub-meters)."""
+        return self is DeviceCategory.METER
 
 
 class Capability(str, Enum):
@@ -116,7 +115,8 @@ class ParamSpec:
     """One model parameter of a category."""
 
     kind: type
-    """``float``, ``int``, ``bool``, ``str``, ``list`` or ``dict``."""
+    """``float``, ``int``, ``bool``, ``str``, ``list``, ``dict`` or ``object``
+    (any scalar or list)."""
     required: bool = False
     choices: tuple[str, ...] = ()
     minimum: float | None = None
@@ -125,10 +125,129 @@ class ParamSpec:
     description: str = ""
     validator: Callable[[Any], str | None] | None = None
     """Extra check of the value's content; returns an error text or None."""
+    default: Any = None
+    """Value used when the key is left out (shown as a hint in the config UI)."""
+    secret: bool = False
+    """A password or token: belongs in secrets.yaml (``!secret name``) and is
+    never sent to the config UI."""
+    ref: tuple[str, ...] = ()
+    """The value is a device id; the categories it may name (``"*"`` = any).
+    The config UI offers those devices in a dropdown."""
+    entity: bool = False
+    """The value is a Home Assistant entity id."""
+    tariff: bool = False
+    """The value is a tariff id."""
+    items: ParamSpec | None = None
+    """``list``: the spec of each item."""
+    fields: Mapping[str, ParamSpec] | None = None
+    """``dict`` with fixed keys: the spec of each key (other keys are errors)."""
+    values: ParamSpec | None = None
+    """``dict`` with free keys: the spec of each value."""
+    plugin: str = ""
+    """``dict`` that configures a plugin, selected by its ``type`` key:
+    ``"forecast"``.  Checked against that plugin's settings."""
+    restart: bool = False
+    """A change only takes effect after a restart (not by a config reload)."""
+    label: str = ""
+    """Short title for the config UI (default: the key)."""
+    widget: str = ""
+    """Name of a dedicated editor in the config UI (e.g. ``load_profile``)."""
+    when: Mapping[str, Any] | None = None
+    """The setting only applies while sibling settings have these values:
+    ``{key: value}`` or ``{key: (value, …)}``; ``"*"`` = any value, ``None`` =
+    not set.  An unset sibling counts with its default.  ``required`` only
+    holds while the condition does, and the config UI hides the field
+    otherwise."""
+    advanced: bool = False
+    """Rarely needed: the config UI keeps it under "More settings"."""
+    legacy: bool = False
+    """Still accepted, but only offered by the config UI where it is in use."""
+
+    def _check_nested(self, value: Any) -> str | None:
+        """Check list items and dict keys / values against their specs."""
+        if self.items is not None and isinstance(value, list):
+            for i, item in enumerate(value):
+                if (problem := self.items.check(item)) is not None:
+                    return f"[{i + 1}] {problem}"
+        if (self.fields is not None and isinstance(value, Mapping)
+                and (problems := check_fields(value, self.fields))):
+            return "; ".join(problems)
+        if self.values is not None and isinstance(value, Mapping):
+            for key, item in value.items():
+                if (problem := self.values.check(item)) is not None:
+                    return f"{key}: {problem}"
+        return None
+
+    def applies(self, values: Mapping[str, Any], specs: Mapping[str, ParamSpec]) -> bool:
+        """Whether the ``when`` condition holds for the sibling *values*."""
+        for key, wanted in (self.when or {}).items():
+            value = values.get(key)
+            if value in (None, "") and key in specs:
+                value = specs[key].default
+            if wanted is None:
+                ok = value in (None, "", [], {})
+            elif wanted == "*":
+                ok = value not in (None, "", [], {})
+            else:
+                ok = value in wanted if isinstance(wanted, tuple) else value == wanted
+            if not ok:
+                return False
+        return True
+
+    def to_dict(self, key: str = "") -> dict[str, Any]:
+        """JSON form for the config UI (``GET /api/config/schema``).  *key* is
+        the setting's name; it gives the label when none is set."""
+        out: dict[str, Any] = {"kind": self.kind.__name__, "required": self.required}
+        if key:
+            out["label"] = self.label or humanize(key)
+        if self.choices:
+            out["choices"] = list(self.choices)
+        if self.minimum is not None:
+            out["minimum"] = self.minimum
+            out["exclusive_minimum"] = self.exclusive_minimum
+        if self.maximum is not None:
+            out["maximum"] = self.maximum
+        if self.description:
+            out["description"] = self.description
+        if self.default is not None:
+            out["default"] = self.default
+        if self.secret:
+            out["secret"] = True
+        if self.ref:
+            out["ref"] = list(self.ref)
+        if self.entity:
+            out["entity"] = True
+        if self.tariff:
+            out["tariff"] = True
+        if self.items is not None:
+            out["items"] = self.items.to_dict()
+        if self.fields is not None:
+            out["fields"] = specs_to_dict(self.fields)
+        if self.values is not None:
+            out["values"] = self.values.to_dict()
+        if self.plugin:
+            out["plugin"] = self.plugin
+        if self.restart:
+            out["restart"] = True
+        if self.label:
+            out["label"] = self.label
+        if self.widget:
+            out["widget"] = self.widget
+        if self.when:
+            out["when"] = {k: list(v) if isinstance(v, tuple) else v for k, v in self.when.items()}
+        if self.advanced:
+            out["advanced"] = True
+        if self.legacy:
+            out["legacy"] = True
+        if self.kind is object:
+            out["kind"] = "any"
+        return out
 
     def check(self, value: Any) -> str | None:
         """Return an error text for *value*, or None when it is valid."""
-        if self.kind is float:
+        if self.kind is object:
+            ok = isinstance(value, (str, int, float, bool, list, Mapping))
+        elif self.kind is float:
             ok = isinstance(value, (int, float)) and not isinstance(value, bool)
         elif self.kind is int:
             ok = isinstance(value, int) and not isinstance(value, bool)
@@ -136,6 +255,8 @@ class ParamSpec:
             ok = isinstance(value, self.kind)
         if not ok:
             return f"must be a {self.kind.__name__}, got {value!r}"
+        if (problem := self._check_nested(value)) is not None:
+            return problem
         if self.choices and value not in self.choices:
             return f"must be one of {', '.join(self.choices)}, got {value!r}"
         too_small = self.minimum is not None and isinstance(value, (int, float)) and (
@@ -151,12 +272,72 @@ class ParamSpec:
         return None
 
 
+_UNITS = (
+    ("_eur_per_kwh", "€/kWh"), ("_per_h", "per h"), ("_kwh", "kWh"), ("_kwp", "kWp"),
+    ("_kw", "kW"), ("_pct", "%"), ("_eur", "€"), ("_min", "min"), ("_minutes", "min"),
+    ("_hours", "h"), ("_days", "days"), ("_w", "W"), ("_v", "V"), ("_a", "A"), ("_s", "s"),
+    ("_h", "h"), ("_c", "°C"), ("_km", "km"),
+)
+_WORDS = {"soc": "SoC", "ha": "Home Assistant", "id": "ID", "ids": "IDs", "url": "URL",
+          "api": "API", "pv": "PV", "ev": "EV", "mqtt": "MQTT", "kwp": "kWp"}
+
+
+def humanize(key: str) -> str:
+    """A readable label for a config key: ``max_charge_kw`` → "Max charge (kW)"."""
+    unit = ""
+    for suffix, text in _UNITS:
+        if key.endswith(suffix) and len(key) > len(suffix):
+            key, unit = key[: -len(suffix)], f" ({text})"
+            break
+    words = [_WORDS.get(w, w) for w in key.split("_") if w]
+    if words and words[0].islower():
+        words[0] = words[0].capitalize()
+    return " ".join(words) + unit
+
+
+def specs_to_dict(specs: Mapping[str, ParamSpec]) -> dict[str, Any]:
+    """``{key: spec}`` in JSON form, each with its label."""
+    return {name: spec.to_dict(name) for name, spec in specs.items()}
+
+
+#: Display names of the capabilities.
+CAPABILITY_TITLES = {
+    "power_w": "Power", "energy_in_kwh": "Energy consumed", "energy_out_kwh": "Energy fed in",
+    "phase_power_w": "Power per phase", "soc_pct": "State of charge", "range_km": "Range",
+    "plugged": "Plugged in", "location_home": "At home", "temperature_c": "Temperature",
+    "switch": "On/off switch", "power_setpoint": "Power control", "phases": "Phase switching",
+}
+
+
+def check_fields(
+    values: Mapping[str, Any], specs: Mapping[str, ParamSpec], *, what: str = "key"
+) -> list[str]:
+    """Problems of the mapping *values* against *specs*: unknown keys, wrong
+    values and missing required keys.  An empty value counts as left out."""
+    problems: list[str] = []
+    for name, value in values.items():
+        spec = specs.get(name)
+        if spec is None:
+            problems.append(f"unknown {what} {name!r} (allowed: {', '.join(specs) or 'none'})")
+        elif value is None:
+            continue
+        elif (problem := spec.check(value)) is not None:
+            problems.append(f"{name} {problem}")
+    for name, spec in specs.items():
+        if spec.required and values.get(name) in (None, "") and spec.applies(values, specs):
+            problems.append(f"{what} {name!r} is required"
+                            + (f" ({spec.description})" if spec.description else ""))
+    return problems
+
+
 @dataclass(frozen=True)
 class CategorySchema:
     """Rules for one device category."""
 
     category: DeviceCategory
     description: str
+    title: str = ""
+    """Display name (default: the category name, humanized)."""
     required_capabilities: frozenset[Capability] = frozenset()
     optional_capabilities: frozenset[Capability] = frozenset()
     params: Mapping[str, ParamSpec] = field(default_factory=dict)
@@ -167,6 +348,21 @@ class CategorySchema:
     def capabilities(self) -> frozenset[Capability]:
         return self.required_capabilities | self.optional_capabilities
 
+    def to_dict(self) -> dict[str, Any]:
+        """JSON form for the config UI (``GET /api/config/schema``)."""
+        return {
+            "category": self.category.value,
+            "title": self.title or humanize(self.category.value),
+            "description": self.description,
+            "required_capabilities": sorted(c.value for c in self.required_capabilities),
+            "optional_capabilities": sorted(c.value for c in self.optional_capabilities),
+            "params": specs_to_dict(self.params),
+            "connections": {
+                conn.value: sorted(c.value for c in targets)
+                for conn, targets in self.connections.items()
+            },
+        }
+
 
 def _caps(*names: Capability) -> frozenset[Capability]:
     return frozenset(names)
@@ -174,26 +370,32 @@ def _caps(*names: Capability) -> frozenset[Capability]:
 
 _C = Capability
 _K = DeviceCategory
-_METERS = frozenset({_K.GRID_METER, _K.METER})
+_METERS = frozenset({_K.METER})
 _METERED = {ConnectionType.METERED_BY: _METERS}
 
 _BATTERY_PARAMS = {
-    "capacity_kwh": ParamSpec(float, required=True, minimum=0, exclusive_minimum=True,
+    "capacity_kwh": ParamSpec(float, label="Usable capacity (kWh)", required=True, minimum=0, exclusive_minimum=True,
                               description="Usable capacity (kWh)"),
-    "max_charge_kw": ParamSpec(float, required=True, minimum=0, description="Max charge power (kW)"),
-    "max_discharge_kw": ParamSpec(float, required=True, minimum=0,
+    "max_charge_kw": ParamSpec(float, label="Max charge power (kW)", required=True, minimum=0, description="Max charge power (kW)"),
+    "max_discharge_kw": ParamSpec(float, label="Max discharge power (kW)", required=True, minimum=0,
                                   description="Max discharge power (kW)"),
-    "min_soc_pct": ParamSpec(float, minimum=0, maximum=100, description="Lowest planned SoC (%)"),
-    "max_soc_pct": ParamSpec(float, minimum=0, maximum=100, description="Highest planned SoC (%)"),
-    "charge_efficiency": ParamSpec(float, minimum=0, exclusive_minimum=True, maximum=1),
-    "discharge_efficiency": ParamSpec(float, minimum=0, exclusive_minimum=True, maximum=1),
-    "efficiency": ParamSpec(str, choices=("configured", "learned"),
+    "min_soc_pct": ParamSpec(float, default=0, label="Lowest SoC (%)", minimum=0, maximum=100, description="Lowest planned SoC (%)"),
+    "max_soc_pct": ParamSpec(float, default=100, label="Highest SoC (%)", minimum=0, maximum=100, description="Highest planned SoC (%)"),
+    "charge_efficiency": ParamSpec(float, default=0.95, description="Share of the charged energy that ends up stored", minimum=0, exclusive_minimum=True, maximum=1),
+    "discharge_efficiency": ParamSpec(float, default=0.95, description="Share of the stored energy that comes out", minimum=0, exclusive_minimum=True, maximum=1),
+    "efficiency": ParamSpec(str, default="configured", label="Efficiency used for planning", choices=("configured", "learned"),
                             description="Plan with the configured or the learned round trip"),
-    "efficiency_learning": ParamSpec(dict, description="history_days, min_cycles, refit_interval_h"),
-    "purchase_price_eur": ParamSpec(float, minimum=0, description="Hardware price, for wear cost"),
-    "cycle_life": ParamSpec(int, minimum=1, description="Rated full cycles, for wear cost"),
-    "no_grid_charge": ParamSpec(bool, description="Charge from PV surplus only"),
-    "standby_w": ParamSpec(float, minimum=0, description="Power treated as standby/noise (W)"),
+    "efficiency_learning": ParamSpec(dict, when={"efficiency": "learned"}, advanced=True, label="Efficiency learning", description="How the round trip is learned", fields={
+        "history_days": ParamSpec(float, minimum=1, default=14, description="Days of history used"),
+        "min_cycles": ParamSpec(float, minimum=0, default=3,
+                                description="Full cycles needed before an estimate counts"),
+        "refit_interval_h": ParamSpec(float, minimum=0, exclusive_minimum=True, default=6,
+                                      description="Hours between refits"),
+    }),
+    "purchase_price_eur": ParamSpec(float, label="Purchase price (€)", minimum=0, description="Hardware price, for wear cost"),
+    "cycle_life": ParamSpec(int, label="Cycle life (full cycles)", minimum=1, description="Rated full cycles, for wear cost"),
+    "no_grid_charge": ParamSpec(bool, default=False, label="Charge from PV only", description="Charge from PV surplus only"),
+    "standby_w": ParamSpec(float, default=50, advanced=True, label="Standby threshold (W)", minimum=0, description="Power treated as standby/noise (W)"),
 }
 
 def _check_charge_curve(value: Any) -> str | None:
@@ -231,75 +433,87 @@ GUEST_MODES = ("pv_only", "instant", "off")
 _VEHICLE_PARAMS = {
     "capacity_kwh": ParamSpec(float, required=True, minimum=0, exclusive_minimum=True,
                               description="Usable battery capacity (kWh)"),
-    "charge_limit_soc_pct": ParamSpec(float, minimum=0, maximum=100,
+    "charge_limit_soc_pct": ParamSpec(float, label="Charge limit (%)", minimum=0, maximum=100,
                                       description="Ceiling the optimizer charges to"),
     "max_charge_kw": ParamSpec(float, minimum=0, exclusive_minimum=True,
                                description="On-board charger limit (kW); default: the charger's"),
-    "charge_curve": ParamSpec(list, validator=_check_charge_curve,
-                              description="[{soc_pct, efficiency}] charging efficiency per SoC"),
-    "timezone": ParamSpec(str, description="Time zone of the weekly plan (default Europe/Berlin)"),
-    "charger_ids": ParamSpec(dict, validator=_check_charger_ids,
-                             description="This vehicle's id in a charger system, e.g. {openwb_mqtt: 1}"),
-    "push_soc_to_charger": ParamSpec(bool, description="Publish the (estimated) SoC to the charger"),
-    "refresh_after_min": ParamSpec(float, minimum=1,
+    "charge_curve": ParamSpec(
+        list, label="Charge curve", validator=_check_charge_curve,
+        description="Charging efficiency up to each SoC, ascending (the taper near full)",
+        items=ParamSpec(dict, fields={
+            "soc_pct": ParamSpec(float, required=True, minimum=0, exclusive_minimum=True,
+                                 maximum=100, label="up to SoC (%)"),
+            "efficiency": ParamSpec(float, required=True, minimum=0, exclusive_minimum=True,
+                                    maximum=1, label="efficiency (0–1)"),
+        }),
+    ),
+    "timezone": ParamSpec(str, advanced=True, default="Europe/Berlin", description="Time zone of the weekly plan (default Europe/Berlin)"),
+    "charger_ids": ParamSpec(dict, label="ID in the charger system", validator=_check_charger_ids, values=ParamSpec(object),
+                             description="This vehicle's id in a charger system, e.g. openwb_mqtt → 1"),
+    "push_soc_to_charger": ParamSpec(bool, default=False, label="Send SoC to the charger", description="Publish the (estimated) SoC to the charger"),
+    "refresh_after_min": ParamSpec(float, label="Refresh when SoC is older than (min)", minimum=1,
                                    description="Press the refresh button when the car's SoC is "
                                                "older than this while charging"),
-    "previous_ids": ParamSpec(list, validator=_check_str_list,
-                              description="Former asset ids whose stored plans are migrated"),
 }
 
 _CHARGER_PARAMS = {
-    "min_power_kw": ParamSpec(float, minimum=0, description="Lowest charging power (kW)"),
-    "max_power_kw": ParamSpec(float, minimum=0, exclusive_minimum=True,
+    "min_power_kw": ParamSpec(float, label="Lowest charging power (kW)", minimum=0, description="Lowest charging power (kW)"),
+    "max_power_kw": ParamSpec(float, label="Highest charging power (kW)", minimum=0, exclusive_minimum=True,
                               description="Highest charging power (kW)"),
-    "default_vehicle": ParamSpec(str, description="Vehicle assigned on plug-in"),
-    "guest_mode": ParamSpec(str, choices=GUEST_MODES,
+    "default_vehicle": ParamSpec(str, label="Default vehicle", ref=("vehicle",), description="Vehicle assigned on plug-in"),
+    "guest_mode": ParamSpec(str, default="pv_only", label="Guest car charging", choices=GUEST_MODES,
                             description="Behaviour for an unknown car (default pv_only)"),
 }
 
 _THERMAL_PARAMS = {
-    "bottom_threshold": ParamSpec(float, required=True,
+    "bottom_threshold": ParamSpec(float, label="Lower threshold", required=True,
                                   description="Lower bound of the allowed range (e.g. °C)"),
-    "top_threshold": ParamSpec(float, required=True,
+    "top_threshold": ParamSpec(float, label="Upper threshold", required=True,
                                description="Upper bound of the allowed range"),
-    "direction": ParamSpec(str, choices=("reduces", "increases"),
+    "direction": ParamSpec(str, default="reduces", label="Running the device", choices=("reduces", "increases"),
                            description="reduces (cooler, default) or increases (heater) the value"),
-    "unit": ParamSpec(str, description="Display unit (default °C)"),
-    "active_rate_per_h": ParamSpec(float, required=True, minimum=0, exclusive_minimum=True,
+    "unit": ParamSpec(str, default="°C", advanced=True, label="Display unit", description="Display unit (default °C)"),
+    "active_rate_per_h": ParamSpec(float, label="Change per hour while running", required=True, minimum=0, exclusive_minimum=True,
                                    description="Change per hour while running (fallback model)"),
-    "drift_rate_per_h": ParamSpec(float, required=True, minimum=0,
+    "drift_rate_per_h": ParamSpec(float, label="Drift per hour while off", required=True, minimum=0,
                                   description="Drift per hour while off (fallback model)"),
-    "min_runtime_h": ParamSpec(float, minimum=0, description="Minimum on-time (compressor)"),
-    "min_offtime_h": ParamSpec(float, minimum=0, description="Minimum off-time (compressor)"),
+    "min_runtime_h": ParamSpec(float, default=0, label="Minimum run time (h)", minimum=0, description="Minimum on-time (compressor)"),
+    "min_offtime_h": ParamSpec(float, default=0, label="Minimum off time (h)", minimum=0, description="Minimum off-time (compressor)"),
+}
+
+#: Params of the grid connection meter (the meter without ``metered_by``).
+_GRID_ONLY = {"metered_by": None}
+_GRID_PARAMS = {
+    "max_import_kw": ParamSpec(float, minimum=0, exclusive_minimum=True, when=_GRID_ONLY,
+                               label="Grid connection limit (kW)",
+                               description="The plan and the control loop keep the import below it"),
+    "curtail_order": ParamSpec(list, items=ParamSpec(str, ref=("*",)), when=_GRID_ONLY,
+                               label="Curtail order",
+                               description="Devices reduced first → last when the limit is "
+                                           "reached (default: batteries, then chargers)"),
+    "limit_hysteresis_kw": ParamSpec(float, minimum=0, when=_GRID_ONLY, advanced=True,
+                                     label="Limit hysteresis (kW)",
+                                     description="Release the curtailment this far below the "
+                                                 "limit (default: 5 % of it)"),
 }
 
 CATEGORY_SCHEMAS: dict[DeviceCategory, CategorySchema] = {
     s.category: s
     for s in (
         CategorySchema(
-            _K.GRID_METER,
-            "Meter at the grid connection point; root of the metering tree.",
-            required_capabilities=_caps(_C.POWER_W),
-            optional_capabilities=_caps(_C.ENERGY_IN_KWH, _C.ENERGY_OUT_KWH, _C.PHASE_POWER_W),
-            params={
-                "max_import_kw": ParamSpec(float, minimum=0, exclusive_minimum=True,
-                                           description="Grid connection limit (kW)"),
-                "curtail_order": ParamSpec(list,
-                                           description="Device ids curtailed first → last"),
-                "limit_hysteresis_kw": ParamSpec(float, minimum=0,
-                                                 description="Release curtailment this far below"),
-            },
-        ),
-        CategorySchema(
             _K.METER,
-            "Sub-meter; defines a metering (tariff) zone.",
+            "Electricity meter. The one meter that is not behind another is the grid "
+            "connection; the others are sub-meters and define a tariff zone.",
+            title="Meter",
             required_capabilities=_caps(_C.POWER_W),
             optional_capabilities=_caps(_C.ENERGY_IN_KWH, _C.ENERGY_OUT_KWH, _C.PHASE_POWER_W),
+            params=_GRID_PARAMS,
             connections=_METERED,
         ),
         CategorySchema(
             _K.PV,
             "PV generation (producer).",
+            title="PV system",
             required_capabilities=_caps(_C.POWER_W),
             optional_capabilities=_caps(_C.ENERGY_OUT_KWH),
             connections=_METERED,
@@ -307,6 +521,7 @@ CATEGORY_SCHEMAS: dict[DeviceCategory, CategorySchema] = {
         CategorySchema(
             _K.BATTERY,
             "Stationary battery (storage).",
+            title="Battery",
             required_capabilities=_caps(_C.POWER_W, _C.SOC_PCT),
             optional_capabilities=_caps(_C.POWER_SETPOINT),
             params=_BATTERY_PARAMS,
@@ -315,6 +530,7 @@ CATEGORY_SCHEMAS: dict[DeviceCategory, CategorySchema] = {
         CategorySchema(
             _K.VEHICLE,
             "Electric vehicle; charged through a charger session.",
+            title="Vehicle",
             required_capabilities=_caps(_C.SOC_PCT),
             optional_capabilities=_caps(_C.RANGE_KM, _C.PLUGGED, _C.LOCATION_HOME),
             params=_VEHICLE_PARAMS,
@@ -322,6 +538,7 @@ CATEGORY_SCHEMAS: dict[DeviceCategory, CategorySchema] = {
         CategorySchema(
             _K.CHARGER,
             "EV charger; executes a vehicle's charging plan.",
+            title="Charger",
             required_capabilities=_caps(_C.POWER_W, _C.PLUGGED),
             optional_capabilities=_caps(_C.POWER_SETPOINT, _C.PHASES),
             params=_CHARGER_PARAMS,
@@ -331,6 +548,7 @@ CATEGORY_SCHEMAS: dict[DeviceCategory, CategorySchema] = {
             _K.THERMAL_LOAD,
             "Load kept between two thresholds (aquarium cooler, fridge, heater); "
             "switched by the switch it is controlled_by.",
+            title="Thermal load",
             required_capabilities=_caps(_C.TEMPERATURE_C),
             params=_THERMAL_PARAMS,
             connections={**_METERED, ConnectionType.CONTROLLED_BY: frozenset({_K.SWITCH})},
@@ -338,15 +556,17 @@ CATEGORY_SCHEMAS: dict[DeviceCategory, CategorySchema] = {
         CategorySchema(
             _K.SWITCH,
             "On/off switch (plug, relay); executes another device's plan.",
+            title="Switch",
             required_capabilities=_caps(_C.SWITCH),
             optional_capabilities=_caps(_C.POWER_W, _C.ENERGY_IN_KWH),
-            params={"rated_power_w": ParamSpec(float, minimum=0, exclusive_minimum=True,
+            params={"rated_power_w": ParamSpec(float, label="Power while on (W)", minimum=0, exclusive_minimum=True,
                                                description="Power drawn by the load while on (W)")},
             connections=_METERED,
         ),
         CategorySchema(
             _K.CONSUMER,
             "Inflexible load (measured or virtual), with a forecast.",
+            title="Consumer",
             optional_capabilities=_caps(_C.POWER_W, _C.ENERGY_IN_KWH, _C.PHASE_POWER_W),
             connections={
                 **_METERED,
@@ -357,6 +577,7 @@ CATEGORY_SCHEMAS: dict[DeviceCategory, CategorySchema] = {
         CategorySchema(
             _K.SENSOR,
             "Input only (temperature, …).",
+            title="Sensor",
             optional_capabilities=_caps(_C.TEMPERATURE_C),
         ),
     )
@@ -473,6 +694,10 @@ def parse_device(device_id: str, raw: Mapping[str, Any], errors: list[str]) -> D
             errors.append(f"{where}: 'category:' is required "
                           f"(one of {', '.join(c.value for c in DeviceCategory)})")
         return None
+    if raw_cat == "grid_meter":
+        errors.append(f"{where}: category 'grid_meter' was merged into 'meter' — write "
+                      "'category: meter' (the meter without 'metered_by' is the grid connection)")
+        return None
     try:
         category = DeviceCategory(raw_cat)
     except ValueError:
@@ -516,6 +741,10 @@ def parse_device(device_id: str, raw: Mapping[str, Any], errors: list[str]) -> D
         raw_params = {}
     for name, value in raw_params.items():
         spec = schema.params.get(name)
+        if spec is None and name == "previous_ids":
+            errors.append(f"{where}: params.previous_ids is no longer used — remove it (stored "
+                          "plans were moved to the vehicle long ago)")
+            continue
         if spec is None:
             allowed = ", ".join(schema.params) or "none"
             errors.append(f"{where}: unknown param {name!r} for category {category.value!r} "
@@ -663,10 +892,17 @@ def validate_connections(specs: Mapping[str, DeviceSpec]) -> list[str]:
             errors.append(f"device {switch_id!r} controls more than one device: "
                           + ", ".join(users))
 
-    grid_meters = [s for s in specs.values() if s.category is DeviceCategory.GRID_METER]
+    grid_meters = [s for s in specs.values() if is_grid_meter(s)]
     if len(grid_meters) > 1:
-        errors.append("only one grid_meter is allowed, found: "
-                      + ", ".join(s.id for s in grid_meters))
+        errors.append("only one meter can be the grid connection (the meter without "
+                      "'metered_by'), found: " + ", ".join(s.id for s in grid_meters)
+                      + " — give the sub-meters 'metered_by: <meter>'")
+    for spec in specs.values():
+        if spec.category is DeviceCategory.METER and spec.metered_by is not None:
+            for name in _GRID_PARAMS:
+                if name in spec.params:
+                    errors.append(f"device {spec.id!r}: params.{name} belongs to the grid "
+                                  "connection meter (the meter without 'metered_by')")
     if errors:
         return errors
 
@@ -681,9 +917,9 @@ def validate_connections(specs: Mapping[str, DeviceSpec]) -> list[str]:
             seen.append(node.metered_by)
             node = specs[node.metered_by]
         else:
-            if len(seen) > 1 and node.category is not DeviceCategory.GRID_METER:
+            if len(seen) > 1 and not is_grid_meter(node):
                 errors.append(f"device {spec.id!r}: metered_by chain ends at {node.id!r}, "
-                              "which is not the grid_meter (give it 'metered_by' too)")
+                              "which is not a meter")
 
     for gm in grid_meters:
         for dev_id in gm.params.get("curtail_order", []):
@@ -691,6 +927,11 @@ def validate_connections(specs: Mapping[str, DeviceSpec]) -> list[str]:
                 errors.append(f"device {gm.id!r}: params.curtail_order names unknown "
                               f"device {dev_id!r}")
     return errors
+
+
+def is_grid_meter(spec: DeviceSpec) -> bool:
+    """True for the grid connection meter: the meter that is behind no other."""
+    return spec.category is DeviceCategory.METER and spec.metered_by is None
 
 
 def _names(items: frozenset[Any]) -> str:

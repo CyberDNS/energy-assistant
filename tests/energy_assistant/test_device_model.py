@@ -22,7 +22,7 @@ BATTERY = {
     "product_key": "p", "device_key": "d",
     "params": {"capacity_kwh": 7.6, "max_charge_kw": 1.2, "max_discharge_kw": 0.8},
 }
-GRID = {"category": "grid_meter", "type": "tasmota", "host": "h"}
+GRID = {"category": "meter", "type": "tasmota", "host": "h"}
 
 
 def _errors(raw: dict) -> list[str]:
@@ -84,7 +84,7 @@ def test_to_dict_round_trips() -> None:
 
 def test_role_is_rejected_with_a_hint() -> None:
     assert _errors({"m": {"role": "meter", "type": "tasmota"}}) == [(
-        "device 'm': 'role:' was replaced by 'category:' (one of grid_meter, meter, pv, "
+        "device 'm': 'role:' was replaced by 'category:' (one of meter, pv, "
         "battery, vehicle, charger, thermal_load, switch, consumer, sensor)"
     )]
 
@@ -118,7 +118,7 @@ def test_param_type_range_and_unknown() -> None:
 def test_capability_not_allowed_for_category() -> None:
     errors = _errors({"m": {**GRID, "capabilities": {"soc_pct": {"entity": "sensor.x"}}}})
     assert errors == [(
-        "device 'm': capability 'soc_pct' is not allowed for category 'grid_meter' "
+        "device 'm': capability 'soc_pct' is not allowed for category 'meter' "
         "(allowed: energy_in_kwh, energy_out_kwh, phase_power_w, power_w)"
     )]
     assert "unknown capability 'watts'" in _errors(
@@ -127,8 +127,8 @@ def test_capability_not_allowed_for_category() -> None:
 
 
 def test_connection_not_allowed_for_category() -> None:
-    errors = _errors({"grid": {**GRID, "metered_by": "other"}})
-    assert errors == ["device 'grid': category 'grid_meter' cannot have 'metered_by'"]
+    errors = _errors({"s": {"category": "sensor", "type": "x", "metered_by": "other"}})
+    assert errors == ["device 's': category 'sensor' cannot have 'metered_by'"]
 
 
 def test_connection_target_must_exist_and_have_the_right_category() -> None:
@@ -138,23 +138,32 @@ def test_connection_target_must_exist_and_have_the_right_category() -> None:
         "bat2": {**BATTERY, "metered_by": "bat"},
     })
     assert "device 'bat': metered_by 'nowhere' is not a configured device" in errors
-    assert "device 'bat2': metered_by 'bat' is a 'battery', expected grid_meter, meter" in errors
+    assert "device 'bat2': metered_by 'bat' is a 'battery', expected meter" in errors
 
 
 def test_only_one_grid_meter() -> None:
-    assert _errors({"a": GRID, "b": GRID}) == ["only one grid_meter is allowed, found: a, b"]
+    assert _errors({"a": GRID, "b": GRID}) == [
+        ("only one meter can be the grid connection (the meter without 'metered_by'), "
+         "found: a, b — give the sub-meters 'metered_by: <meter>'")
+    ]
 
 
-def test_metered_by_must_lead_to_the_grid_meter() -> None:
+def test_grid_meter_category_was_merged_into_meter() -> None:
+    assert _errors({"a": {**GRID, "category": "grid_meter"}}) == [
+        ("device 'a': category 'grid_meter' was merged into 'meter' — write 'category: meter' "
+         "(the meter without 'metered_by' is the grid connection)")
+    ]
+
+
+def test_grid_limit_belongs_to_the_grid_connection_meter() -> None:
     errors = _errors({
         "grid": GRID,
-        "sub": {"category": "meter", "type": "tasmota", "host": "h"},
-        "bat": {**BATTERY, "metered_by": "sub"},
+        "sub": {**GRID, "metered_by": "grid", "params": {"max_import_kw": 10}},
     })
-    assert errors == [(
-        "device 'bat': metered_by chain ends at 'sub', which is not the grid_meter "
-        "(give it 'metered_by' too)"
-    )]
+    assert errors == [
+        ("device 'sub': params.max_import_kw belongs to the grid connection meter "
+         "(the meter without 'metered_by')")
+    ]
 
 
 def test_metered_by_loop_is_reported() -> None:
@@ -179,7 +188,7 @@ def test_thermal_load_needs_a_switch() -> None:
         "device 'aq': a thermal_load needs 'controlled_by: <switch device>'"
     ]
     assert parse_devices({"aq": {**THERMAL, "controlled_by": "plug"}, "plug": PLUG})
-    assert "controlled_by 'grid' is a 'grid_meter', expected switch" in _errors(
+    assert "controlled_by 'grid' is a 'meter', expected switch" in _errors(
         {"aq": {**THERMAL, "controlled_by": "grid"}, "grid": GRID}
     )[0]
 
@@ -284,7 +293,7 @@ def test_generic_homeassistant_rejects_the_old_keys() -> None:
 
 def test_generic_homeassistant_import_export_binding() -> None:
     dev = plugin_registry.build_device(
-        "g", {"type": "generic_homeassistant", "category": "grid_meter",
+        "g", {"type": "generic_homeassistant", "category": "meter",
               "capabilities": {"power_w": {"import_entity": "sensor.i",
                                            "export_entity": "sensor.e"}}},
         BuildContext(backends=BackendsConfig(), ha_client=_FakeHA()),
@@ -324,3 +333,32 @@ def test_storage_constraint_defaults() -> None:
     assert (sc.min_soc_pct, sc.max_soc_pct, sc.standby_w) == (0.0, 100.0, 50.0)
     assert sc.purchase_price_eur is None and sc.cycle_life is None
     assert sc.no_grid_charge is False
+
+
+def test_labels_are_derived_from_keys() -> None:
+    from energy_assistant.core.device_model import ParamSpec, humanize
+
+    assert humanize("max_charge_kw") == "Max charge (kW)"
+    assert humanize("import_price_eur_per_kwh") == "Import price (€/kWh)"
+    assert humanize("charge_limit_soc_pct") == "Charge limit SoC (%)"
+    assert humanize("api_url") == "API URL"
+    assert humanize("host") == "Host"
+    spec = ParamSpec(float, label="Usable capacity (kWh)")
+    assert spec.to_dict("capacity_kwh")["label"] == "Usable capacity (kWh)"
+    assert ParamSpec(float).to_dict("capacity_kwh")["label"] == "Capacity (kWh)"
+
+
+def test_conditional_setting_is_only_required_while_it_applies() -> None:
+    from energy_assistant.core.device_model import ParamSpec, check_fields
+
+    specs = {
+        "connection": ParamSpec(str, choices=("cloud", "local"), default="cloud"),
+        "cloud_key": ParamSpec(str, required=True, when={"connection": "cloud"}),
+        "home_id": ParamSpec(str, required=True, when={"token": "*"}),
+        "token": ParamSpec(str),
+    }
+    # The default of an unset sibling counts.
+    assert check_fields({}, specs) == ["key 'cloud_key' is required"]
+    assert check_fields({"connection": "local"}, specs) == []
+    assert check_fields({"connection": "local", "token": "t"}, specs) == ["key 'home_id' is required"]
+    assert specs["cloud_key"].to_dict("cloud_key")["when"] == {"connection": "cloud"}

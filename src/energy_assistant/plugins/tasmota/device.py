@@ -32,6 +32,10 @@ class TasmotaDevice:
     def category(self) -> DeviceCategory:
         return self._category
 
+    async def close(self) -> None:
+        """Stop the background poller (the device is being replaced)."""
+        await self._poller.stop()
+
     async def get_state(self) -> DeviceState:
         self._poller.ensure_started()
         reading = self._poller.latest()

@@ -68,12 +68,14 @@ thermal loads, switches, consumers.  Parsed into `DeviceSpec`
 | `included_in`   | no       | A consumer whose meter already contains this consumer's load |
 | `forecast`, `learning` | no | Consumption forecast (consumers) |
 
+The Config tab of the web UI edits these entries in place (see README,
+"Configuring in the UI"); the file stays the single source of truth.
+
 ### Categories
 
 | Category       | Required capabilities | Params | Connections |
 |----------------|-----------------------|--------|-------------|
-| `grid_meter`   | `power_w` | `max_import_kw`, `curtail_order`, `limit_hysteresis_kw` | — (root of the metering tree) |
-| `meter`        | `power_w` | — | `metered_by` |
+| `meter`        | `power_w` | on the grid connection meter only: `max_import_kw`, `curtail_order`, `limit_hysteresis_kw` | `metered_by` (none: this is the grid connection, the root of the metering tree) |
 | `pv`           | `power_w` | — | `metered_by` |
 | `battery`      | `power_w`, `soc_pct` | `capacity_kwh`, `max_charge_kw`, `max_discharge_kw` (required), SoC limits, efficiencies, wear cost, … | `metered_by` |
 | `charger`      | `power_w`, `plugged` | `min_power_kw`, `max_power_kw`, `default_vehicle`, `guest_mode` | `metered_by`; the vehicle at it comes from the charging session |
@@ -91,9 +93,9 @@ the loader checks every device against them before anything is built.
 
 ## Metering tree (`metered_by`)
 
-`metered_by` describes the physical wiring of meters as a tree; the
-`grid_meter` (the meter that sees the full imported/exported power) is the
-root, children keep the order of the `devices:` list.  It is used for:
+`metered_by` describes the physical wiring of meters as a tree; the one
+`meter` without `metered_by` (the meter at the grid connection, which sees the
+full imported/exported power) is the root, children keep the order of the `devices:` list.  It is used for:
 
 - **Cost attribution**: each `meter` below the root defines a tariff zone,
   owning the PV and batteries in its subtree.

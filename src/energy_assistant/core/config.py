@@ -15,10 +15,11 @@ the category schemas (``core/device_model``).  The ``tariffs``
 and ``optimizer`` sections are kept as raw dicts so each plugin can validate
 its own slice.
 
-Phase 2 — JSON files (future)
-------------------------------
-Both phases implement the same ``ConfigManager`` protocol so nothing else
-in the platform needs to change when moving from YAML to JSON.
+Editing at runtime
+------------------
+``config.yaml`` stays the single source of truth.  The configuration UI edits
+its device entries in place (``config/store``) and the application applies
+the file without a restart (``server.Application.reload_config``).
 """
 
 from __future__ import annotations

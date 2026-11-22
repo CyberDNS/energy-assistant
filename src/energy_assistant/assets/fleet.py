@@ -220,9 +220,3 @@ class VehicleFleet:
                 return cid, vid
         return None
 
-    def previous_ids(self) -> dict[str, str]:
-        """Former asset id → vehicle id, from the vehicles' ``previous_ids``."""
-        return {
-            old: vid for vid, spec in self.vehicles.items()
-            for old in spec.params.get("previous_ids") or []
-        }
