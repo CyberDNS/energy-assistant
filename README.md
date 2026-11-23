@@ -88,25 +88,68 @@ claude mcp add --transport http energy-assistant http://<host>:<port>/mcp \
   --header "Authorization: Bearer <token>"
 ```
 
+### The web UI
+
+The UI has a sidebar, a status bar at the bottom that always shows what the
+house is doing (solar, grid, battery, cars, prices), and a notice at the top of
+every page when something needs attention: `config.yaml` changed on disk, dry
+run, devices that do not respond.
+
+| Group | Pages |
+|---|---|
+| Overview | **Home** (live power flow, cars, every device), **Plan** (the optimizer's plan) |
+| Devices | **Cars**, **Batteries**, **Heating & loads**; each appears only when the house has such devices |
+| Insights | **Savings**, **History**, **Learning** |
+| System | **Settings** (see [Configuring in the UI](#configuring-in-the-ui)) |
+
+**In Home Assistant** (2026.2 or later) the add-on takes over the whole
+screen: Home Assistant hides its own sidebar and header, and the **Home
+Assistant** button at the bottom of the menu brings Home Assistant's sidebar
+back. Home Assistant's URL follows the page that is open, so links and reloads
+come back to it. To keep both sidebars side by side, turn off *Use the whole
+screen in Home Assistant* under Settings → User interface; that setting and the
+theme (light, dark, like the device) are stored per browser.
+
 ### Embedding the UI in a dashboard
 
-The Plan tab can be deep-linked and embedded (e.g. in an iframe / webpage card):
+Every page can be deep-linked and embedded (e.g. in an iframe / webpage card):
 
 | URL | Shows |
 |---|---|
-| `#/plan` | Plan tab |
-| `#/savings` | Savings tab: savings against an uncontrolled house over rolling windows (24 h – 1 y) |
-| `#/config` | Config tab; `#/config/<page>` with `devices`, `tariffs`, `forecasts`, `connections`, `system`, `secrets` |
-| `#/plan/<vehicle>` or `#/plan?vehicle=<vehicle>` | One EV only: target, 7-day strip, weekly plan, "Charge now" and its charging-plan chart. `<vehicle>` is the vehicle id or label (case-insensitive). |
-| `…?embed=1` | Hides the header, KPI tiles and tab bar. Combine with any route, e.g. `#/plan/bandit?embed=1`. |
+| `#/plan` | Plan |
+| `#/savings` | Savings against an uncontrolled house over rolling windows (24 h – 1 y) |
+| `#/cars/<vehicle>` | One car: target, 7-day strip, weekly plan, "Charge now" and its charging-plan chart. `<vehicle>` is the vehicle id or label (case-insensitive). |
+| `#/batteries`, `#/loads`, `#/history`, `#/learning` | The page of that name |
+| `#/settings/<page>` | A settings page: `devices`, `tariffs`, `forecasts`, `connections`, `system`, `secrets`, `interface` |
+| `…?embed=1` | Content only: no sidebar, header or status bar. Combine with any route, e.g. `#/cars/bandit?embed=1`. |
 
 Hosts that drop the URL fragment (the Home Assistant ingress panel does) can
 pass the same options as a query string on the page URL instead:
 `?view=plan`, `?view=savings`, `?vehicle=<vehicle>`, `?embed=1` — e.g. `/?vehicle=bandit&embed=1`.
-When opened without any route, the UI restores the last-used tab.
+When opened without any route, the UI restores the page used last.
 
-All frontend libraries (Vue, Vue Router, Plotly) are bundled in
-`frontend/vendor/`; the UI makes no external requests.
+Links from before the sidebar keep working: `#/plan/<vehicle>` and
+`#/plan?vehicle=<vehicle>` open the car, `#/config/<page>` the settings page.
+
+The UI makes no external requests: all libraries are part of the build.
+
+### Developing the web UI
+
+The UI lives in `frontend/` (Vue 3, Vite, Tailwind, shadcn-vue components in
+`frontend/src/components/ui/`) and needs Node 24:
+
+```bash
+cd frontend
+npm ci
+npm run build        # type check + build into src/energy_assistant/frontend/, which the server serves
+npm test             # unit tests
+EA_API=http://localhost:8088 npm run dev   # dev server with hot reload, API calls go to a running Energy Assistant
+```
+
+The build output is not in git; the container image builds it (`Dockerfile`),
+and a checkout without it serves a page that says how to build it. The sidebar
+is defined in `frontend/src/nav.ts`, the settings categories in
+`frontend/src/settings.ts`.
 
 ### Weekly EV plan in Home Assistant
 
@@ -163,7 +206,7 @@ devices:
 
 ### Configuring in the UI
 
-The **Config** tab edits everything in `config.yaml` and `secrets.yaml`:
+**Settings** edits everything in `config.yaml` and `secrets.yaml`, one page per topic:
 
 | Page | What |
 |---|---|
@@ -173,6 +216,7 @@ The **Config** tab edits everything in `config.yaml` and `secrets.yaml`:
 | Connections | `backends:` (Home Assistant, MQTT broker) |
 | System | `optimizer:`, `controller:`, `energy_dashboard:`, `server:`, `logging:` |
 | Secrets | the entries of `secrets.yaml` |
+| User interface | theme and Home Assistant full-screen mode; stored in the browser, not in `config.yaml` |
 
 Every form is built from the same schemas the loader checks the file against,
 with an editor per kind of value: dropdowns for devices, tariffs and choices,
@@ -230,7 +274,7 @@ A car is a `vehicle` device read from its own Home Assistant integration
 (`type: homeassistant_vehicle`, see `config.yaml.example`); a wallbox is a
 `charger`.  When a charger reports a car plugged in, a **charging session**
 starts with the charger's `default_vehicle`.  Each car has a **charger
-selector** (UI: the car card on the Plan tab; Home Assistant: the car's
+selector** (UI: the car's card on Home and under Cars; Home Assistant: the car's
 "Charger" select; API: `PUT /api/vehicles/<vehicle|guest>/charger?charger_id=<id|none>`).
 The last selection wins: a car plugged in at that charger is reassigned now,
 a free charger expects the selected car at its next plug-in, and a car whose

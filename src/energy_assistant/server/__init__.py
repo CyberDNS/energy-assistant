@@ -3375,45 +3375,43 @@ class Application:
             return {"sessions": await self._storage.query_vehicle_sessions(_as_utc(start), end_)}
 
         # ── Static frontend (registered last so API routes take priority) ──────
-        # JS files are served at /ui/…; index.html is served at /.
-        # Cache-Control: no-store on every response so browser always fetches
-        # fresh JS after a server restart (no stale module cache issues).
-        # Locate the frontend directory. Two layouts are supported:
-        #   installed wheel: energy_assistant/frontend/ sits next to this package
-        #   dev repo:        frontend/ is at the repository root (4 levels up)
-        _pkg_root = Path(__file__).resolve().parent.parent  # .../energy_assistant/
-        _fe = next(
-            (p for p in [
-                _pkg_root / "frontend",                       # installed wheel
-                _pkg_root.parent.parent / "frontend",          # dev repo root
-            ] if (p / "index.html").exists()),
-            None,
-        )
-        if _fe is not None:
+        # The web UI is built with Vite (``npm run build`` in ``frontend/``) into
+        # ``energy_assistant/frontend/`` inside this package, which is where both
+        # a dev checkout and an installed wheel find it.  index.html is served at
+        # ``/`` and refers to everything else by relative URL, so the UI works
+        # unchanged behind Home Assistant ingress.
+        _fe = Path(__file__).resolve().parent.parent / "frontend"
+        if (_fe / "index.html").exists():
             from fastapi.responses import FileResponse
             from starlette.middleware.base import BaseHTTPMiddleware
 
-            class _NoCacheMiddleware(BaseHTTPMiddleware):
+            class _UiCacheMiddleware(BaseHTTPMiddleware):
                 async def dispatch(self, request, call_next):
                     response = await call_next(request)
-                    path = request.url.path
-                    if path.startswith("/ui/vendor/"):
-                        # Third-party libraries: versioned filenames, safe to cache.
+                    if request.url.path.startswith("/assets/"):
+                        # Built files carry a content hash in their name.
                         response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
-                    elif path.startswith("/ui/"):
-                        response.headers["Cache-Control"] = "no-store"
                     return response
 
-            api.add_middleware(_NoCacheMiddleware)
-            api.mount("/ui", StaticFiles(directory=str(_fe)), name="ui")
+            api.add_middleware(_UiCacheMiddleware)
+            api.mount("/assets", StaticFiles(directory=str(_fe / "assets")), name="assets")
 
             @api.get("/")
             async def serve_ui() -> FileResponse:
+                # Never cached: it names the current build's files.
                 return FileResponse(str(_fe / "index.html"), headers={"Cache-Control": "no-store"})
+
+            @api.get("/favicon.svg", include_in_schema=False)
+            async def serve_favicon() -> FileResponse:
+                return FileResponse(str(_fe / "favicon.svg"))
         else:
             @api.get("/", response_class=HTMLResponse)
             async def serve_ui_missing() -> str:
-                return "<h1>UI not found. Place <code>frontend/index.html</code> at the repo root.</h1>"
+                return (
+                    "<h1>The web UI is not built.</h1>"
+                    "<p>Run <code>npm ci &amp;&amp; npm run build</code> in <code>frontend/</code> "
+                    "and restart Energy Assistant. The API works without it.</p>"
+                )
 
         # Read-only MCP endpoint (POST /mcp) for debugging tools.
         mcp_holder.append(mount_mcp_server(api))

@@ -1,4 +1,6 @@
-# Run tests on every pull request and push to main.
+# Run tests on every pull request and push to main: the web UI (type check,
+# build, unit tests) and the Python suite, which also checks that the server
+# serves the UI just built.
 # Uses uv for fast dependency installation.
 
 name: Tests
@@ -26,6 +28,20 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build and test the web UI
+        working-directory: frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+          npm test
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5

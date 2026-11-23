@@ -23,3 +23,16 @@ uv run pytest              # full suite, as CI runs it
 uvx ruff check src tests   # lint (ruff isn't a project dependency)
 ```
 New or changed code should pass `ruff check` cleanly.
+
+## Web UI (`frontend/`)
+- Vue 3 + Vite + Tailwind + shadcn-vue; needs Node 24. The build goes to
+  `src/energy_assistant/frontend/` (gitignored), which is what the server serves.
+- A fresh worktree has no build: `cd frontend && npm ci && npm run build`.
+  Without it `/` only says how to build, and the browser tests skip.
+
+```bash
+cd frontend
+npm run build              # vue-tsc + vite build
+npm test                   # vitest
+uv run --with playwright pytest tests/e2e   # browser tests against the build (from the repo root)
+```

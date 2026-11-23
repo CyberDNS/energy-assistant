@@ -199,7 +199,8 @@ The main top-level sections are: `backends`, `tariffs`, `devices` (with
 
 ### Editing from the UI
 
-The **Config** tab covers the whole file and `secrets.yaml`. Every form is
+**Settings** covers the whole file and `secrets.yaml`, one page per topic
+(`frontend/src/settings.ts`). Every form is
 generated from the schemas the loader validates against, so the UI offers
 exactly what the loader accepts:
 
@@ -222,7 +223,7 @@ capabilities have a `title`; a setting without a `label` gets one derived from
 its key (`max_charge_kw` → "Max charge (kW)"). `loader/config_validation.py`
 checks the sections and collections; `validate_plugins` checks the devices.
 
-**Frontend components** (`frontend/config/`). The editors are reusable and
+**Frontend components** (`frontend/src/config/`). The editors are reusable and
 schema-driven; a form is a `SchemaForm` over a `{key: spec}` mapping.
 
 | Component | Edits |
@@ -272,8 +273,9 @@ and is picked up again. It is the same sequence as a restart, so it has the
 same effects: no control ticks for a few seconds, a fresh plan right after,
 and in-memory control state (e.g. minimum run times) starts over.
 
-`POST /api/config/reload` does the same for a file edited by hand; the
-Devices tab offers it when the file on disk differs from what is running.
+`POST /api/config/reload` does the same for a file edited by hand; a notice
+on every page offers it when the file on disk differs from what is running
+(`GET /api/config/state`).
 `server.port`, `server.api_token` and `server.trusted_hosts` still need a
 restart.
 
