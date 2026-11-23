@@ -276,6 +276,19 @@ def mount_config_api(api: FastAPI, app: Application) -> None:
             "secrets": secrets,
         }
 
+    @api.get("/api/config/state")
+    async def get_config_state() -> dict:
+        """Whether config.yaml on disk differs from what is running.
+
+        Cheap enough to poll: the UI shows a notice on every page while a
+        hand-edited file waits to be applied.
+        """
+        revision = _store().revision()
+        return {
+            "revision": revision,
+            "pending_reload": revision != revision_of(app.loaded_config_text),
+        }
+
     @api.get("/api/config/entities")
     async def get_config_entities() -> list[dict]:
         """Home Assistant entities (id + name) for the entity pickers; empty

@@ -1,24 +1,24 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Energy Assistant</title>
-  <!-- Third-party libraries are bundled in ui/vendor/ — no external requests. -->
-  <script src="ui/vendor/plotly-basic-2.35.2.min.js"></script>
-  <script type="importmap">
-  {
-    "imports": {
-      "vue": "./ui/vendor/vue-3.5.13.esm-browser.prod.js",
-      "vue-router": "./ui/vendor/vue-router-4.4.5.esm-browser.js",
-      "@vue/devtools-api": "data:text/javascript,export function setupDevtoolsPlugin(){}"
-    }
-  }
-  </script>
-  <link rel="stylesheet" href="ui/style.css" />
-</head>
-<body>
-  <div id="app"></div>
-  <script type="module" src="ui/main.js"></script>
-</body>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Energy Assistant</title>
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <script>
+      // Apply the theme before the first paint (see composables/useTheme.ts).
+      (function () {
+        try {
+          var t = localStorage.getItem('energy-assistant.theme') || 'system'
+          var dark = t === 'dark' || (t === 'system' && matchMedia('(prefers-color-scheme: dark)').matches)
+          if (dark) document.documentElement.classList.add('dark')
+        } catch (e) { /* storage blocked */ }
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
 </html>

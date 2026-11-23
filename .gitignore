@@ -9,6 +9,10 @@ dist/
 build/
 .eggs/
 
+# Web UI: dependencies and the Vite build (frontend/ → the Python package)
+node_modules/
+src/energy_assistant/frontend/
+
 # Testing
 .pytest_cache/
 .coverage

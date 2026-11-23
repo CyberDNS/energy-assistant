@@ -391,3 +391,16 @@ async def test_unknown_secret_is_a_validation_error(running) -> None:
         "value": {"type": "tibber", "settings": {"token": {"!secret": "nope"}}},
     })).json()
     assert check["errors"] == ["secret 'nope' is not defined in secrets.yaml"]
+
+
+async def test_state_reports_a_file_that_waits_to_be_applied(running) -> None:
+    _, client, config = running
+    state = (await client.get("/api/config/state")).json()
+    assert state["pending_reload"] is False
+    assert state["revision"] == (await client.get("/api/config/file")).json()["revision"]
+
+    config.write_text(CONFIG.replace("label: Baseline ", "label: By hand "))
+    assert (await client.get("/api/config/state")).json()["pending_reload"] is True
+
+    await client.post("/api/config/reload")
+    assert (await client.get("/api/config/state")).json()["pending_reload"] is False

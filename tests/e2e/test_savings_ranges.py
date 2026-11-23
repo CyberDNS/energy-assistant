@@ -4,9 +4,10 @@ Serves the real frontend with a mocked ``/api/savings`` and clicks through all
 ranges in Chromium.  Guards against the slow range switch (Plotly.react with
 changed date-axis tick settings took 4–15 s even for a few points).
 
-Needs Playwright and its Chromium, which CI does not install — the test skips
-itself without them.  Locally::
+Needs the built frontend, Playwright and its Chromium — the test skips itself
+without them (the Python CI job has none of the three).  Locally::
 
+    (cd frontend && npm ci && npm run build)
     uv run --with playwright playwright install chromium   # once
     uv run --with playwright pytest tests/e2e -v
 """
@@ -26,7 +27,8 @@ import pytest
 
 sync_api = pytest.importorskip("playwright.sync_api")
 
-FRONTEND = Path(__file__).resolve().parents[2] / "frontend"
+# Where `npm run build` puts the UI (frontend/vite.config.ts).
+FRONTEND = Path(__file__).resolve().parents[2] / "src" / "energy_assistant" / "frontend"
 RANGES = ["24 h", "3 d", "7 d", "30 d", "90 d", "1 y"]
 MAX_SWITCH_S = 2.0
 
@@ -91,6 +93,8 @@ def _savings(hours: float, n_slots: int) -> dict:
 
 @pytest.fixture
 def server(request):
+    if not (FRONTEND / "index.html").exists():
+        pytest.skip("frontend not built (npm run build in frontend/)")
     n_slots = request.param
 
     class Handler(http.server.SimpleHTTPRequestHandler):
@@ -109,9 +113,7 @@ def server(request):
                 self.end_headers()
                 self.wfile.write(body)
                 return
-            if self.path.startswith("/ui/"):
-                self.path = self.path[3:]
-            elif "." not in url.path.rsplit("/", 1)[-1]:
+            if "." not in url.path.rsplit("/", 1)[-1]:
                 self.path = "/index.html"
             super().do_GET()
 

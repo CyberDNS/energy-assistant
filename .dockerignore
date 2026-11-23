@@ -1,0 +1,12 @@
+# Keep the build context small and builds reproducible: nothing that is
+# generated locally goes into the image.
+.git
+.claude
+.venv
+**/__pycache__
+.pytest_cache
+frontend/node_modules
+src/energy_assistant/frontend
+notebooks
+example-data
+tests

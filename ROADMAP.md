@@ -71,6 +71,7 @@ and what comes later. Open items link to their GitHub issue.
 - [x] MQTT to Home Assistant: EV entities, charging state, range, price curve, savings KPIs, non-HA devices as sub-devices
 - [x] Read-only REST API and MCP endpoint with token
 - [x] Docker image (GHCR), HA add-on (stable / dev / edge), release promotion model
+- [x] UI refresh (#115): sidebar with Overview / Devices / Insights / System, status bar and attention notices, Settings area, pages for cars, batteries and loads, light and dark theme; takes over the screen inside Home Assistant (2026.2+)
 - [x] Optional `api_url` for Tibber and Forecast.Solar to run against a local test server; isolated dev/test stacks per worktree
 
 ---
