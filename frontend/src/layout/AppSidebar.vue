@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import type { Ref } from 'vue'
 import type { Status } from '@/composables/usePowerFlow'
-import { House, PanelLeft } from '@lucide/vue'
+import { PanelLeft } from '@lucide/vue'
 import { computed, inject, watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 import logo from '@/assets/logo.svg'
+import HomeAssistantIcon from '@/components/HomeAssistantIcon.vue'
 import {
   Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent, SidebarGroupLabel,
   SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarRail, useSidebar,
@@ -72,7 +73,7 @@ function openHomeAssistant() {
             class="border-sidebar-border bg-background hover:bg-sidebar-accent border shadow-xs"
             tooltip="Home Assistant menu" data-testid="ha-menu" @click="openHomeAssistant"
           >
-            <House class="text-info" />
+            <HomeAssistantIcon class="text-[#18bcf2]" />
             <span class="font-medium">Home Assistant</span>
           </SidebarMenuButton>
         </SidebarMenuItem>
