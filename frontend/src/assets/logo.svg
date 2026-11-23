@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240">
+  <title>Energy Assistant</title>
+  <!-- A rounded house holding the solar curve of a day, with a dot for "now". -->
+  <path d="M120 44 200 122v74H40v-74Z" fill="#12805c" stroke="#12805c" stroke-width="40" stroke-linejoin="round"/>
+  <g fill="none" stroke="#fff" stroke-width="13" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M52 178c40 0 40-84 68-84s28 84 68 84"/>
+    <path d="M52 204h136" opacity=".55"/>
+  </g>
+  <circle cx="150" cy="128" r="15" fill="#fff"/>
+</svg>

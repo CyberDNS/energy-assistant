@@ -3,7 +3,7 @@
 // here; `when` hides an item while the house has nothing to show there.
 import type { Component } from 'vue'
 import {
-  BatteryMedium, BrainCircuit, CalendarClock, Car, Heater, History, House, PiggyBank, Settings,
+  BatteryMedium, BrainCircuit, CalendarClock, Car, Heater, House, LayoutGrid, PiggyBank, Settings,
 } from '@lucide/vue'
 
 export interface NavContext {
@@ -45,6 +45,7 @@ export const NAV_GROUPS: NavGroup[] = [
         when: ctx => ctx.categories.has('battery') },
       { id: 'loads', title: 'Heating & loads', to: '/loads', icon: Heater,
         when: ctx => ctx.categories.has('thermal_load') || ctx.categories.has('switch') },
+      { id: 'devices', title: 'All devices', to: '/devices', icon: LayoutGrid },
     ],
   },
   {
@@ -52,7 +53,6 @@ export const NAV_GROUPS: NavGroup[] = [
     title: 'Insights',
     items: [
       { id: 'savings', title: 'Savings', to: '/savings', icon: PiggyBank },
-      { id: 'history', title: 'History', to: '/history', icon: History },
       { id: 'learning', title: 'Learning', to: '/learning', icon: BrainCircuit },
     ],
   },

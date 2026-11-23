@@ -13,7 +13,10 @@ export const fetchStatus   = ()           => call('/api/status')
 export const streamUrl     = _apiBase + '/api/stream'
 export const fetchPlan     = ()           => call('/api/plan')
 export const fetchForecast = ()           => call('/api/forecast')
-export const fetchHistory  = (hours)      => call(`/api/history?hours=${hours}`)
+// ids: device ids (default: batteries, meters and PV).  The server picks 5-minute
+// or hourly buckets by the range.
+export const fetchHistory  = (hours, ids = []) =>
+  call(`/api/history?hours=${hours}` + (ids.length ? `&device_ids=${encodeURIComponent(ids.join(','))}` : ''))
 export const fetchLedger   = ()           => call('/api/ledger')
 export const fetchVehicles     = ()           => call('/api/vehicles')
 export const fetchControllable = ()           => call('/api/controllable')
@@ -94,3 +97,5 @@ export const deleteConfigSecret = (name) =>
 export const reloadConfig = () => configCall('/api/config/reload', { method: 'POST' })
 // Small and cheap: whether config.yaml on disk differs from what is running.
 export const fetchConfigState = () => call('/api/config/state')
+// Savings slots since `start` (a Date), with their totals.
+export const fetchSavingsSince = (start) => call(`/api/savings/slots?start=${encodeURIComponent(start.toISOString())}`)

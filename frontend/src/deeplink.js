@@ -3,7 +3,8 @@
 // Hash routes are the canonical form:
 //   #/plan                    Plan
 //   #/cars/<vehicle>          one car (vehicle id or label, case-insensitive)
-//   #/savings  #/learning  #/history  #/batteries  #/loads  #/settings/<page>
+//   #/devices/<device>        one device
+//   #/savings  #/learning  #/batteries  #/loads  #/devices  #/settings/<page>
 //   …?embed=1                 content only: no sidebar, header or status bar (iframe use)
 //
 // Hosts that drop the URL fragment (e.g. the Home Assistant ingress panel)
@@ -19,7 +20,7 @@
 const LAST_KEY = 'energy-assistant.lastTab'
 const VIEWS = {
   live: '/', home: '/', plan: '/plan', cars: '/cars', batteries: '/batteries', loads: '/loads',
-  savings: '/savings', history: '/history', learning: '/learning', settings: '/settings',
+  devices: '/devices', savings: '/savings', history: '/devices', learning: '/learning', settings: '/settings',
   config: '/settings',
 }
 const PAGES = new Set(Object.values(VIEWS))

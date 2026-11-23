@@ -12,14 +12,15 @@ declare module 'vue-router' {
 }
 
 const routes: RouteRecordRaw[] = [
-  { path: '/', component: () => import('../views/LiveView.vue'), meta: { title: 'Home', nav: 'home' } },
+  { path: '/', component: () => import('../views/HomeView.vue'), meta: { title: 'Home', nav: 'home' } },
   { path: '/plan', component: () => import('../views/PlanView.vue'), meta: { title: 'Plan', nav: 'plan' } },
   { path: '/cars', component: () => import('../views/CarsView.vue'), meta: { title: 'Cars', nav: 'cars' } },
   { path: '/cars/:vehicle', component: () => import('../views/CarView.vue'), meta: { nav: 'cars' } },
+  { path: '/devices', component: () => import('../views/DevicesView.vue'), meta: { title: 'All devices', nav: 'devices' } },
+  { path: '/devices/:id', component: () => import('../views/DeviceView.vue'), meta: { nav: 'devices' } },
   { path: '/batteries', component: () => import('../views/BatteriesView.vue'), meta: { title: 'Batteries', nav: 'batteries' } },
   { path: '/loads', component: () => import('../views/LoadsView.vue'), meta: { title: 'Heating & loads', nav: 'loads' } },
   { path: '/savings', component: () => import('../views/SavingsView.vue'), meta: { title: 'Savings', nav: 'savings' } },
-  { path: '/history', component: () => import('../views/HistoryView.vue'), meta: { title: 'History', nav: 'history' } },
   { path: '/learning', component: () => import('../views/LearningView.vue'), meta: { title: 'Learning', nav: 'learning' } },
   {
     path: '/settings',
@@ -35,7 +36,8 @@ const routes: RouteRecordRaw[] = [
   { path: '/plan/:vehicle', redirect: to => ({ path: `/cars/${encodeURIComponent(String(to.params.vehicle))}`, query: to.query }) },
   { path: '/config', redirect: '/settings' },
   { path: '/config/:page', redirect: to => ({ path: `/settings/${String(to.params.page)}`, query: to.query }) },
-  { path: '/devices', redirect: '/settings/devices' },
+  // History moved into the device pages.
+  { path: '/history', redirect: '/devices' },
   { path: '/:rest(.*)*', redirect: '/' },
 ]
 
@@ -47,6 +49,8 @@ export function createAppRouter() {
     routes,
     scrollBehavior(to, from, saved) {
       if (saved) return saved
+      // A section of a page (…#learned) is scrolled to by the page once it has its data.
+      if (to.hash) return undefined
       return to.path === from.path ? undefined : { top: 0 }
     },
   })

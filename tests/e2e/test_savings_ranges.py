@@ -156,18 +156,21 @@ def test_switching_ranges_is_fast_and_shows_the_right_panels(server, page) -> No
             arg=label,
         )
         short = label in ("24 h", "3 d")
-        # Done when the view shows this range's data: per-slot title and
-        # detail panel only for the short ranges, and every chart drawn.
+        # Done when the view shows this range's data: the per-slot title only
+        # for the short ranges, the groups listed with their links, and
+        # every chart drawn.
         page.wait_for_function(
             """short => {
                 const titles = [...document.querySelectorAll('.panel h2')].map(h => h.textContent);
                 const saving = titles.find(t => t.startsWith('Saving per')) ?? '';
-                const groups = ['Batteries', 'Family car', 'Aquarium'].every(g => titles.includes(g));
+                const rows = [...document.querySelectorAll('[data-testid="savings-breakdown"] .link-row-main')]
+                    .map(r => r.textContent);
+                const groups = ['Batteries', 'Family car', 'Aquarium'].every(g => rows.includes(g));
                 const drawn = [...document.querySelectorAll('.panel .js-plotly-plot')]
                     .every(p => p.querySelector('.main-svg'));
-                // One chart per group panel plus saving, cumulative and cost.
+                // Saving, cumulative and cost; the groups' charts are on their device pages.
                 const charts = document.querySelectorAll('.panel .js-plotly-plot').length;
-                return saving.includes('15 min') === short && groups && drawn && charts === 6;
+                return saving.includes('15 min') === short && groups && drawn && charts === 3;
             }""",
             arg=short,
             timeout=30_000,
@@ -175,4 +178,53 @@ def test_switching_ranges_is_fast_and_shows_the_right_panels(server, page) -> No
         elapsed = time.monotonic() - start
         assert elapsed < MAX_SWITCH_S, f"switching to {label} took {elapsed:.1f} s"
 
+    assert page.errors == []
+
+
+_X_RANGE = """() => {
+    const g = document.querySelector('.js-plotly-plot');
+    const a = g._fullLayout.xaxis;
+    return [a.r2l(a.range[0]), a.r2l(a.range[1]), ...g._fullLayout.yaxis.range];
+}"""
+
+
+@pytest.mark.parametrize("server", [288], indirect=True, ids=["three_days"])
+def test_charts_zoom_and_pan_in_time_only(server, page) -> None:
+    page.goto(f"{server}/#/savings")
+    page.wait_for_selector(".js-plotly-plot .main-svg")
+    box = page.locator(".js-plotly-plot").first.bounding_box()
+    cx, cy = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+    full = page.evaluate(_X_RANGE)
+
+    # A plain wheel scrolls the page and leaves the chart alone.
+    page.mouse.move(cx, cy)
+    page.mouse.wheel(0, 120)
+    page.wait_for_timeout(200)
+    assert page.evaluate(_X_RANGE) == full
+    page.evaluate("window.scrollTo(0, 0)")
+
+    # Ctrl + wheel (what a trackpad pinch sends) zooms in time, not in value.
+    page.keyboard.down("Control")
+    for _ in range(4):
+        page.mouse.wheel(0, -100)
+    page.keyboard.up("Control")
+    page.wait_for_selector(".chart-reset")
+    zoomed = page.evaluate(_X_RANGE)
+    assert zoomed[1] - zoomed[0] < (full[1] - full[0]) * 0.6
+    assert zoomed[2:] == full[2:]
+
+    # Dragging moves in time and keeps the span, whatever the vertical movement.
+    page.mouse.down()
+    page.mouse.move(cx - 120, cy + 50, steps=5)
+    page.mouse.up()
+    page.wait_for_timeout(300)
+    panned = page.evaluate(_X_RANGE)
+    assert panned[0] > zoomed[0]
+    assert panned[1] - panned[0] == pytest.approx(zoomed[1] - zoomed[0], rel=1e-6)
+    assert panned[2:] == full[2:]
+
+    # "Show all" brings the whole range back.
+    page.click(".chart-reset")
+    page.wait_for_function("!document.querySelector('.chart-reset')")
+    assert page.evaluate(_X_RANGE)[:2] == pytest.approx(full[:2])
     assert page.errors == []

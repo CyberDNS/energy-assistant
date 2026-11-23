@@ -73,7 +73,7 @@ export function usePowerFlow(status: Ref<Status | null>) {
         tone: bat > IDLE_W ? 'ok' : bat < -IDLE_W ? 'accent' : 'muted' })
     }
     if (categories.value.has('charger')) {
-      out.push({ id: 'ev', label: 'EV', w: Math.abs(ev),
+      out.push({ id: 'ev', label: 'Cars', w: Math.abs(ev),
         dir: ev > IDLE_W ? 'charging' : 'idle', tone: ev > IDLE_W ? 'ok' : 'muted' })
     }
     out.push({ id: 'home', label: 'Home', w: Math.max(home, 0), dir: 'consuming', tone: 'muted' })

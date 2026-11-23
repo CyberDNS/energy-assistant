@@ -4,7 +4,7 @@ import Plotly from 'plotly.js-basic-dist-min'
 import { baseLayout, themeAxes } from '../lib/chartTheme.ts'
 import { isDark } from '../composables/useTheme.ts'
 
-const PLT_OPT = { displayModeBar: false, responsive: true }
+const PLT_OPT = { displayModeBar: false, responsive: true, scrollZoom: false, doubleClick: false }
 
 function toPlotlyDate(iso) {
   const d = new Date(iso)
@@ -67,14 +67,18 @@ const MiniChart = defineComponent({
         margin: { t: 4, r: 10, b: 36, l: 50 },
         ...baseLayout(9),
         showlegend: false,
+        dragmode: false,   // small overview charts: hover only
+        yaxis: { fixedrange: true },
         xaxis: {
           type: 'date',
+          fixedrange: true,
           tickformat: '%H',
           tickangle: 0,
           nticks: miniNticks(width),
           minor: { dtick: 900000, ticks: 'outside', ticklen: 3 },
         },
         ...props.layout,
+        yaxis: { ...props.layout.yaxis, fixedrange: true },
       })
     }
 

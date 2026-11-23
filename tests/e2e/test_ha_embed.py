@@ -223,7 +223,7 @@ def test_an_embedded_view_leaves_home_assistant_alone(server, page) -> None:
 def test_old_links_still_open_the_right_page(server, page) -> None:
     for old, new in (
         ("/#/config/tariffs", "#/settings/tariffs"),
-        ("/#/devices", "#/settings/devices"),
+        ("/#/history", "#/devices"),
         ("/#/plan/banzert", "#/cars/banzert"),
         ("/#/plan?vehicle=banzert", "#/cars/banzert"),
         ("/?vehicle=banzert", "#/cars/banzert"),

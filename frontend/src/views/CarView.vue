@@ -2,6 +2,8 @@
 import { computed, inject } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 import ControllableDeviceCard from '../components/ControllableDeviceCard.vue'
+import DeviceHistory from '../components/DeviceHistory.vue'
+import DeviceSavings from '../components/DeviceSavings.vue'
 import EvCard from '../components/EvCard.vue'
 import { useCars } from '../composables/useCars'
 import { usePageTitle } from '../composables/usePageTitle'
@@ -40,6 +42,11 @@ usePageTitle(() => car.value?.label ?? (loaded.value ? 'Unknown car' : ''), [{ t
           <ControllableDeviceCard :device="plan" />
         </div>
       </div>
+      <!-- An embedded car card stays what it was: the car and its charging plan. -->
+      <template v-if="!embed">
+        <DeviceHistory :device-id="car.vehicle_id" :power-device-id="car.charger_id || null" category="vehicle" />
+        <DeviceSavings :group="car.vehicle_id" />
+      </template>
     </template>
     <div v-else-if="loaded" class="panel empty-state">
       <h2>Unknown car “{{ route.params.vehicle }}”</h2>

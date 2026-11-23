@@ -37,6 +37,8 @@ export default defineComponent({
     chargers: { type: Array, default: () => [] },
     // Fold the card to name, SoC and target on narrow screens (tap to open).
     collapsible: { type: Boolean, default: false },
+    // Start folded on every screen size (the compact cards on Home).
+    startCollapsed: { type: Boolean, default: false },
     // Route of the car's own page; makes the name a link.
     to: { type: String, default: null },
   },
@@ -68,7 +70,7 @@ export default defineComponent({
 
     let narrow = false
     try { narrow = window.matchMedia('(max-width: 760px)').matches } catch { /* no matchMedia */ }
-    const open = ref(!(props.collapsible && narrow))
+    const open = ref(!(props.collapsible && (narrow || props.startCollapsed)))
 
     // The car reports its SoC every 15–60 min; in between it is estimated
     // from the charger's energy.
