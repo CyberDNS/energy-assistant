@@ -7,3 +7,8 @@ declare module '*.vue' {
 }
 
 declare module 'plotly.js-basic-dist-min'
+
+declare module '*.svg' {
+  const url: string
+  export default url
+}

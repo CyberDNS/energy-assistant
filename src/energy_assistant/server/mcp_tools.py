@@ -31,7 +31,8 @@ Good starting points:
 - get_plan: the active optimizer plan (per-slot flows, SoC, prices, intents).
 - get_savings / get_savings_slots: savings against a simulated uncontrolled
   house, per rolling window or per accounting slot with all cost components.
-- get_history: measured power/SoC and battery-ledger history (kept ~8 days).
+- get_history: measured power/SoC per 5 minutes (kept ~2 weeks) or per hour
+  (kept for good), and the battery-ledger history (kept ~8 days).
 - get_execution: per slot and device, the plan's intent vs. the setpoint sent
   vs. the measured power — did the control loop follow the plan?
 - list_plan_snapshots / get_plan_snapshot: every past plan (kept ~8 days),
@@ -99,12 +100,16 @@ def build_mcp_server(api: FastAPI) -> MCPServer:
         end: str | None = None,
         hours: float = 24.0,
         device_ids: str = "",
+        resolution: str = "auto",
     ) -> dict[str, Any]:
-        """Measured power (W) and SoC (%) per device, plus the battery ledger
-        (cost basis, stored kWh). Window: [start, end] if start is given,
-        otherwise the last *hours*. device_ids: comma-separated; default is
-        storage, meters and PV. At most 7 days per call."""
-        return await get("/api/history", start=start, end=end, hours=hours, device_ids=device_ids)
+        """Mean power (W) and last SoC (%) per device and bucket, plus the
+        battery ledger (cost basis, stored kWh). Window: [start, end] if start
+        is given, otherwise the last *hours*. device_ids: comma-separated;
+        default is storage, meters and PV. resolution: "5m" (kept ~2 weeks),
+        "1h" (kept for good) or "auto" (5m up to 3 days, else 1h). pos_w /
+        neg_w are the means of the positive and negative part of the power."""
+        return await get("/api/history", start=start, end=end, hours=hours,
+                         device_ids=device_ids, resolution=resolution)
 
     @mcp.tool(annotations=_READ_ONLY)
     async def get_execution(

@@ -140,9 +140,11 @@ SECTION_SCHEMAS: dict[str, SectionSchema] = {
                 "trusted_hosts": ParamSpec(list, items=ParamSpec(str), restart=True, advanced=True,
                                            description="Addresses that need no token (default: "
                                                        "HA ingress and localhost)"),
-                "history_retention_days": ParamSpec(float, default=8, label="History kept (days)",
+                "history_retention_days": ParamSpec(float, default=8, label="Diagnostics kept (days)",
                                                     **_POSITIVE,
-                                                    description="Days of measurement history kept"),
+                                                    description="Days of battery-ledger history, plan "
+                                                                "snapshots and execution records kept; "
+                                                                "device history has its own two tiers"),
             },
         ),
         SectionSchema(

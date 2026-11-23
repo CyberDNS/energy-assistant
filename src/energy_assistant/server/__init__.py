@@ -132,7 +132,7 @@ from ..plugins.mqtt_publisher import (
     charging_mode_from_setpoint,
     select_discovery_devices,
 )
-from ..storage.sqlite import SqliteStorageBackend
+from ..storage.sqlite import HISTORY_5M_RETENTION, SqliteStorageBackend
 from .config_api import mount_config_api
 from .mcp_tools import mount_mcp_server
 from .remote_access import DEFAULT_TRUSTED_HOSTS, ApiAccessMiddleware
@@ -1146,10 +1146,12 @@ class Application:
     # ------------------------------------------------------------------
 
     async def _purge_history(self) -> None:
-        """Delete measurements and ledger history older than the retention."""
+        """Delete ledger history and diagnostics older than the retention,
+        roll the device history up and drop its expired 5-minute rows."""
         cutoff = datetime.now(timezone.utc) - self._history_retention
         deleted = await self._storage.purge_before(cutoff)
         deleted += await self._storage.purge_savings(datetime.now(timezone.utc))
+        deleted += await self._storage.maintain_history()
         if deleted:
             _log.info("Purged %d history rows older than %s", deleted, cutoff.isoformat())
 
@@ -1168,6 +1170,11 @@ class Application:
             try:
                 await self._purge_history()
                 if first:
+                    # Databases from before the 5-minute / hourly history:
+                    # every reading was stored; roll them up and drop them.
+                    migrated = await self._storage.migrate_raw_measurements()
+                    if migrated:
+                        _log.info("Rolled %d raw measurements up into the compact history", migrated)
                     await self._storage.drop_redundant_index()
                     if await self._storage.enable_incremental_vacuum():
                         _log.info("Compacted history DB (one-time VACUUM)")
@@ -2775,8 +2782,9 @@ class Application:
             device_ids: str = "",
             start: datetime | None = None,
             end: datetime | None = None,
+            resolution: str = "auto",
         ) -> dict:
-            """Historical measurements from SQLite.
+            """Device history: mean power and state of charge per bucket.
 
             Query parameters
             ----------------
@@ -2784,13 +2792,23 @@ class Application:
             device_ids:  comma-separated device IDs.  Defaults to all storage
                          devices + the meters + PV producers.
             start, end:  explicit window instead of *hours* (naive = UTC; *end*
-                         defaults to now).  At most 7 days either way.
+                         defaults to now).
+            resolution:  ``5m``, ``1h`` or ``auto`` (default): 5-minute buckets
+                         for windows up to 3 days that the 5-minute tier still
+                         covers, hourly buckets beyond.
+
+            Each row is ``{t, power_w, soc_pct, pos_w, neg_w}`` with ``t`` the
+            start of the bucket; ``pos_w`` / ``neg_w`` are the means of the
+            positive and the negative part of the power (energy in each
+            direction = mean x bucket length).
             """
             now = _as_utc(end) if end is not None else datetime.now(timezone.utc)
-            if start is not None:
-                start = max(_as_utc(start), now - timedelta(hours=168.0))
+            begin = _as_utc(start) if start is not None else now - timedelta(hours=max(hours, 0.0))
+            fine_from = datetime.now(UTC) - HISTORY_5M_RETENTION
+            if resolution == "auto":
+                hourly = now - begin > timedelta(days=3) or begin < fine_from
             else:
-                start = now - timedelta(hours=min(hours, 168.0))  # max 7 days
+                hourly = resolution == "1h"
 
             if device_ids.strip():
                 ids = [d.strip() for d in device_ids.split(",") if d.strip()]
@@ -2803,14 +2821,19 @@ class Application:
                     ids.append(device.device_id)
                 ids = list(dict.fromkeys(ids))  # deduplicate preserving order
 
+            def _round(v: float | None) -> float | None:
+                return None if v is None else round(v, 1)
+
             result: dict[str, list] = {}
             for did in ids:
-                rows = await self._storage.query(did, start, now)
+                rows = await self._storage.query_history(did, begin, now, hourly=hourly)
                 result[did] = [
                     {
                         "t": r.timestamp.isoformat(),
-                        "power_w": r.power_w,
+                        "power_w": _round(r.power_w),
                         "soc_pct": r.soc_pct,
+                        "pos_w": _round(r.pos_w),
+                        "neg_w": _round(r.neg_w),
                     }
                     for r in rows
                 ]
@@ -2818,11 +2841,19 @@ class Application:
             # Include ledger history for storage devices
             ledger_hist: dict[str, list] = {}
             for sc in self._storage_constraints:
+                if device_ids.strip() and sc.device_id not in ids:
+                    continue
                 ledger_hist[sc.device_id] = await self._storage.query_ledger_history(
-                    sc.device_id, start, now
+                    sc.device_id, begin, now
                 )
 
-            return {"measurements": result, "ledger": ledger_hist}
+            return {
+                "resolution": "1h" if hourly else "5m",
+                "bucket_minutes": 60 if hourly else 5,
+                "measurements": result,
+                "ledger": ledger_hist,
+                **await self._storage.history_bounds(),
+            }
 
         @api.get("/api/config")
         async def get_config() -> dict:
