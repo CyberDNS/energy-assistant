@@ -1,14 +1,34 @@
 # syntax=docker/dockerfile:1
 # ── Energy Assistant — production container image ───────────────────────────
-# Multi-stage build: compile/install dependencies in a builder stage,
-# then copy only the installed package into a minimal runtime image.
+# Multi-stage build: build the web UI with Node, compile/install the Python
+# dependencies in a builder stage, then copy only the installed package into a
+# minimal runtime image.
 # This keeps the final image lean and avoids shipping build tooling.
 
-# --------------------------------------------------------------------------
-# Stage 1 — builder: install all Python dependencies and the package
-# --------------------------------------------------------------------------
+# Versions of the base images (global: declared before the first FROM)
 ARG PYTHON_VERSION=3.14
+ARG NODE_VERSION=24
 
+# --------------------------------------------------------------------------
+# Stage 1 — frontend: build the web UI (Vite) into the Python package
+# --------------------------------------------------------------------------
+# Runs on the build machine's own architecture: the result is plain JS/CSS,
+# so there is no need to emulate the target platform for it.
+FROM --platform=$BUILDPLATFORM node:${NODE_VERSION}-slim AS frontend
+
+WORKDIR /build/frontend
+
+# Dependencies first, so source changes don't invalidate the install layer
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+
+COPY frontend/ ./
+# Writes to /build/src/energy_assistant/frontend (see frontend/vite.config.ts)
+RUN npm run build
+
+# --------------------------------------------------------------------------
+# Stage 2 — builder: install all Python dependencies and the package
+# --------------------------------------------------------------------------
 FROM python:${PYTHON_VERSION}-slim AS builder
 
 WORKDIR /build
@@ -30,13 +50,13 @@ RUN pip install --no-cache-dir uv
 # (maximises Docker layer cache — source changes don't invalidate deps)
 COPY pyproject.toml uv.lock* README.md ./
 COPY src/ ./src/
-COPY frontend/ ./frontend/
+COPY --from=frontend /build/src/energy_assistant/frontend ./src/energy_assistant/frontend
 
 # Install the package and its runtime dependencies into an isolated prefix
 RUN uv pip install --system --no-cache .
 
 # --------------------------------------------------------------------------
-# Stage 2 — runtime: minimal image with only what is needed to run
+# Stage 3 — runtime: minimal image with only what is needed to run
 # --------------------------------------------------------------------------
 FROM python:${PYTHON_VERSION}-slim AS runtime
 
