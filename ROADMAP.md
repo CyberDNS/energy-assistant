@@ -72,6 +72,9 @@ and what comes later. Open items link to their GitHub issue.
 - [x] Read-only REST API and MCP endpoint with token
 - [x] Docker image (GHCR), HA add-on (stable / dev / edge), release promotion model
 - [x] UI refresh (#115): sidebar with Overview / Devices / Insights / System, status bar and attention notices, Settings area, pages for cars, batteries and loads, light and dark theme; takes over the screen inside Home Assistant (2026.2+)
+- [x] Device-centred UI (#117): a page per device with plan, history, savings and learned model; All devices; Home as a house overview (power flow, today's timeline, next actions)
+- [x] Compact history (#118): 5-minute and hourly roll-ups instead of every reading
+- [x] Logo, Home Assistant sidebar entry, time-only chart interaction (#119)
 - [x] Optional `api_url` for Tibber and Forecast.Solar to run against a local test server; isolated dev/test stacks per worktree
 
 ---

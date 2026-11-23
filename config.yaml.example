@@ -163,8 +163,9 @@ controller:
 server:
   # Port for the built-in web UI and REST API.
   port: 8088
-  # Days of measurement / battery-ledger history kept in the SQLite DB.
-  # Older rows are purged hourly. The history API serves at most 7 days.
+  # Days of battery-ledger history, plan snapshots and execution records kept
+  # in the SQLite DB. Device history (power, state of charge) is independent
+  # of this: 5-minute averages for about two weeks, hourly averages for good.
   history_retention_days: 8
   # Optional: token for read-only access from outside Home Assistant ingress
   # (REST GET requests and the MCP endpoint at /mcp). Without it the API has

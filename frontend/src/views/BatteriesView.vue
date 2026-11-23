@@ -5,6 +5,8 @@ import { computed, inject, onMounted, onUnmounted, ref, watch } from 'vue'
 import { fetchControllable, fetchLedger, setLedgerBasis } from '../api.js'
 import ControllableDeviceCard from '../components/ControllableDeviceCard.vue'
 import DeviceCard from '../components/DeviceCard.vue'
+import DeviceSavings from '../components/DeviceSavings.vue'
+import { deviceLink } from '../lib/deviceLinks'
 import { useLiveDevices } from '../composables/useLiveDevices'
 import { labelOf, planVersion } from '../composables/useStatus.js'
 import { fmt } from '../lib/format'
@@ -71,7 +73,7 @@ const loading = computed(() => status.value == null)
 <template>
   <div>
     <div v-if="batteries.length" class="dev-cards full">
-      <DeviceCard v-for="d in batteries" :key="d.device_id" :device="d" class="bg-card" />
+      <DeviceCard v-for="d in batteries" :key="d.device_id" :device="d" :to="deviceLink(d)" class="bg-card" />
     </div>
     <div v-else-if="loading" class="text-muted-foreground py-4 text-sm">Loading…</div>
 
@@ -81,6 +83,8 @@ const loading = computed(() => status.value == null)
         <ControllableDeviceCard v-for="d in planned" :key="d.device_id" :device="d" />
       </div>
     </div>
+
+    <DeviceSavings group="batteries" />
 
     <div class="full panel">
       <h2>Stored energy and its cost</h2>

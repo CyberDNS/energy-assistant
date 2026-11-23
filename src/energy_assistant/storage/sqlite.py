@@ -4,8 +4,21 @@ Uses ``aiosqlite`` for non-blocking I/O within the asyncio event loop.
 
 Schema
 ------
-A single ``measurements`` table with a composite primary key on
-``(device_id, timestamp)``.  No external database server is required.
+Device history is kept in two compact tiers, both keyed on
+``(device_id, timestamp)`` with the timestamp of the bucket's start:
+
+``history_5m``
+    One row per device and 5 minutes: mean power (split into its positive and
+    negative part, so import and export do not cancel out), the last state of
+    charge and the number of readings.  Kept ``HISTORY_5M_RETENTION``.
+``history_1h``
+    The same per hour, rolled up from the 5-minute rows.  Kept for good:
+    24 rows per device and day.
+
+Readings arrive every few seconds; ``write()`` only adds them to the open
+bucket in memory and stores the bucket about once a minute.  Databases from
+before the tiers hold a ``measurements`` table with every reading; it is
+rolled up and removed in the background (``migrate_raw_measurements``).
 
 Timestamps
 ----------
@@ -18,7 +31,7 @@ datetimes are taken to be UTC.
 Retention
 ---------
 History tables are not self-limiting: the owner calls ``purge_before()``
-periodically.  ``enable_incremental_vacuum()`` converts the DB once so that
+and ``maintain_history()`` periodically.  ``enable_incremental_vacuum()`` converts the DB once so that
 purged pages are actually returned to the filesystem.
 
 Lifecycle
@@ -36,8 +49,10 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import time
 import zlib
-from datetime import date, datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 
 import aiosqlite
@@ -49,15 +64,67 @@ from ..core.savings import SavingsSlot, SlotCorrection
 
 _log = logging.getLogger(__name__)
 
-_CREATE_TABLE = """
-CREATE TABLE IF NOT EXISTS measurements (
+HISTORY_5M_RETENTION = timedelta(days=15)
+"""How long 5-minute rows are kept (the battery efficiency learning looks
+back 14 days); the hourly rows stay."""
+
+_BUCKET = timedelta(minutes=5)
+_FLUSH_INTERVAL_S = 60.0
+"""How often the open bucket of a device is stored, so charts and a restart
+lose at most this much."""
+
+_HISTORY_COLUMNS = """
     device_id  TEXT NOT NULL,
     timestamp  TEXT NOT NULL,
-    power_w    REAL,
-    energy_kwh REAL,
+    pos_w      REAL,
+    neg_w      REAL,
     soc_pct    REAL,
-    extra      TEXT,
+    samples    INTEGER NOT NULL,
     PRIMARY KEY (device_id, timestamp)
+"""
+_CREATE_HISTORY_TABLES = tuple(
+    f"CREATE TABLE IF NOT EXISTS {table} ({_HISTORY_COLUMNS}) WITHOUT ROWID"
+    for table in ("history_5m", "history_1h")
+)
+
+_UPSERT_HISTORY_5M = """
+INSERT OR REPLACE INTO history_5m (device_id, timestamp, pos_w, neg_w, soc_pct, samples)
+VALUES (?, ?, ?, ?, ?, ?)
+"""
+
+# Raw readings of one time window as 5-minute rows.  The single ``max()``
+# makes SQLite take the bare ``soc_pct`` from the last reading of each bucket.
+_ROLL_UP_RAW = """
+INSERT OR IGNORE INTO history_5m (device_id, timestamp, pos_w, neg_w, soc_pct, samples)
+SELECT device_id, bucket, pos_w, neg_w, soc_pct, samples FROM (
+    SELECT device_id,
+           substr(timestamp, 1, 14) || printf('%02d', CAST(substr(timestamp, 15, 2) AS INTEGER) / 5 * 5)
+               || ':00+00:00' AS bucket,
+           avg(max(power_w, 0)) AS pos_w,
+           avg(max(-power_w, 0)) AS neg_w,
+           soc_pct,
+           count(power_w) AS samples,
+           max(timestamp) AS last
+    FROM measurements
+    WHERE timestamp >= ? AND timestamp < ?
+    GROUP BY device_id, bucket
+)
+"""
+
+# 5-minute rows of whole hours as hourly rows, weighted by their readings.
+_ROLL_UP_HOURS = """
+INSERT OR REPLACE INTO history_1h (device_id, timestamp, pos_w, neg_w, soc_pct, samples)
+SELECT device_id, hour, pos_w, neg_w, soc_pct, samples FROM (
+    SELECT device_id,
+           substr(timestamp, 1, 13) || ':00:00+00:00' AS hour,
+           sum(pos_w * samples) / sum(CASE WHEN pos_w IS NOT NULL THEN samples END) AS pos_w,
+           sum(neg_w * samples) / sum(CASE WHEN neg_w IS NOT NULL THEN samples END) AS neg_w,
+           soc_pct,
+           sum(samples) AS samples,
+           max(timestamp) AS last
+    FROM history_5m
+    WHERE timestamp >= ? AND timestamp < ?
+    GROUP BY device_id, hour
 )
 """
 
@@ -114,6 +181,7 @@ DELETE FROM {table} WHERE rowid IN (
 """
     for table in ("measurements", "ledger_history")
 }
+# "measurements" only exists in databases from before the history tiers.
 
 _PURGE_BATCH_SIZE = 10_000
 
@@ -330,18 +398,49 @@ _LOAD_LEDGER = """
 SELECT cost_basis, stored_energy_kwh FROM ledger_state WHERE device_id = ?
 """
 
-_INSERT = """
-INSERT OR REPLACE INTO measurements
-    (device_id, timestamp, power_w, energy_kwh, soc_pct, extra)
-VALUES (?, ?, ?, ?, ?, ?)
-"""
 
-_QUERY = """
-SELECT device_id, timestamp, power_w, energy_kwh, soc_pct, extra
-FROM measurements
-WHERE device_id = ? AND timestamp BETWEEN ? AND ?
-ORDER BY timestamp
-"""
+@dataclass(frozen=True)
+class HistoryRow:
+    """One bucket of a device's history (5 minutes or an hour)."""
+
+    timestamp: datetime  # start of the bucket, UTC
+    pos_w: float | None  # mean of the positive part of the power
+    neg_w: float | None  # mean of the negative part, as a positive number
+    soc_pct: float | None  # last reading in the bucket
+
+    @property
+    def power_w(self) -> float | None:
+        """Mean power over the bucket."""
+        if self.pos_w is None and self.neg_w is None:
+            return None
+        return (self.pos_w or 0.0) - (self.neg_w or 0.0)
+
+
+@dataclass
+class _Bucket:
+    """The readings of one device in the 5 minutes from ``start``."""
+
+    start: datetime
+    stored_at: float  # time.monotonic() of the last store
+    pos_sum: float = 0.0
+    neg_sum: float = 0.0
+    samples: int = 0  # readings with a power value
+    soc: float | None = None
+    dirty: bool = False
+
+    def add(self, power_w: float | None, soc_pct: float | None) -> None:
+        if power_w is not None:
+            self.pos_sum += max(power_w, 0.0)
+            self.neg_sum += max(-power_w, 0.0)
+            self.samples += 1
+            self.dirty = True
+        if soc_pct is not None:
+            self.soc = soc_pct
+            self.dirty = True
+
+
+def _bucket_start(ts: datetime) -> datetime:
+    return ts.replace(minute=ts.minute - ts.minute % 5, second=0, microsecond=0)
 
 
 class SqliteStorageBackend:
@@ -350,6 +449,12 @@ class SqliteStorageBackend:
     def __init__(self, db_path: Path | str) -> None:
         self._db_path = Path(db_path)
         self._db: aiosqlite.Connection | None = None
+        # Open 5-minute bucket per device (see write()).
+        self._buckets: dict[str, _Bucket] = {}
+        # Last reading's timestamp per device: a device that reports slowly
+        # is polled many times with the same reading.
+        self._last_seen: dict[str, datetime] = {}
+        self._has_raw = False
 
     @staticmethod
     async def _open_db(path: Path) -> aiosqlite.Connection:
@@ -375,7 +480,9 @@ class SqliteStorageBackend:
             )
             raise
 
-        await self._db.execute(_CREATE_TABLE)
+        for ddl in _CREATE_HISTORY_TABLES:
+            await self._db.execute(ddl)
+        self._has_raw = await self._table_exists("measurements")
         await self._db.execute(_CREATE_LEDGER_TABLE)
         await self._db.execute(_CREATE_LEDGER_HISTORY_TABLE)
         await self._db.execute(_CREATE_EV_WEEKLY_PLAN_TABLE)
@@ -414,6 +521,8 @@ class SqliteStorageBackend:
             return
         rewritten = 0
         for table in _UTC_TIMESTAMP_TABLES:
+            if not await self._table_exists(table):
+                continue
             async with self._db.execute(
                 f"SELECT rowid, timestamp FROM {table} WHERE timestamp NOT LIKE '%+00:00'"
             ) as cursor:
@@ -446,36 +555,209 @@ class SqliteStorageBackend:
                 await self._db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
     async def stop(self) -> None:
-        """Close the database connection."""
+        """Store the open history buckets and close the database connection."""
         if self._db is not None:
+            await self.flush()
             await self._db.close()
             self._db = None
 
+    async def _table_exists(self, table: str) -> bool:
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+        ) as cursor:
+            return await cursor.fetchone() is not None
+
+    # ------------------------------------------------------------------
+    # Device history: 5-minute and hourly tiers
+    # ------------------------------------------------------------------
+
     async def write(self, measurement: Measurement) -> None:
-        """Persist a single measurement.  Overwrites any existing entry for
-        the same ``(device_id, timestamp)`` pair."""
+        """Add a reading to its device's 5-minute bucket.
+
+        The bucket is stored when the next one begins and about once a minute
+        in between; ``flush()`` stores all open buckets now.  A reading with
+        the timestamp of the previous one (a device polled faster than it
+        reports) is counted once.
+        """
         assert self._db is not None, "Call start() before write()"
-        extra_json = json.dumps(measurement.extra) if measurement.extra else None
+        device_id = measurement.device_id
+        ts = _as_utc(measurement.timestamp)
+        if self._last_seen.get(device_id) == ts:
+            return
+        self._last_seen[device_id] = ts
+        start = _bucket_start(ts)
+        bucket = self._buckets.get(device_id)
+        if bucket is None or bucket.start != start:
+            if bucket is not None:
+                await self._store_bucket(device_id, bucket)
+            bucket = await self._load_bucket(device_id, start)
+            self._buckets[device_id] = bucket
+        bucket.add(measurement.power_w, measurement.soc_pct)
+        if time.monotonic() - bucket.stored_at >= _FLUSH_INTERVAL_S:
+            await self._store_bucket(device_id, bucket)
+
+    async def _load_bucket(self, device_id: str, start: datetime) -> _Bucket:
+        """The bucket as stored so far (after a restart, or for a late
+        reading), else an empty one."""
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT pos_w, neg_w, soc_pct, samples FROM history_5m WHERE device_id = ? AND timestamp = ?",
+            (device_id, _utc_ts(start)),
+        ) as cursor:
+            row = await cursor.fetchone()
+        bucket = _Bucket(start=start, stored_at=time.monotonic())
+        if row is not None:
+            pos, neg, soc, n = row
+            bucket.samples = int(n or 0)
+            bucket.pos_sum = (pos or 0.0) * bucket.samples
+            bucket.neg_sum = (neg or 0.0) * bucket.samples
+            bucket.soc = soc
+        return bucket
+
+    async def _store_bucket(self, device_id: str, bucket: _Bucket) -> None:
+        assert self._db is not None
+        bucket.stored_at = time.monotonic()
+        if not bucket.dirty:
+            return
+        bucket.dirty = False
+        n = bucket.samples
         await self._db.execute(
-            _INSERT,
+            _UPSERT_HISTORY_5M,
             (
-                measurement.device_id,
-                _utc_ts(measurement.timestamp),
-                measurement.power_w,
-                measurement.energy_kwh,
-                measurement.soc_pct,
-                extra_json,
+                device_id, _utc_ts(bucket.start),
+                bucket.pos_sum / n if n else None,
+                bucket.neg_sum / n if n else None,
+                bucket.soc, n,
             ),
         )
         await self._db.commit()
+
+    async def flush(self, device_id: str | None = None) -> None:
+        """Store the open bucket of *device_id* (default: of every device)."""
+        for did, bucket in list(self._buckets.items()):
+            if device_id is None or did == device_id:
+                await self._store_bucket(did, bucket)
+
+    async def query_history(
+        self,
+        device_id: str,
+        start: datetime,
+        end: datetime,
+        *,
+        hourly: bool = False,
+    ) -> list[HistoryRow]:
+        """The 5-minute (or hourly) rows of *device_id* that begin in ``[start, end]``.
+
+        The open bucket is included.  The hourly tier ends with the last
+        complete hour that ``maintain_history()`` has rolled up.
+        """
+        assert self._db is not None, "Call start() before query_history()"
+        await self.flush(device_id)
+        table = "history_1h" if hourly else "history_5m"
+        async with self._db.execute(
+            f"SELECT timestamp, pos_w, neg_w, soc_pct FROM {table} "
+            "WHERE device_id = ? AND timestamp BETWEEN ? AND ? ORDER BY timestamp",
+            (device_id, _utc_ts(start), _utc_ts(end)),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [HistoryRow(datetime.fromisoformat(r[0]), r[1], r[2], r[3]) for r in rows]
+
+    async def query_power_soc(
+        self,
+        device_id: str,
+        start: datetime,
+        end: datetime,
+    ) -> list[tuple[datetime, float | None, float | None]]:
+        """``(bucket start, mean power_w, last soc_pct)`` per 5 minutes for
+        *device_id* in ``[start, end]``."""
+        rows = await self.query_history(device_id, start, end)
+        return [(r.timestamp, r.power_w, r.soc_pct) for r in rows]
+
+    async def history_bounds(self) -> dict[str, str | None]:
+        """Start of the oldest row of each tier (ISO, UTC), for the API."""
+        assert self._db is not None
+        out: dict[str, str | None] = {}
+        for key, table in (("five_minutes_from", "history_5m"), ("hourly_from", "history_1h")):
+            async with self._db.execute(f"SELECT min(timestamp) FROM {table}") as cursor:
+                row = await cursor.fetchone()
+            out[key] = row[0] if row else None
+        return out
+
+    async def maintain_history(self, now: datetime | None = None) -> int:
+        """Roll finished hours up into the hourly tier and drop expired
+        5-minute rows.  Returns the number of 5-minute rows deleted."""
+        assert self._db is not None, "Call start() before maintain_history()"
+        now = _as_utc(now or datetime.now(UTC))
+        await self.flush()
+        this_hour = now.replace(minute=0, second=0, microsecond=0)
+        # From the last hour already rolled up (again: late readings may have
+        # completed it), or from the oldest 5-minute row.
+        async with self._db.execute("SELECT max(timestamp) FROM history_1h") as cursor:
+            last = (await cursor.fetchone())[0]
+        if last is None:
+            async with self._db.execute("SELECT min(timestamp) FROM history_5m") as cursor:
+                last = (await cursor.fetchone())[0]
+        if last is not None:
+            first_hour = datetime.fromisoformat(last).replace(minute=0, second=0, microsecond=0)
+            await self._db.execute(_ROLL_UP_HOURS, (_utc_ts(first_hour), _utc_ts(this_hour)))
+            await self._db.commit()
+        async with self._db.execute(
+            "DELETE FROM history_5m WHERE timestamp < ?", (_utc_ts(this_hour - HISTORY_5M_RETENTION),)
+        ) as cursor:
+            deleted = max(cursor.rowcount, 0)
+        await self._db.commit()
+        return deleted
+
+    async def migrate_raw_measurements(self, chunk: timedelta = timedelta(hours=6)) -> int:
+        """Roll the ``measurements`` table of an older database up into the
+        tiers and remove it.  Returns the number of raw rows processed.
+
+        Works through the table oldest first in *chunk*-sized windows, each
+        its own transaction: other writes interleave, and an interrupted run
+        continues where it stopped.  Rows that are already in the tiers (the
+        hours since the upgrade) are kept as they are.
+        """
+        assert self._db is not None, "Call start() before migrate_raw_measurements()"
+        if not self._has_raw:
+            return 0
+        done = 0
+        while True:
+            async with self._db.execute("SELECT min(timestamp) FROM measurements") as cursor:
+                first = (await cursor.fetchone())[0]
+            if first is None:
+                break
+            try:
+                start = datetime.fromisoformat(first).replace(minute=0, second=0, microsecond=0)
+            except ValueError:
+                _log.warning("Unparseable timestamp %r in measurements: row dropped", first)
+                await self._db.execute("DELETE FROM measurements WHERE timestamp = ?", (first,))
+                await self._db.commit()
+                continue
+            lo, hi = _utc_ts(start), _utc_ts(start + chunk)
+            await self._db.execute(_ROLL_UP_RAW, (lo, hi))
+            # ``first`` may sort below ``lo`` only by its sub-second part.
+            async with self._db.execute("DELETE FROM measurements WHERE timestamp < ?", (hi,)) as cursor:
+                done += max(cursor.rowcount, 0)
+            await self._db.commit()
+        await self._db.execute("DROP TABLE measurements")
+        await self._db.commit()
+        self._has_raw = False
+        await self.maintain_history()
+        async with self._db.execute("PRAGMA incremental_vacuum") as cursor:
+            await cursor.fetchall()
+        await self._db.commit()
+        return done
 
     async def purge_before(
         self,
         cutoff: datetime,
         batch_size: int = _PURGE_BATCH_SIZE,
     ) -> int:
-        """Delete measurements, ledger history, plan snapshots and the
-        control execution log older than *cutoff*.
+        """Delete ledger history, plan snapshots and the control execution
+        log older than *cutoff* (and raw measurements, while an older
+        database still has them).  The device history tiers have their own
+        retention: see ``maintain_history()``.
 
         Deletes in committed batches of *batch_size* rows (see
         ``_PURGE_BATCH_SQL``).  Freed pages are returned to the filesystem via
@@ -486,7 +768,9 @@ class SqliteStorageBackend:
         ts = _utc_ts(cutoff)
         deleted = 0
         next_log = 1_000_000
-        for sql in _PURGE_BATCH_SQL.values():
+        for table, sql in _PURGE_BATCH_SQL.items():
+            if table == "measurements" and not self._has_raw:
+                continue
             while True:
                 async with self._db.execute(sql, (ts, batch_size)) as cursor:
                     n = max(cursor.rowcount, 0)
@@ -541,55 +825,6 @@ class SqliteStorageBackend:
                 if "transaction" not in str(exc) or attempt == 4:
                     raise
         return True
-
-    async def query(
-        self,
-        device_id: str,
-        start: datetime,
-        end: datetime,
-    ) -> list[Measurement]:
-        """Return all measurements for *device_id* in ``[start, end]``."""
-        assert self._db is not None, "Call start() before query()"
-        async with self._db.execute(
-            _QUERY,
-            (device_id, _utc_ts(start), _utc_ts(end)),
-        ) as cursor:
-            rows = await cursor.fetchall()
-
-        result: list[Measurement] = []
-        for row in rows:
-            extra = json.loads(row[5]) if row[5] else {}
-            result.append(
-                Measurement(
-                    device_id=row[0],
-                    timestamp=datetime.fromisoformat(row[1]),
-                    power_w=row[2],
-                    energy_kwh=row[3],
-                    soc_pct=row[4],
-                    extra=extra,
-                )
-            )
-        return result
-
-    async def query_power_soc(
-        self,
-        device_id: str,
-        start: datetime,
-        end: datetime,
-    ) -> list[tuple[datetime, float | None, float | None]]:
-        """``(timestamp, power_w, soc_pct)`` for *device_id* in ``[start, end]``.
-
-        A light version of :meth:`query` for long windows (a week of polls is
-        ~200k rows): plain tuples, no ``Measurement`` objects.
-        """
-        assert self._db is not None, "Call start() before query_power_soc()"
-        async with self._db.execute(
-            "SELECT timestamp, power_w, soc_pct FROM measurements "
-            "WHERE device_id = ? AND timestamp BETWEEN ? AND ? ORDER BY timestamp",
-            (device_id, _utc_ts(start), _utc_ts(end)),
-        ) as cursor:
-            rows = await cursor.fetchall()
-        return [(datetime.fromisoformat(r[0]), r[1], r[2]) for r in rows]
 
     async def save_ledger_state(
         self,

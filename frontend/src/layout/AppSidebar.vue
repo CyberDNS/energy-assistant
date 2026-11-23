@@ -1,14 +1,16 @@
 <script setup lang="ts">
 import type { Ref } from 'vue'
 import type { Status } from '@/composables/usePowerFlow'
-import { House, PanelLeft, Zap } from '@lucide/vue'
+import { House, PanelLeft } from '@lucide/vue'
 import { computed, inject, watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
+import logo from '@/assets/logo.svg'
 import {
   Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent, SidebarGroupLabel,
   SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarRail, useSidebar,
 } from '@/components/ui/sidebar'
 import { usePowerFlow } from '@/composables/usePowerFlow'
+import { pageNav } from '@/composables/usePageTitle'
 import { haState, toggleHAMenu } from '@/lib/homeassistant'
 import { visibleNav } from '@/nav'
 import { vehicles } from '@/stores/inventory'
@@ -19,7 +21,7 @@ const route = useRoute()
 const { isMobile, setOpenMobile, toggleSidebar, state } = useSidebar()
 
 const groups = computed(() => visibleNav({ categories: categories.value, vehicleCount: vehicles.value.length }))
-const active = computed(() => route.meta.nav)
+const active = computed(() => pageNav.value ?? route.meta.nav)
 
 // On a phone the sidebar is a drawer: close it once a page is chosen.
 watch(() => route.fullPath, () => { if (isMobile.value) setOpenMobile(false) })
@@ -37,9 +39,7 @@ function openHomeAssistant() {
         <SidebarMenuItem>
           <SidebarMenuButton size="lg" as-child tooltip="Energy Assistant">
             <RouterLink to="/">
-              <span class="bg-primary text-primary-foreground flex aspect-square size-8 items-center justify-center rounded-lg">
-                <Zap class="size-4.5" fill="currentColor" />
-              </span>
+              <img :src="logo" alt="" class="size-8 shrink-0">
               <span class="truncate text-base font-semibold tracking-tight">Energy Assistant</span>
             </RouterLink>
           </SidebarMenuButton>

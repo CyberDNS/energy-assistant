@@ -8,8 +8,16 @@ from pathlib import Path
 
 import pytest
 
-from energy_assistant.core.models import Measurement
 from energy_assistant.storage.sqlite import SqliteStorageBackend
+
+
+_LEGACY_MEASUREMENTS = (
+    "CREATE TABLE measurements (device_id TEXT NOT NULL, timestamp TEXT NOT NULL,"
+    " power_w REAL, energy_kwh REAL, soc_pct REAL, extra TEXT,"
+    " PRIMARY KEY (device_id, timestamp))"
+)
+# The table of every reading that databases from before the history tiers
+# have (see test_history_tiers.py for what happens to it).
 
 
 class _FakeConnection:
@@ -58,14 +66,11 @@ class TestSqliteStorageRetention:
         now = datetime.now(timezone.utc)
         old, recent = now - timedelta(days=10), now - timedelta(hours=1)
         for ts in (old, recent):
-            await backend.write(Measurement(device_id="bat", timestamp=ts, power_w=1.0))
             await backend.append_ledger_history("bat", 0.2, 3.0, timestamp=ts)
 
         deleted = await backend.purge_before(now - timedelta(days=8))
 
-        assert deleted == 2
-        rows = await backend.query("bat", old - timedelta(days=1), now)
-        assert [r.timestamp for r in rows] == [recent]
+        assert deleted == 1
         hist = await backend.query_ledger_history("bat", old - timedelta(days=1), now)
         assert [h["t"] for h in hist] == [recent.isoformat()]
         await backend.stop()
@@ -88,9 +93,7 @@ class TestSqliteStorageRetention:
         await backend.enable_incremental_vacuum()
         start = datetime.now(timezone.utc) - timedelta(days=30)
         for i in range(5000):
-            await backend.write(
-                Measurement(device_id="m", timestamp=start + timedelta(seconds=i), power_w=float(i))
-            )
+            await backend.append_ledger_history("m", 0.2, float(i), timestamp=start + timedelta(seconds=i))
         size_full = db_path.stat().st_size
 
         await backend.purge_before(datetime.now(timezone.utc))
@@ -101,11 +104,7 @@ class TestSqliteStorageRetention:
     async def test_drop_redundant_index(self, tmp_path: Path) -> None:
         db_path = tmp_path / "h.db"
         with sqlite3.connect(db_path) as conn:
-            conn.execute(
-                "CREATE TABLE measurements (device_id TEXT NOT NULL, timestamp TEXT NOT NULL,"
-                " power_w REAL, energy_kwh REAL, soc_pct REAL, extra TEXT,"
-                " PRIMARY KEY (device_id, timestamp))"
-            )
+            conn.execute(_LEGACY_MEASUREMENTS)
             conn.execute("CREATE INDEX idx_device_timestamp ON measurements (device_id, timestamp)")
 
         backend = SqliteStorageBackend(db_path)
@@ -123,16 +122,14 @@ class TestSqliteStorageRetention:
         now = datetime.now(timezone.utc)
         start = now - timedelta(days=10)
         for i in range(10):
-            await backend.write(
-                Measurement(device_id="m", timestamp=start + timedelta(minutes=i), power_w=1.0)
-            )
-        await backend.write(Measurement(device_id="m", timestamp=now, power_w=1.0))
+            await backend.append_ledger_history("m", 0.2, 3.0, timestamp=start + timedelta(minutes=i))
+        await backend.append_ledger_history("m", 0.2, 3.0, timestamp=now)
 
         deleted = await backend.purge_before(now - timedelta(days=1), batch_size=3)
 
         assert deleted == 10
-        rows = await backend.query("m", start - timedelta(days=1), now)
-        assert [r.timestamp for r in rows] == [now]
+        rows = await backend.query_ledger_history("m", start - timedelta(days=1), now)
+        assert [r["t"] for r in rows] == [now.isoformat()]
         await backend.stop()
 
 
@@ -141,104 +138,6 @@ _CET = timezone(timedelta(hours=1))
 
 class TestSqliteStorageTimestampOffsets:
     """Timestamps with a non-UTC offset (e.g. Tibber's "+01:00") — issue #62."""
-
-    async def test_offset_measurement_found_by_utc_window(self, tmp_path: Path) -> None:
-        backend = SqliteStorageBackend(tmp_path / "h.db")
-        await backend.start()
-        ts = datetime(2026, 11, 17, 17, 49, 35, tzinfo=_CET)  # 16:49:35 UTC
-        await backend.write(Measurement(device_id="tibber", timestamp=ts, power_w=500.0))
-
-        utc = timezone.utc
-        inside = await backend.query(
-            "tibber", datetime(2026, 11, 17, 16, 0, tzinfo=utc), datetime(2026, 11, 17, 17, 0, tzinfo=utc)
-        )
-        # Lexically "17:49:35+01:00" lies inside 17:00–18:00 UTC, but the instant does not.
-        outside = await backend.query(
-            "tibber", datetime(2026, 11, 17, 17, 0, tzinfo=utc), datetime(2026, 11, 17, 18, 0, tzinfo=utc)
-        )
-
-        assert [m.timestamp for m in inside] == [ts]
-        assert inside[0].timestamp.utcoffset() == timedelta(0)
-        assert outside == []
-        await backend.stop()
-
-    async def test_query_bounds_with_offset(self, tmp_path: Path) -> None:
-        backend = SqliteStorageBackend(tmp_path / "h.db")
-        await backend.start()
-        ts = datetime(2026, 11, 17, 16, 30, tzinfo=timezone.utc)
-        await backend.write(Measurement(device_id="m", timestamp=ts, power_w=1.0))
-
-        rows = await backend.query(
-            "m", datetime(2026, 11, 17, 17, 0, tzinfo=_CET), datetime(2026, 11, 17, 18, 0, tzinfo=_CET)
-        )
-
-        assert [r.timestamp for r in rows] == [ts]
-        await backend.stop()
-
-    async def test_query_power_soc_returns_tuples_in_order(self, tmp_path: Path) -> None:
-        backend = SqliteStorageBackend(tmp_path / "h.db")
-        await backend.start()
-        t0 = datetime(2026, 11, 17, 16, 0, tzinfo=timezone.utc)
-        for i, (p, soc) in enumerate([(100.0, 10.0), (None, 11.0), (-50.0, None)]):
-            await backend.write(Measurement(
-                device_id="b", timestamp=t0 + timedelta(seconds=3 * i), power_w=p, soc_pct=soc,
-            ))
-        await backend.write(Measurement(device_id="other", timestamp=t0, power_w=1.0))
-
-        rows = await backend.query_power_soc("b", t0, t0 + timedelta(minutes=1))
-
-        assert rows == [
-            (t0, 100.0, 10.0),
-            (t0 + timedelta(seconds=3), None, 11.0),
-            (t0 + timedelta(seconds=6), -50.0, None),
-        ]
-        await backend.stop()
-
-    async def test_mixed_offsets_come_back_in_chronological_order(self, tmp_path: Path) -> None:
-        backend = SqliteStorageBackend(tmp_path / "h.db")
-        await backend.start()
-        base = datetime(2026, 11, 17, 16, 0, tzinfo=timezone.utc)
-        instants = [base + timedelta(minutes=10 * i) for i in range(6)]
-        # Alternate UTC and +01:00 inputs, written out of order.
-        for i in (3, 0, 5, 1, 4, 2):
-            ts = instants[i] if i % 2 else instants[i].astimezone(_CET)
-            await backend.write(Measurement(device_id="m", timestamp=ts, power_w=float(i)))
-            await backend.append_ledger_history("m", 0.2, float(i), timestamp=ts)
-
-        rows = await backend.query("m", base, base + timedelta(hours=1))
-        hist = await backend.query_ledger_history("m", base, base + timedelta(hours=1))
-
-        assert [r.timestamp for r in rows] == instants
-        assert [r.power_w for r in rows] == [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
-        assert [h["stored_energy_kwh"] for h in hist] == [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
-        assert all(h["t"].endswith("+00:00") for h in hist)
-        await backend.stop()
-
-    async def test_same_instant_with_different_offsets_is_one_row(self, tmp_path: Path) -> None:
-        backend = SqliteStorageBackend(tmp_path / "h.db")
-        await backend.start()
-        ts = datetime(2026, 11, 17, 16, 0, tzinfo=timezone.utc)
-        await backend.write(Measurement(device_id="m", timestamp=ts, power_w=1.0))
-        await backend.write(Measurement(device_id="m", timestamp=ts.astimezone(_CET), power_w=2.0))
-
-        rows = await backend.query("m", ts - timedelta(minutes=1), ts + timedelta(minutes=1))
-
-        assert [r.power_w for r in rows] == [2.0]
-        await backend.stop()
-
-    async def test_naive_timestamps_are_taken_as_utc(self, tmp_path: Path) -> None:
-        backend = SqliteStorageBackend(tmp_path / "h.db")
-        await backend.start()
-        await backend.write(Measurement(device_id="m", timestamp=datetime(2026, 11, 17, 16, 0), power_w=1.0))
-
-        rows = await backend.query(
-            "m",
-            datetime(2026, 11, 17, 15, 59, tzinfo=timezone.utc),
-            datetime(2026, 11, 17, 16, 1, tzinfo=timezone.utc),
-        )
-
-        assert [r.timestamp for r in rows] == [datetime(2026, 11, 17, 16, 0, tzinfo=timezone.utc)]
-        await backend.stop()
 
     async def test_purge_respects_the_instant(self, tmp_path: Path) -> None:
         backend = SqliteStorageBackend(tmp_path / "h.db")
@@ -250,14 +149,13 @@ class TestSqliteStorageTimestampOffsets:
         # comparison would wrongly keep it.
         drop = datetime(2026, 11, 17, 17, 15, tzinfo=_CET)
         for ts in (drop, keep):
-            await backend.write(Measurement(device_id="m", timestamp=ts, power_w=1.0))
             await backend.append_ledger_history("m", 0.2, 3.0, timestamp=ts)
 
         deleted = await backend.purge_before(cutoff)
 
-        assert deleted == 2
-        rows = await backend.query("m", cutoff - timedelta(hours=2), cutoff + timedelta(hours=2))
-        assert [r.timestamp for r in rows] == [keep]
+        assert deleted == 1
+        rows = await backend.query_ledger_history("m", cutoff - timedelta(hours=2), cutoff + timedelta(hours=2))
+        assert [r["t"] for r in rows] == [keep.astimezone(timezone.utc).isoformat()]
         await backend.stop()
 
     async def test_start_migrates_offset_rows_to_utc(self, tmp_path: Path) -> None:
@@ -268,6 +166,7 @@ class TestSqliteStorageTimestampOffsets:
         # Rows as older versions stored them: with the source's offset.
         with sqlite3.connect(db_path) as conn:
             conn.execute("PRAGMA user_version = 0")
+            conn.execute(_LEGACY_MEASUREMENTS)
             conn.executemany(
                 "INSERT INTO measurements (device_id, timestamp, power_w) VALUES (?, ?, ?)",
                 [
@@ -311,6 +210,7 @@ class TestSqliteStorageTimestampOffsets:
         await backend.start()
         await backend.stop()
         with sqlite3.connect(db_path) as conn:
+            conn.execute(_LEGACY_MEASUREMENTS)
             conn.execute(
                 "INSERT INTO measurements (device_id, timestamp, power_w) VALUES (?, ?, ?)",
                 ("m", "2026-11-17T17:49:35+01:00", 1.0),

@@ -6,6 +6,7 @@ import { RouterLink } from 'vue-router'
 import { fetchControllable } from '../api.js'
 import ControllableDeviceCard from '../components/ControllableDeviceCard.vue'
 import DeviceCard from '../components/DeviceCard.vue'
+import { deviceLink } from '../lib/deviceLinks'
 import { useLiveDevices } from '../composables/useLiveDevices'
 import { planVersion } from '../composables/useStatus.js'
 
@@ -36,7 +37,7 @@ const empty = computed(() => loaded.value && status.value != null && !live.value
 <template>
   <div>
     <div v-if="live.length" class="dev-cards full">
-      <DeviceCard v-for="d in live" :key="d.device_id" :device="d" class="bg-card" />
+      <DeviceCard v-for="d in live" :key="d.device_id" :device="d" :to="deviceLink(d)" class="bg-card" />
     </div>
 
     <div v-if="planned.length" class="full panel">

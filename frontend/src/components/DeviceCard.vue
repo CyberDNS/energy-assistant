@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { RouterLink } from 'vue-router'
 import { fmt, fmtPower } from '@/lib/format'
 
 // One device's live state: availability, power, state of charge and, when the
@@ -21,6 +22,8 @@ const props = defineProps<{
     available?: boolean
     sp?: Setpoint
   }
+  /** Route of the device's page; makes the name a link. */
+  to?: string
 }>()
 
 const CHARGING = ['run', 'charge_from_grid', 'charge_from_pv', 'charge_phase2', 'force_charging']
@@ -50,7 +53,8 @@ const setpoint = computed(() => {
         class="status-dot" :class="device.available ? 'on' : 'off'"
         :title="device.available ? 'online' : 'unavailable'"
       />
-      <span class="dev-label">{{ device.label ?? device.device_id }}</span>
+      <RouterLink v-if="to" :to="to" class="dev-label ev-label-link">{{ device.label ?? device.device_id }}</RouterLink>
+      <span v-else class="dev-label">{{ device.label ?? device.device_id }}</span>
       <span class="dev-power" :class="{ producing: (device.power_w ?? 0) < 0 }">{{ fmtPower(device.power_w) }}</span>
     </div>
     <div v-if="device.soc_pct != null" class="soc-row">

@@ -77,3 +77,18 @@ async def test_root_serves_the_ui_or_says_how_to_build_it(client) -> None:
     assert (await client.get("/favicon.svg")).status_code == 200
     # The API is not shadowed by the static files.
     assert (await client.get("/api/status")).headers["content-type"].startswith("application/json")
+
+
+async def test_history_api_serves_both_tiers(client) -> None:
+    resp = await client.get("/api/history", params={"hours": 2, "device_ids": "baseline"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert (body["resolution"], body["bucket_minutes"]) == ("5m", 5)
+    assert set(body["measurements"]) == {"baseline"}
+
+    # A long window, or one reaching back beyond the 5-minute tier, is served hourly.
+    body = (await client.get("/api/history", params={"hours": 24 * 30, "device_ids": "baseline"})).json()
+    assert (body["resolution"], body["bucket_minutes"]) == ("1h", 60)
+    body = (await client.get("/api/history", params={"hours": 1, "resolution": "1h"})).json()
+    assert body["resolution"] == "1h"
+    assert "five_minutes_from" in body and "hourly_from" in body

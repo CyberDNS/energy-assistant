@@ -97,10 +97,24 @@ run, devices that do not respond.
 
 | Group | Pages |
 |---|---|
-| Overview | **Home** (live power flow, cars, every device), **Plan** (the optimizer's plan) |
-| Devices | **Cars**, **Batteries**, **Heating & loads**; each appears only when the house has such devices |
-| Insights | **Savings**, **History**, **Learning** |
+| Overview | **Home** (power flow, today on one timeline, what the plan does next, today's figures, cars), **Plan** (the optimizer's plan) |
+| Devices | **Cars**, **Batteries**, **Heating & loads** (each only when the house has such devices) and **All devices** |
+| Insights | **Savings** and **Learning** for the whole house, with links to the devices |
 | System | **Settings** (see [Configuring in the UI](#configuring-in-the-ui)) |
+
+Every device has its own page with the same sections in the same order: now,
+plan, history, what it saved, what was learned about it. Sections a device has
+nothing for are left out.
+
+**Charts** react to time only: drag to move in time, pinch (or Ctrl + scroll)
+to zoom in time, double-click or *Show all* to see everything again. The
+vertical axis stays fixed.
+
+**History** is kept by Energy Assistant itself in two compact tiers: 5-minute
+averages for about two weeks and hourly averages for good (24 rows per device
+and day). `GET /api/history` picks the tier by the range asked for. A database
+from before this (every reading stored, 8 days) is converted in the background
+at the first start.
 
 **In Home Assistant** (2026.2 or later) the add-on takes over the whole
 screen: Home Assistant hides its own sidebar and header, and the **Home
@@ -119,7 +133,8 @@ Every page can be deep-linked and embedded (e.g. in an iframe / webpage card):
 | `#/plan` | Plan |
 | `#/savings` | Savings against an uncontrolled house over rolling windows (24 h – 1 y) |
 | `#/cars/<vehicle>` | One car: target, 7-day strip, weekly plan, "Charge now" and its charging-plan chart. `<vehicle>` is the vehicle id or label (case-insensitive). |
-| `#/batteries`, `#/loads`, `#/history`, `#/learning` | The page of that name |
+| `#/devices/<device>` | One device (id as in `config.yaml`) |
+| `#/batteries`, `#/loads`, `#/devices`, `#/learning` | The page of that name |
 | `#/settings/<page>` | A settings page: `devices`, `tariffs`, `forecasts`, `connections`, `system`, `secrets`, `interface` |
 | `…?embed=1` | Content only: no sidebar, header or status bar. Combine with any route, e.g. `#/cars/bandit?embed=1`. |
 
@@ -128,8 +143,8 @@ pass the same options as a query string on the page URL instead:
 `?view=plan`, `?view=savings`, `?vehicle=<vehicle>`, `?embed=1` — e.g. `/?vehicle=bandit&embed=1`.
 When opened without any route, the UI restores the page used last.
 
-Links from before the sidebar keep working: `#/plan/<vehicle>` and
-`#/plan?vehicle=<vehicle>` open the car, `#/config/<page>` the settings page.
+Older links keep working: `#/plan/<vehicle>` and `#/plan?vehicle=<vehicle>`
+open the car, `#/config/<page>` the settings page, `#/history` the device list.
 
 The UI makes no external requests: all libraries are part of the build.
 

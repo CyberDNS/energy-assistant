@@ -6,10 +6,8 @@ const ids = (ctx: { categories: string[], vehicleCount?: number }) =>
     .flatMap(g => g.items.map(i => i.id))
 
 describe('navigation', () => {
-  it('hides the device pages a house has nothing for', () => {
-    expect(ids({ categories: ['meter', 'pv'] })).toEqual(['home', 'plan', 'savings', 'history', 'learning', 'settings'])
-    // …and with them the empty "Devices" group.
-    expect(visibleNav({ categories: new Set(), vehicleCount: 0 }).map(g => g.id)).toEqual(['overview', 'insights', 'system'])
+  it('hides the device pages a house has nothing for, except the list of all devices', () => {
+    expect(ids({ categories: ['meter', 'pv'] })).toEqual(['home', 'plan', 'devices', 'savings', 'learning', 'settings'])
   })
 
   it('shows a device page as soon as such a device exists', () => {
