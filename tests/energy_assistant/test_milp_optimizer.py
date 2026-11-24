@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -1345,3 +1345,49 @@ class TestChargeIntentGridLabel:
                 assert not intent.grid_allowed, f"{intent.timestep}: PV-covered, must be PV-only"
         assert any(i.grid_allowed for i, _f in charges), "expected a grid-charge slot"
         assert any(not i.grid_allowed for i, _f in charges), "expected a PV-only charge slot"
+
+
+class TestTerminalValueAbovePvRefill:
+    """Energy the next day's PV would refill anyway is not worth holding."""
+
+    @staticmethod
+    def _ctx(now: datetime, refill: dict[str, float]) -> OptimizationContext:
+        # Night at 0.50 €/kWh, then an evening peak at 0.60 €/kWh: p70 = 0.60,
+        # so without a refill the battery only covers the peak (charging from
+        # the grid at night does not pay: 0.60 × 0.81 < 0.50).
+        prices = [0.50] * 8 + [0.60] * 4
+        return OptimizationContext(
+            device_states={"bat": _state("bat", soc_pct=90.0)},
+            storage_constraints=[_battery("bat", max_discharge_kw=2.0)],
+            forecasts={
+                ForecastQuantity.PRICE: _hourly_prices(now, prices),
+                ForecastQuantity.CONSUMPTION: _hourly_prices(now, [0.5] * 12),
+            },
+            tariffs={"grid": FlatRateTariff("grid", import_price_eur_per_kwh=0.50, export_price_eur_per_kwh=0.08)},
+            horizon=timedelta(hours=12),
+            battery_refill_kwh=refill,
+        )
+
+    async def test_holds_for_the_peak_without_refill(self) -> None:
+        now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        plan = await MilpHigsOptimizer(step_minutes=60).optimize(self._ctx(now, {}))
+        intents = sorted(plan.intents, key=lambda i: i.timestep)
+        assert all(i.power_kw >= -1e-6 for i in intents[:8]), "cheap night hours are held"
+        assert intents[-1].stored_energy_kwh > 5.0
+
+    async def test_uses_the_night_when_pv_refills_the_battery(self) -> None:
+        now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        plan = await MilpHigsOptimizer(step_minutes=60).optimize(self._ctx(now, {"bat": 9.5}))
+        intents = sorted(plan.intents, key=lambda i: i.timestep)
+        assert sum(-i.power_kw for i in intents[:8] if i.power_kw < 0) > 3.0
+        assert intents[-1].stored_energy_kwh < 3.5
+
+    async def test_small_refill_keeps_what_the_pv_cannot_replace(self) -> None:
+        now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        plan = await MilpHigsOptimizer(step_minutes=60).optimize(self._ctx(now, {"bat": 4.0}))
+        intents = sorted(plan.intents, key=lambda i: i.timestep)
+        # Without a refill the plan ends at ~7.4 kWh.  Above 9.5 − 4 = 5.5 kWh
+        # the end energy is cheap: the night uses what lies above, and the
+        # plan ends at the level the PV can top up.
+        assert sum(-i.power_kw for i in intents[:8] if i.power_kw < 0) > 1.0
+        assert intents[-1].stored_energy_kwh == pytest.approx(5.5, abs=0.3)

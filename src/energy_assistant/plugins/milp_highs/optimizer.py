@@ -338,6 +338,29 @@ class MilpHigsOptimizer:
                     p70 * max(0.0, sc.discharge_efficiency - 0.01),
                 )
             terminal_value_basis[sc.device_id] = tv
+        # ── Terminal value above the PV refill ─────────────────────────
+        # Energy left at the end that the next day's PV surplus would have
+        # stored anyway only pushes that PV out to the grid: above
+        # max − refill it is worth the feed-in price per stored kWh
+        # (export / η_c), floored at its cost basis like the rest.
+        terminal_split: dict[str, tuple[float, float]] = {}
+        export_end = export_prices[-1] if export_prices else 0.0
+        for sc in batteries:
+            refill = context.battery_refill_kwh.get(sc.device_id)
+            if refill is None or refill <= 0:
+                continue
+            e_min = sc.capacity_kwh * sc.min_soc_pct / 100.0
+            e_max = sc.capacity_kwh * sc.max_soc_pct / 100.0
+            keep = max(e_min, e_max - refill)
+            low = max(cost_bases.get(sc.device_id, 0.0),
+                      export_end / max(sc.charge_efficiency, 1e-6))
+            low = min(low, terminal_value_basis[sc.device_id])
+            terminal_split[sc.device_id] = (keep, low)
+        if terminal_split:
+            _log.debug(
+                "MilpHigsOptimizer: terminal value above the PV refill: %s",
+                {b: f"{v:.3f} €/kWh above {k:.2f} kWh" for b, (k, v) in terminal_split.items()},
+            )
         _log.debug(
             "MilpHigsOptimizer: p30=%.4f  p70=%.4f €/kWh  TV=%s  (from %d price steps)",
             p30,
@@ -364,6 +387,7 @@ class MilpHigsOptimizer:
         prob, variables = self._build_model(
             n_steps, step_h, batteries, net_load, prices, export_prices,
             initial_energy, context.battery_cost_basis, terminal_value_basis,
+            terminal_split=terminal_split,
             ev_goals=ev_goals, timestamps=timestamps,
             threshold_devices=threshold_devices,
             initial_threshold_values=initial_threshold_values,
@@ -567,6 +591,7 @@ class MilpHigsOptimizer:
         initial_energy: dict[str, float],
         battery_cost_basis: dict[str, float] | None = None,
         terminal_value_basis: dict[str, float] | None = None,
+        terminal_split: dict[str, tuple[float, float]] | None = None,
         ev_goals: list[EvChargingGoal] | None = None,
         timestamps: list[datetime] | None = None,
         threshold_devices: list[ThresholdConstraints] | None = None,
@@ -597,6 +622,11 @@ class MilpHigsOptimizer:
             PV recharge incentives: charging from PV is worthwhile when
             terminal_value_basis > export_price/η_c + degradation_cost.
             If None, falls back to battery_cost_basis.
+        terminal_split:
+            Per battery ``(keep_kwh, low_value)``: end energy up to
+            ``keep_kwh`` is worth ``terminal_value_basis``, energy above it
+            only ``low_value`` €/kWh (it would displace the next day's PV).
+            The value is concave in the end energy, so the LP stays exact.
         max_import_w:
             Grid connection limit (W) on the import at the connection point
             (all tariffs together).  Soft: exceeding it costs
@@ -769,10 +799,20 @@ class MilpHigsOptimizer:
         # dispatch prices exceed the effective charging cost.
         # e is in Wh, tv_basis in €/kWh → coefficient = tv_basis / _WH (€/Wh).
         tv_basis = terminal_value_basis if terminal_value_basis is not None else (battery_cost_basis or {})
-        terminal_value = pulp.lpSum(
-            tv_basis.get(sc.device_id, 0.0) / _WH * e[(sc.device_id, n_steps - 1)]
-            for sc in batteries
-        )
+        split = terminal_split or {}
+        terminal_terms = []
+        for sc in batteries:
+            b = sc.device_id
+            e_end = e[(b, n_steps - 1)]
+            if b not in split:
+                terminal_terms.append(tv_basis.get(b, 0.0) / _WH * e_end)
+                continue
+            keep_kwh, low_value = split[b]
+            e_keep = pulp.LpVariable(f"e_end_keep__{b}", lowBound=0, upBound=keep_kwh * _WH)
+            e_above = pulp.LpVariable(f"e_end_above__{b}", lowBound=0)
+            prob += e_end == e_keep + e_above, f"terminal_split__{b}"
+            terminal_terms.append(tv_basis.get(b, 0.0) / _WH * e_keep + low_value / _WH * e_above)
+        terminal_value = pulp.lpSum(terminal_terms)
         # Degradation cost: each Wh stored costs degradation_cost_per_kwh / _WH per Wh.
         # Applied to η_c × c[b,t] (the Wh actually stored per AC Wh charged).
         degradation_cost = pulp.lpSum(
