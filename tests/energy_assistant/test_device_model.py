@@ -275,10 +275,11 @@ def test_build_uses_categories_and_bindings() -> None:
     registry, _, topology = build(cfg, ctx=ctx)
     pv, aq = registry.get("pv"), registry.get("aq")
     assert pv.category is DeviceCategory.PV
-    assert pv._entity_power == "sensor.pv" and pv._invert_sign is True
+    power = pv.bindings[Capability.POWER_W]
+    assert power.entity == "sensor.pv" and power.invert_sign is True
     assert aq.category is DeviceCategory.THERMAL_LOAD
-    assert (aq._entity_sensor, aq.switch_id) == ("sensor.t", "plug")
-    assert registry.get("plug")._entity_switch == "switch.c"
+    assert (aq._sensor.entity, aq.switch_id) == ("sensor.t", "plug")
+    assert registry.get("plug").entity_switch == "switch.c"
     assert topology is None  # no grid meter
 
 
@@ -298,7 +299,8 @@ def test_generic_homeassistant_import_export_binding() -> None:
                                            "export_entity": "sensor.e"}}},
         BuildContext(backends=BackendsConfig(), ha_client=_FakeHA()),
     )
-    assert (dev._entity_power_import, dev._entity_power_export) == ("sensor.i", "sensor.e")
+    power = dev.bindings[Capability.POWER_W]
+    assert (power.import_entity, power.export_entity) == ("sensor.i", "sensor.e")
 
 
 # ── composition ──────────────────────────────────────────────────────────────

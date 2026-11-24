@@ -18,7 +18,7 @@ from energy_assistant.core.topology import TopologyNode
 from energy_assistant.loader.device_loader import build
 from energy_assistant.plugins.differential.device import DifferentialDevice
 from energy_assistant.plugins.flat_rate.tariff import FlatRateTariff
-from energy_assistant.plugins.generic_homeassistant.device import GenericHADevice
+from energy_assistant.plugins.homeassistant_sensor.device import HASensorDevice
 
 # ---------------------------------------------------------------------------
 # YamlConfigLoader tests
@@ -237,8 +237,8 @@ class TestDeviceLoaderMesskonzept8:
         cfg = _messkonzept8_config(tmp_path)
         registry, _, _ = build(cfg)
 
-        assert isinstance(registry.get("main_grid_meter"), GenericHADevice)
-        assert isinstance(registry.get("household_meter"), GenericHADevice)
+        assert isinstance(registry.get("main_grid_meter"), HASensorDevice)
+        assert isinstance(registry.get("household_meter"), HASensorDevice)
         assert isinstance(registry.get("heatpump"), DifferentialDevice)
 
     def test_all_three_tariffs_built(self, tmp_path: Path) -> None:

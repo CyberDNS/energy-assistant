@@ -5,8 +5,10 @@ Device type: ``homeassistant_switch``   (category ``switch``)
 Configuration
 -------------
 ``capabilities.switch.entity``   — HA entity switched on/off (``switch.*``,
-                                   ``input_boolean.*``, …).
-``capabilities.power_w.entity``  — optional measured power of the plug (W).
+                                   ``input_boolean.*``, ``light.*``, ``fan.*``).
+``capabilities.power_w``         — optional measured power of the plug (any
+                                   power binding, see ``_homeassistant/bindings``).
+``capabilities.energy_in_kwh``   — optional energy counter of the plug.
 ``params.rated_power_w``         — power the load draws while on (W).  Used
                                    as the power reading when no power sensor
                                    is bound, and by the planner for the device
@@ -34,8 +36,12 @@ from ...core.device_model import Capability as Cap
 from ...core.device_model import DeviceCategory as C
 from ...core.device_model import DeviceConfigError
 from ...core.plugin_registry import BuildContext, PluginRegistry
+from .._homeassistant.actuators import SWITCH_BINDING, parse_switch
+from .._homeassistant.bindings import binding_specs, parse_bindings
 
 _log = logging.getLogger(__name__)
+
+_READINGS = frozenset({Cap.POWER_W, Cap.ENERGY_IN_KWH})
 
 
 def register(registry: PluginRegistry) -> None:
@@ -43,7 +49,11 @@ def register(registry: PluginRegistry) -> None:
         "homeassistant_switch", _build,
         title="Home Assistant switch",
         categories={C.SWITCH},
-        bindable={Cap.SWITCH, Cap.POWER_W},
+        bindable={Cap.SWITCH, *_READINGS},
+        bindings={
+            Cap.SWITCH: SWITCH_BINDING,
+            **{cap: binding_specs(cap) for cap in _READINGS},
+        },
         settings={},
     )
 
@@ -51,26 +61,26 @@ def register(registry: PluginRegistry) -> None:
 def _build(device_id: str, cfg: dict[str, Any], ctx: BuildContext) -> object | None:
     from .device import HASwitchDevice
 
+    switch_binding = (cfg.get("capabilities") or {}).get("switch")
+    if not switch_binding:
+        raise DeviceConfigError([(
+            f"device {device_id!r} (homeassistant_switch) needs "
+            "'capabilities: {switch: {entity: …}}'"
+        )])
+    readings = parse_bindings(device_id, "homeassistant_switch", cfg, _READINGS)
     if ctx.ha_client is None:
         _log.warning(
             "Device %r (homeassistant_switch) requires Home Assistant backend — skipping",
             device_id,
         )
         return None
-
-    caps = cfg.get("capabilities") or {}
-    entity_switch = (caps.get("switch") or {}).get("entity")
-    entity_power = (caps.get("power_w") or {}).get("entity")
-    if not entity_switch:
-        raise DeviceConfigError([(
-            f"device {device_id!r} (homeassistant_switch) needs "
-            "'capabilities: {switch: {entity: …}}'"
-        )])
+    switch = parse_switch(f"device {device_id!r}", ctx.ha_client, switch_binding)
     rated = cfg.get("rated_power_w")
     return HASwitchDevice(
         device_id=device_id,
         client=ctx.ha_client,
-        entity_switch=str(entity_switch),
-        entity_power=str(entity_power) if entity_power else None,
+        switch=switch,
+        power=readings.get(Cap.POWER_W),
+        energy=readings.get(Cap.ENERGY_IN_KWH),
         rated_power_w=float(rated) if rated is not None else None,
     )

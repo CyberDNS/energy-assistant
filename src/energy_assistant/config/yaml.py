@@ -159,7 +159,7 @@ _RENAMED_DEVICE_TYPES = {"tibber": "tibber_cloud"}
 
 #: Plugin types that were removed, with what to use instead.
 _REMOVED_TYPES = {
-    "generic_iobroker": "generic_homeassistant (capabilities.power_w), tasmota or tibber_local",
+    "generic_iobroker": "homeassistant_sensor (capabilities.power_w), tasmota or tibber_local",
     "sma_modbus_iobroker": "modbus (profile: sma_sunny_boy_storage)",
     "zendure_iobroker": "zendure",
     "tibber_iobroker": "tibber (tariff) or tibber_cloud (meter)",

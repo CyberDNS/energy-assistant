@@ -4,7 +4,7 @@ Two rules turn the ``forecast:`` written in config.yaml into the one that is
 built:
 
 **Learning is on by default for basic consumers.**  A consumer that reads a
-single Home Assistant power sensor (``generic_homeassistant``) gets a
+single Home Assistant power sensor (``homeassistant_sensor``) gets a
 ``learned`` forecast on that sensor, unless it sets ``learning: false``.  A
 ``static_profile`` it declares becomes the fallback used until the first
 model is fitted.  ``learning:`` may also be a dict of extra options for the
@@ -30,7 +30,7 @@ AUTO = "auto"
 
 def _ha_power_entity(spec: DeviceSpec) -> str | None:
     """The single HA power sensor a device reads, if it has exactly one."""
-    if spec.type != "generic_homeassistant":
+    if spec.type not in ("homeassistant_sensor", "generic_homeassistant"):
         return None
     return spec.bound_entity(Capability.POWER_W)
 
