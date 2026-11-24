@@ -71,6 +71,7 @@ def make_build_context(
                 url=ha_cfg.url,
                 token=ha_cfg.token,
                 timeout=ha_cfg.timeout_s,
+                ws_url=ha_cfg.ws_url,
             )
 
     return BuildContext(

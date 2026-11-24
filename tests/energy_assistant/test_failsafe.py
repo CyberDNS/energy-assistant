@@ -207,6 +207,7 @@ def _app(devices: list[Any]) -> Any:
     app._runtime_tasks = []
     app._plan_active_count = 0
     app._mqtt_publisher = None
+    app._config_problems = []
     return app
 
 

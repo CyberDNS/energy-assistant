@@ -720,11 +720,15 @@ class DeviceConfigStore:
     def __init__(self, path: Path | str) -> None:
         self.path = Path(path)
 
+    def text(self) -> str:
+        """The file content (empty when there is no file yet)."""
+        return self.path.read_text() if self.path.exists() else ""
+
     def read(self) -> ConfigDocument:
-        return ConfigDocument(self.path.read_text() if self.path.exists() else "")
+        return ConfigDocument(self.text())
 
     def revision(self) -> str:
-        return revision_of(self.path.read_text() if self.path.exists() else "")
+        return revision_of(self.text())
 
     def write(self, text: str, expected_revision: str | None = None) -> str:
         """Replace the file with *text*; returns the new revision.
