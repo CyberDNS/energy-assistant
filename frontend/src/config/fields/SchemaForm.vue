@@ -1,6 +1,7 @@
 <script>
-import { defineComponent, computed } from 'vue'
+import { defineComponent, computed, inject, provide } from 'vue'
 import { isEmpty } from '../useConfig.js'
+import { FORM_SCOPE } from './scope.js'
 
 // A grid of fields for a mapping described by `specs` ({ key: spec }).
 // v-model is the mapping itself; empty values are dropped, and an entirely
@@ -43,6 +44,12 @@ export default defineComponent({
   emits: ['update:modelValue'],
   setup(props, { emit }) {
     const values = computed(() => (props.modelValue && typeof props.modelValue === 'object' ? props.modelValue : {}))
+    // Fields inside can look up values of this form and the forms around it.
+    const parentScope = inject(FORM_SCOPE, null)
+    provide(FORM_SCOPE, {
+      lookup: (key) => (key in values.value ? values.value[key]
+        : key in props.context ? props.context[key] : parentScope?.lookup(key)),
+    })
     const extra = computed(() => Object.fromEntries(
       Object.entries(values.value).filter(([k]) => !(k in props.specs))))
     function emitValues(next) {

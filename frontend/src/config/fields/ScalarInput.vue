@@ -55,7 +55,7 @@ export default defineComponent({
   <select v-if="kind === 'choice'" :value="modelValue ?? spec.default ?? ''" :aria-label="ariaLabel"
           @change="pick($event.target.value)">
     <option v-if="spec.default == null" value="">{{ spec.required ? '— choose' : '— not set' }}</option>
-    <option v-for="c in spec.choices" :key="c" :value="c">{{ c }}{{ c === spec.default ? ' (default)' : '' }}</option>
+    <option v-for="c in spec.choices" :key="c" :value="c">{{ spec.choice_labels?.[c] ?? c }}{{ c === spec.default ? ' (default)' : '' }}</option>
     <option v-if="modelValue != null && !spec.choices.includes(modelValue)" :value="modelValue">{{ modelValue }} (invalid)</option>
   </select>
   <select v-else-if="kind === 'bool'" :value="String(modelValue ?? spec.default ?? '')" :aria-label="ariaLabel"

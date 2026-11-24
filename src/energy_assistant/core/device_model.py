@@ -119,6 +119,8 @@ class ParamSpec:
     (any scalar or list)."""
     required: bool = False
     choices: tuple[str, ...] = ()
+    choice_labels: Mapping[str, str] | None = None
+    """Readable name per choice for the config UI (default: the value)."""
     minimum: float | None = None
     exclusive_minimum: bool = False
     maximum: float | None = None
@@ -135,6 +137,19 @@ class ParamSpec:
     The config UI offers those devices in a dropdown."""
     entity: bool = False
     """The value is a Home Assistant entity id."""
+    options_from: tuple[str, str] | None = None
+    """``(entity key, attribute)``: the config UI offers the values listed in
+    that attribute (``options``, ``hvac_modes``, …) of the entity chosen in
+    the nearest field named *entity key* (this form or an enclosing one)."""
+    attribute_of: str | None = None
+    """The value is an attribute name of the entity chosen in the field
+    *attribute_of*: the config UI offers that entity's attributes."""
+    units: tuple[str, ...] = ()
+    """``entity``: the units of measurement a fitting entity has (``W``,
+    ``kW``, …).  Only narrows what the config UI suggests; not checked."""
+    unit_free_domains: tuple[str, ...] = ()
+    """``entity`` with ``units``: domains suggested whatever their unit (e.g.
+    a climate entity whose temperature is an attribute)."""
     domains: tuple[str, ...] = ()
     """``entity``: the entity domains it may be (``sensor``, ``switch``, …;
     empty = any, and the value is not checked).  Set: the value must be an
@@ -147,6 +162,8 @@ class ParamSpec:
     """``dict`` with fixed keys: the spec of each key (other keys are errors)."""
     values: ParamSpec | None = None
     """``dict`` with free keys: the spec of each value."""
+    keys: ParamSpec | None = None
+    """``dict`` with free keys: the spec of each key (e.g. its choices)."""
     plugin: str = ""
     """``dict`` that configures a plugin, selected by its ``type`` key:
     ``"forecast"``.  Checked against that plugin's settings."""
@@ -176,6 +193,10 @@ class ParamSpec:
         if (self.fields is not None and isinstance(value, Mapping)
                 and (problems := check_fields(value, self.fields))):
             return "; ".join(problems)
+        if self.keys is not None and isinstance(value, Mapping):
+            for key in value:
+                if (problem := self.keys.check(key)) is not None:
+                    return f"key {key!r} {problem}"
         if self.values is not None and isinstance(value, Mapping):
             for key, item in value.items():
                 if (problem := self.values.check(item)) is not None:
@@ -214,6 +235,8 @@ class ParamSpec:
             out["label"] = self.label or humanize(key)
         if self.choices:
             out["choices"] = list(self.choices)
+        if self.choice_labels:
+            out["choice_labels"] = dict(self.choice_labels)
         if self.minimum is not None:
             out["minimum"] = self.minimum
             out["exclusive_minimum"] = self.exclusive_minimum
@@ -231,6 +254,14 @@ class ParamSpec:
             out["entity"] = True
         if self.domains:
             out["domains"] = list(self.domains)
+        if self.units:
+            out["units"] = list(self.units)
+        if self.unit_free_domains:
+            out["unit_free_domains"] = list(self.unit_free_domains)
+        if self.options_from:
+            out["options_from"] = {"entity": self.options_from[0], "attribute": self.options_from[1]}
+        if self.attribute_of:
+            out["attribute_of"] = self.attribute_of
         if self.tariff:
             out["tariff"] = True
         if self.items is not None:
@@ -239,6 +270,8 @@ class ParamSpec:
             out["fields"] = specs_to_dict(self.fields)
         if self.values is not None:
             out["values"] = self.values.to_dict()
+        if self.keys is not None:
+            out["keys"] = self.keys.to_dict()
         if self.plugin:
             out["plugin"] = self.plugin
         if self.restart:

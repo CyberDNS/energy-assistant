@@ -47,6 +47,37 @@ export default defineComponent({
       }
     }, { immediate: true })
 
+    // Presets (core/presets.py): a ready-made device for a common integration.
+    // Picking one asks for its variables (an entity prefix, …) and fills the
+    // form; nothing is saved until the user saves the form.
+    const presets = computed(() => (schema.value.presets ?? []).filter(p => p.category === form.category))
+    const preset = reactive({ id: '', values: {} })
+    const chosenPreset = computed(() => presets.value.find(p => p.id === preset.id) ?? null)
+    watch(() => preset.id, () => {
+      preset.values = Object.fromEntries(Object.entries(chosenPreset.value?.variables ?? {})
+        .map(([name, v]) => [name, v.example ?? '']))
+    })
+    function fillVariables(value) {
+      if (typeof value === 'string') {
+        return value.replace(/\{([a-z_][a-z0-9_]*)\}/g, (m, name) => preset.values[name] ?? m)
+      }
+      if (Array.isArray(value)) return value.map(fillVariables)
+      if (value && typeof value === 'object') {
+        return Object.fromEntries(Object.entries(value).map(([k, v]) => [fillVariables(k), fillVariables(v)]))
+      }
+      return value
+    }
+    function applyPreset() {
+      const p = chosenPreset.value
+      if (!p) return
+      const device = fillVariables(p.device)
+      form.type = device.type
+      form.settings = clone(device.settings ?? {})
+      form.capabilities = clone(device.capabilities ?? {})
+      form.params = { ...form.params, ...clone(device.params ?? {}) }
+      if (!form.label) form.label = p.title.replace(/ \(.*\)$/, '')
+    }
+
     // Basics as specs, so they render like every other field.
     const basics = computed(() => ({
       label:  { kind: 'str', label: 'Name', description: 'Shown in the UI and in Home Assistant' },
@@ -114,7 +145,8 @@ export default defineComponent({
       if (await state.remove()) emit('done', `${form.label || form.id} removed.`)
     }
 
-    return { cfg, schema, isNew, readOnly, form, categorySchema, plugins, plugin, basics, capabilities,
+    return { presets, preset, chosenPreset, applyPreset,
+             cfg, schema, isNew, readOnly, form, categorySchema, plugins, plugin, basics, capabilities,
              allBuiltIn, gridConnection,
              bindingSpecs, setBinding, connectionSpecs, connectionValues, setConnections,
              learningKind, showForecast, showLearning, advancedSpecs, idProblem, state, save, remove }
@@ -133,6 +165,34 @@ export default defineComponent({
         System → Energy dashboard import, or add a device with the same sensor to replace it.
       </p>
     </template>
+
+    <section v-if="isNew && presets.length" class="cfg-preset">
+      <h3>Start from a preset</h3>
+      <div class="cfg-grid">
+        <div class="cfg-field">
+          <label class="cfg-label"><span class="cfg-name">Preset</span>
+            <select v-model="preset.id">
+              <option value="">— none, set up by hand</option>
+              <option v-for="p in presets" :key="p.id" :value="p.id">{{ p.title }}{{ p.verified ? '' : ' (not yet checked)' }}</option>
+            </select>
+          </label>
+          <div v-if="chosenPreset" class="cfg-hint">
+            {{ chosenPreset.integration }} · <a :href="chosenPreset.url" target="_blank" rel="noopener">integration</a>
+          </div>
+        </div>
+        <div v-for="(v, name) in chosenPreset?.variables ?? {}" :key="name" class="cfg-field">
+          <label class="cfg-label"><span class="cfg-name">{{ v.label }}</span>
+            <input type="text" v-model.trim="preset.values[name]" :placeholder="v.example"
+                   autocapitalize="off" spellcheck="false" />
+          </label>
+          <div class="cfg-hint">e.g. {{ v.example }}</div>
+        </div>
+      </div>
+      <template v-if="chosenPreset">
+        <p class="cfg-note">{{ chosenPreset.description }}</p>
+        <button type="button" class="btn btn-neutral" @click="applyPreset">Fill in the form</button>
+      </template>
+    </section>
 
     <section>
       <h3>Device</h3>

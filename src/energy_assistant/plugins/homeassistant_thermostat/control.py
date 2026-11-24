@@ -36,6 +36,13 @@ _log = logging.getLogger(__name__)
 
 CONTROLS = ("target_temperature", "hvac_mode", "preset", "water_heater",
             "water_heater_operation")
+CONTROL_LABELS = {
+    "target_temperature": "Target temperature",
+    "hvac_mode": "HVAC mode (e.g. heat / off)",
+    "preset": "Preset (e.g. boost / eco)",
+    "water_heater": "Water heater temperature",
+    "water_heater_operation": "Water heater operation mode",
+}
 #: control → (what is written, keys of the run and stop values, numeric)
 _VARIANTS: dict[str, tuple[str, str, str, bool]] = {
     "target_temperature": ("temperature", "run_temperature", "stop_temperature", True),
@@ -51,17 +58,16 @@ def _when(*controls: str) -> dict[str, Any]:
     return {"control": controls if len(controls) > 1 else controls[0]}
 
 
-def _text(label: str, description: str, *controls: str) -> ParamSpec:
+def _text(label: str, description: str, *controls: str, options: str) -> ParamSpec:
     return ParamSpec(str, required=True, label=label, description=description,
-                     when=_when(*controls))
+                     options_from=("entity", options), when=_when(*controls))
 
 
 #: Keys of the ``power_setpoint`` binding (validation and config UI).
 POWER_SETPOINT_BINDING: dict[str, ParamSpec] = {
-    "control": ParamSpec(str, required=True, choices=CONTROLS, label="Run and stop through",
-                         description="target_temperature · hvac_mode · preset (climate "
-                                     "entity) · water_heater (temperature) · "
-                                     "water_heater_operation"),
+    "control": ParamSpec(str, required=True, choices=CONTROLS, choice_labels=CONTROL_LABELS,
+                         label="Run and stop through",
+                         description="What Energy Assistant changes on the thermostat"),
     "entity": ParamSpec(str, required=True, entity=True, domains=("climate", "water_heater"),
                         label="Thermostat", description="Climate or water heater entity"),
     "run_temperature": ParamSpec(float, label="Run at", when=_when("target_temperature",
@@ -72,14 +78,18 @@ POWER_SETPOINT_BINDING: dict[str, ParamSpec] = {
                                                                     "water_heater"),
                                   description="Target while stopped (default: the other "
                                               "threshold)"),
-    "run_mode": _text("Run mode", "HVAC mode while running, e.g. heat", "hvac_mode"),
-    "stop_mode": _text("Stop mode", "HVAC mode while stopped, e.g. off", "hvac_mode"),
-    "run_preset": _text("Run preset", "Preset while running, e.g. boost", "preset"),
-    "stop_preset": _text("Stop preset", "Preset while stopped, e.g. eco", "preset"),
+    "run_mode": _text("Run mode", "HVAC mode while running, e.g. heat", "hvac_mode",
+                      options="hvac_modes"),
+    "stop_mode": _text("Stop mode", "HVAC mode while stopped, e.g. off", "hvac_mode",
+                       options="hvac_modes"),
+    "run_preset": _text("Run preset", "Preset while running, e.g. boost", "preset",
+                        options="preset_modes"),
+    "stop_preset": _text("Stop preset", "Preset while stopped, e.g. eco", "preset",
+                         options="preset_modes"),
     "run_operation": _text("Run operation", "Operation mode while running, e.g. "
-                           "high_demand", "water_heater_operation"),
+                           "high_demand", "water_heater_operation", options="operation_list"),
     "stop_operation": _text("Stop operation", "Operation mode while stopped, e.g. eco",
-                            "water_heater_operation"),
+                            "water_heater_operation", options="operation_list"),
     "normal": ParamSpec(object, label="Normal operation",
                         description="Your own temperature / mode / preset, restored when "
                                     "Energy Assistant stops or its plan is stale"),

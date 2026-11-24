@@ -1,0 +1,30 @@
+title: Heater with a thermostat (by target temperature)
+category: thermal_load
+integration: any climate entity (Home Assistant core)
+url: https://www.home-assistant.io/integrations/climate/
+verified: true
+description: >-
+  The thermostat stays in its heating mode; Energy Assistant moves its target
+  between the thresholds (run → top, stop → bottom) and puts back the normal
+  target when it stops.  Checked with Home Assistant's generic thermostat.
+variables:
+  climate:
+    label: Climate entity (without "climate.")
+    example: living_room
+device:
+  type: homeassistant_thermostat
+  capabilities:
+    temperature_c: { entity: "climate.{climate}", attribute: current_temperature }
+    power_setpoint:
+      control: target_temperature
+      entity: "climate.{climate}"
+      normal: 20.5
+  params:
+    bottom_threshold: 19
+    top_threshold: 22
+    direction: increases
+    rated_power_w: 2000
+    active_rate_per_h: 1.0
+    drift_rate_per_h: 0.3
+    min_runtime_h: 0.25
+    min_offtime_h: 0.25
