@@ -81,6 +81,8 @@ def threshold_constraints(devices: Mapping[str, DeviceSpec]) -> list[ThresholdCo
 
     The rated power is the switch's (``controlled_by``): the switch is the
     means, the thermal load holds the needs (thresholds, rates, run times).
+    A thermal load that switches itself (a thermostat) has its own
+    ``rated_power_w``.
     """
     out = []
     for spec in devices.values():
@@ -88,7 +90,8 @@ def threshold_constraints(devices: Mapping[str, DeviceSpec]) -> list[ThresholdCo
             continue
         p = spec.params
         switch = devices[spec.controlled_by] if spec.controlled_by else None
-        rated_w = switch.params.get("rated_power_w") if switch is not None else None
+        rated_w = (switch.params.get("rated_power_w") if switch is not None
+                   else p.get("rated_power_w"))
         if rated_w is None:  # validate_connections reports this
             continue
         out.append(ThresholdConstraints(

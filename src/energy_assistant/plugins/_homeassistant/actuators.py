@@ -6,6 +6,10 @@ One implementation for every Home Assistant device type:
 ``NumberActuator``   a number — ``number``, ``input_number``
 ``SelectActuator``   an option — ``select``, ``input_select``
 ``ActionActuator``   any action (script, service) with the value as a variable
+``ServiceActuator``  a value of an entity set through its domain's service and
+                     read back from its state or an attribute — climate target
+                     temperature / HVAC mode / preset, water heater temperature
+                     / operation mode (``climate_actuator``, ``water_heater_actuator``)
 
 Each ``apply(desired)``
 
@@ -263,6 +267,90 @@ class SelectActuator(Actuator):
     async def _write(self, value: str) -> None:
         await self._client.call_service(self.domain, "select_option",
                                         {"entity_id": self.entity_id, "option": value})
+
+
+class ServiceActuator(Actuator):
+    """Sets one value of an entity through a service of its domain.
+
+    *service* is called with ``{entity_id, <data_key>: value}``; the current
+    value is the entity's state, or the attribute *read_attribute*.
+    *numeric*: compare as numbers within *tolerance*.
+    """
+
+    def __init__(
+        self, where: str, client: Any, entity_id: str, *, service: str, data_key: str,
+        read_attribute: str | None = None, numeric: bool = False, tolerance: float = 0.05,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(where, client, entity_id, **kwargs)
+        self.service = service
+        self.data_key = data_key
+        self.read_attribute = read_attribute
+        self.numeric = numeric
+        self.tolerance = tolerance
+        self._clamp_warned: set[float] = set()
+
+    def _normalize(self, desired: Any, state: Any) -> Any:
+        if not self.numeric:
+            return str(desired)
+        value = float(desired)
+        attrs = state.attributes if state is not None else {}
+        lo, hi = _first_number(attrs.get("min_temp")), _first_number(attrs.get("max_temp"))
+        clamped = max(lo, value) if lo is not None else value
+        clamped = min(hi, clamped) if hi is not None else clamped
+        if clamped != value and value not in self._clamp_warned:
+            self._clamp_warned.add(value)
+            _log.warning("%s: %s accepts %g–%g only: %g is written as %g", self.where,
+                         self.entity_id, lo if lo is not None else float("-inf"),
+                         hi if hi is not None else float("inf"), value, clamped)
+        return clamped
+
+    def _current(self, state: Any) -> Any:
+        raw = state.attributes.get(self.read_attribute) if self.read_attribute else state.state
+        if raw is None or (isinstance(raw, str) and raw.lower() in _GONE):
+            return None
+        if self.numeric:
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                return None
+        return str(raw)
+
+    def _matches(self, desired: Any, current: Any) -> bool:
+        if self.numeric:
+            return abs(float(desired) - float(current)) <= self.tolerance
+        return str(desired) == str(current)
+
+    async def _write(self, value: Any) -> None:
+        await self._client.call_service(self.domain, self.service,
+                                        {"entity_id": self.entity_id, self.data_key: value})
+
+
+#: What a thermostat writes: (service, data key, read-back attribute or None
+#: for the state, numeric).
+_CLIMATE = {
+    "temperature": ("set_temperature", "temperature", "temperature", True),
+    "hvac_mode": ("set_hvac_mode", "hvac_mode", None, False),
+    "preset": ("set_preset_mode", "preset_mode", "preset_mode", False),
+}
+_WATER_HEATER = {
+    "temperature": ("set_temperature", "temperature", "temperature", True),
+    "operation_mode": ("set_operation_mode", "operation_mode", "operation_mode", False),
+}
+
+
+def climate_actuator(where: str, client: Any, entity_id: str, what: str) -> ServiceActuator:
+    """A ``climate`` entity's target ``temperature``, ``hvac_mode`` or ``preset``."""
+    service, key, attribute, numeric = _CLIMATE[what]
+    return ServiceActuator(where, client, entity_id, service=service, data_key=key,
+                           read_attribute=attribute, numeric=numeric)
+
+
+def water_heater_actuator(where: str, client: Any, entity_id: str, what: str) -> ServiceActuator:
+    """A ``water_heater`` entity's target ``temperature`` or ``operation_mode``."""
+    service, key, attribute, numeric = _WATER_HEATER[what]
+    return ServiceActuator(where, client, entity_id, service=service, data_key=key,
+                           read_attribute=attribute, numeric=numeric)
 
 
 class ActionActuator:
