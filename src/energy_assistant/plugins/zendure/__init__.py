@@ -26,6 +26,8 @@ Example config::
       max_discharge_kw: 0.8
       # smart_mode: true         # keep limit writes in RAM (no flash wear)
       # poll_interval_s: 60      # full-report request interval
+      # release_auto_model: 8    # own mode on release (default: the mode the
+      #                          # device had before Energy Assistant took over)
 
 ``python scripts/probe_zendure.py`` lists the keys of all devices on the
 account and dumps live reports (read-only).
@@ -69,6 +71,11 @@ SETTINGS = {
                                                   "maintenance charge (W)"),
     "smart_mode": ParamSpec(bool, advanced=True, default=False, description="Enable the device's smartMode on start-up, so limit "
                                                  "writes do not wear its flash"),
+    "release_auto_model": ParamSpec(int, advanced=True, minimum=0, label="Own mode (autoModel)",
+                                    description="Mode the device returns to when Energy "
+                                                "Assistant lets go of it (Zendure 'autoModel', "
+                                                "e.g. 8 = smart matching); default: the mode it "
+                                                "had before Energy Assistant took over"),
     "poll_interval_s": ParamSpec(float, advanced=True, minimum=0, exclusive_minimum=True, default=60.0,
                                  description="Seconds between full reads"),
     "stale_after_s": ParamSpec(float, advanced=True, minimum=0, exclusive_minimum=True, default=300.0,
@@ -146,6 +153,7 @@ def _build(device_id: str, cfg: dict[str, Any], ctx: BuildContext) -> ZendureDev
             f"got {connection!r}"
         )
 
+    release_auto_model = cfg.get("release_auto_model")
     purchase_price = cfg.get("purchase_price_eur")
     cycle_life = cfg.get("cycle_life")
     return ZendureDevice(
@@ -163,4 +171,6 @@ def _build(device_id: str, cfg: dict[str, Any], ctx: BuildContext) -> ZendureDev
         cycle_life=int(cycle_life) if cycle_life is not None else None,
         smart_mode=bool(cfg.get("smart_mode", False)),
         stale_after_s=float(cfg.get("stale_after_s", 300.0)),
+        release_auto_model=int(release_auto_model) if release_auto_model is not None else None,
+        state_path=(ctx.data_dir / "zendure" / f"{device_id}.json") if ctx.data_dir else None,
     )

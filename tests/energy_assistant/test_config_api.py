@@ -143,7 +143,7 @@ async def test_changing_a_device_rewrites_only_its_lines_and_applies_live(runnin
     assert next(d for d in running_cfg["devices"] if d["device_id"] == "baseline")["label"] \
         == "Everything else"
     assert {t.get_name() for t in app.tasks if not t.done()} \
-        == {"polling", "planning", "control", "api", "retention"}
+        == {"polling", "planning", "control", "failsafe", "api", "retention"}
     backups = list((config.parent / "config_backups").glob("config-*.yaml"))
     assert [b.read_text() for b in backups] == [CONFIG]
 

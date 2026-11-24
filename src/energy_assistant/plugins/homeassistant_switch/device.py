@@ -22,6 +22,12 @@ Command handling
     only written on a mismatch (so the control tick doesn't spam
     turn_on/turn_off, and a plug toggled by hand is put back), rate-limited,
     and reported when the switch does not follow.
+
+Release
+-------
+``release()`` (start, reload and stop of Energy Assistant, stale plan, stuck
+control loop) puts the switch to its ``release_state``: ``on`` (default —
+the load's own thermostat or timer takes over), ``off`` or ``leave``.
 """
 
 from __future__ import annotations
@@ -51,6 +57,7 @@ class HASwitchDevice:
         power: ReadBinding | None = None,
         energy: ReadBinding | None = None,
         rated_power_w: float | None = None,
+        release_state: str = "on",
     ) -> None:
         self._device_id = device_id
         self._client = client
@@ -58,6 +65,7 @@ class HASwitchDevice:
         self._power = power
         self._energy = energy
         self._rated_power_w = rated_power_w
+        self._release_state = release_state
 
     @property
     def device_id(self) -> str:
@@ -102,3 +110,12 @@ class HASwitchDevice:
         want_on = command.value is not None and float(command.value) > 0
         with contextlib.suppress(Exception):  # logged by the actuator, retried next tick
             await self._switch.apply(want_on)
+
+    async def release(self) -> None:
+        """Put the switch to its ``release_state`` (``leave``: unchanged)."""
+        if self._release_state == "leave":
+            return
+        want_on = self._release_state == "on"
+        # Through the actuator: no write when it already is in that state.
+        if await self._switch.apply(want_on):
+            _log.info("HASwitchDevice %r: released (%s)", self._device_id, self._release_state)

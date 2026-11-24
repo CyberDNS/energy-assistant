@@ -133,10 +133,10 @@ POWER_SETPOINT_BINDING: dict[str, ParamSpec] = {
                        keys=ParamSpec(str, choices=_BEHAVIOURS, choice_labels=BEHAVIOUR_LABELS),
                        description="Per behaviour (charge, discharge, hold, absorb_surplus, "
                                    "self_consumption): option, power, set"),
-    "release": ParamSpec(str, label="On stop", choices=_BEHAVIOURS,
+    "release": ParamSpec(str, label="When released", choices=_BEHAVIOURS,
                          choice_labels=BEHAVIOUR_LABELS, when=_when("modes"),
-                         description="Mode set when Energy Assistant stops (default "
-                                     "self_consumption, if configured)"),
+                         description="Mode set when Energy Assistant stops or lets go of the "
+                                     "battery (default self_consumption, if configured)"),
     "deadband_w": ParamSpec(float, default=25.0, minimum=0, advanced=True,
                             label="Deadband (W)",
                             description="Power changes up to this are not written"),

@@ -21,10 +21,28 @@ export interface LedgerEntry {
   cost_basis_eur_per_kwh: number
 }
 
+export interface FailSafeEvent {
+  at: string
+  kind: 'released' | 'taken_over'
+  reason: string
+  detail?: string
+}
+
+/** Fail-safe state (core/failsafe.py): devices released to their own operation. */
+export interface FailSafeStatus {
+  released: boolean
+  reason?: string | null
+  reason_text?: string | null
+  detail?: string
+  since?: string | null
+  events?: FailSafeEvent[]
+}
+
 export interface Status {
   timestamp: string
   planning?: boolean
   dry_run?: boolean
+  failsafe?: FailSafeStatus
   grid_power_w?: number | null
   current_price_eur_per_kwh?: number | null
   pv_opportunity_price_eur_per_kwh?: number | null
