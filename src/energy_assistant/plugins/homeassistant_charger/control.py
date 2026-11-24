@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ...core.device_model import DeviceConfigError, ParamSpec
-from ...core.models import Behaviour
+from ...core.models import BEHAVIOUR_LABELS, Behaviour
 from .._homeassistant.actuators import (
     NUMBER_DOMAINS,
     SELECT_DOMAINS,
@@ -49,6 +49,15 @@ from .._homeassistant.actuators import (
 _log = logging.getLogger(__name__)
 
 CONTROLS = ("current", "power", "action", "modes")
+_POWER, _CURRENT, _PERCENT = ("W", "kW"), ("A",), ("%",)
+CONTROL_LABELS = {
+    "current": "Charging current (A)",
+    "power": "Charging power",
+    "action": "A script or action",
+    "modes": "The charger's own modes (PV / instant / stop)",
+}
+_MODE_LABELS = {**BEHAVIOUR_LABELS, "charge": "Charge (instant)",
+                "absorb_surplus": "PV surplus only"}
 _BEHAVIOURS = (Behaviour.CHARGE.value, Behaviour.ABSORB_SURPLUS.value, Behaviour.STOP.value)
 
 
@@ -57,27 +66,29 @@ def _when(*controls: str) -> dict[str, Any]:
 
 
 _MODE_ENTRY = ParamSpec(dict, fields={
-    "option": ParamSpec(str, required=True, label="Option",
+    "option": ParamSpec(str, required=True, label="Option", options_from=("mode", "options"), 
                         description="Option of the mode select"),
-    "current": ParamSpec(str, entity=True, domains=NUMBER_DOMAINS, label="Current number",
+    "current": ParamSpec(str, entity=True, domains=NUMBER_DOMAINS, units=_CURRENT,
+                         label="Current number",
                          description="Gets the commanded power as charging current (A)"),
-    "power": ParamSpec(str, entity=True, domains=NUMBER_DOMAINS, label="Power number",
+    "power": ParamSpec(str, entity=True, domains=NUMBER_DOMAINS, units=_POWER,
+                       label="Power number",
                        description="Gets the commanded power (W or kW)"),
     "set": ParamSpec(dict, values=ParamSpec(object), label="Also set",
+                     keys=ParamSpec(str, entity=True, domains=NUMBER_DOMAINS + SELECT_DOMAINS),
                      description="Fixed values written with the mode: {entity: value}"),
 })
 
 #: Keys of the ``power_setpoint`` binding (validation and config UI).
 POWER_SETPOINT_BINDING: dict[str, ParamSpec] = {
-    "control": ParamSpec(str, required=True, choices=CONTROLS, label="Controlled through",
-                         description="current: charging current (A) · power: a power "
-                                     "number · action: a script · modes: the charger's own "
-                                     "modes (PV / instant / stop)"),
+    "control": ParamSpec(str, required=True, choices=CONTROLS, choice_labels=CONTROL_LABELS,
+                         label="Controlled through",
+                         description="How Energy Assistant tells the charger what to do"),
     "current": ParamSpec(str, required=True, entity=True, domains=NUMBER_DOMAINS,
-                         label="Current number", when=_when("current"),
+                         units=_CURRENT, label="Current number", when=_when("current"),
                          description="Charging current (A)"),
     "power": ParamSpec(str, required=True, entity=True, domains=NUMBER_DOMAINS,
-                       label="Power number", when=_when("power"),
+                       units=_POWER, label="Power number", when=_when("power"),
                        description="Charging power (W or kW)"),
     "enable": ParamSpec(str, entity=True, domains=SWITCH_DOMAINS, label="Charging switch",
                         when=_when("current", "power"),
@@ -95,11 +106,14 @@ POWER_SETPOINT_BINDING: dict[str, ParamSpec] = {
                       description="Select entity of the charge mode"),
     "modes": ParamSpec(dict, required=True, label="Modes", when=_when("modes"),
                        values=_MODE_ENTRY,
+                       keys=ParamSpec(str, choices=_BEHAVIOURS, choice_labels=_MODE_LABELS),
                        description="Per behaviour (charge, absorb_surplus, stop): option, "
                                    "current or power, set"),
-    "release": ParamSpec(str, label="On stop", choices=_BEHAVIOURS, when=_when("modes"),
+    "release": ParamSpec(str, label="On stop", choices=_BEHAVIOURS, choice_labels=_MODE_LABELS,
+                         when=_when("modes"),
                          description="Mode set when Energy Assistant stops (default: none)"),
-    "soc_limit": ParamSpec(str, entity=True, domains=NUMBER_DOMAINS, label="SoC limit number",
+    "soc_limit": ParamSpec(str, entity=True, domains=NUMBER_DOMAINS, units=_PERCENT,
+                           label="SoC limit number",
                            description="Gets the target SoC when charging is commanded"),
     "min_current_a": ParamSpec(float, default=6.0, minimum=0, advanced=True,
                                label="Lowest current (A)",

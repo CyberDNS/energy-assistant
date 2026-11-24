@@ -190,7 +190,7 @@ devices:
 
   - id: pv_production
     category: pv
-    type: generic_homeassistant
+    type: homeassistant_sensor
     metered_by: main_grid_meter   # the meter it sits behind
     capabilities:                 # bindings for HA-backed devices
       power_w: { entity: sensor.power_production_pv, invert_sign: true }
@@ -235,7 +235,9 @@ devices:
 
 Every form is built from the same schemas the loader checks the file against,
 with an editor per kind of value: dropdowns for devices, tariffs and choices,
-entity pickers for Home Assistant, tables for charge curves, PV planes and
+a searchable Home Assistant entity selector (by friendly name, entity id and
+area, with the current state; only the fitting domains), suggestions from
+the chosen entity for its options, modes and attributes, tables for charge curves, PV planes and
 exclusion rules, a load-profile editor per day type, and nested forms for a
 forecast and its fallback.
 
@@ -269,6 +271,93 @@ cloud connection), and rarely needed ones are under "More settings".
   ill-typed setting of a section, tariff, forecast or plugin stops the start
   with a list of everything to fix.
 
+### Home Assistant devices
+
+Any device Home Assistant can read or command is usable by configuration
+only.  One type per category; each capability is **bound** to entities:
+
+| Type | Category | Reads | Commands through `power_setpoint` |
+|---|---|---|---|
+| `homeassistant_sensor` | meter, pv, consumer, sensor | power, energy in/out, power per phase, temperature | — |
+| `homeassistant_battery` | battery | `power_w` (+ = charging), `soc_pct` | `number` · `charge_discharge` · `mode_power` · `action` · `modes` |
+| `homeassistant_charger` | charger | `power_w`, `plugged` | `current` (+ `enable` switch) · `power` · `action` · `modes` |
+| `homeassistant_thermostat` | thermal_load | `temperature_c`, optional `power_w` | `target_temperature` · `hvac_mode` · `preset` · `water_heater` · `water_heater_operation` |
+| `homeassistant_switch` | switch | optional `power_w`, `energy_in_kwh` | on / off |
+| `homeassistant_thermal` | thermal_load | `temperature_c` | through the switch it is `controlled_by` |
+| `homeassistant_vehicle` | vehicle | `soc_pct`, `range_km`, `plugged`, `location_home` | — |
+
+(`generic_homeassistant` and `openwb_homeassistant` are older names that keep working.)
+
+**Bindings** (every reading): `entity`, or `attribute` of it (e.g. a climate's
+`current_temperature`), or `import_entity` + `export_entity` (value = import −
+export), or `entities` per phase; `invert_sign`, `scale`, and for on/off
+values `on: [states that count as on]`.  Units come from the entity: kW, Wh,
+°F, mi are converted.  The config UI only suggests entities of a fitting
+domain; a missing entity is logged once and makes the value unavailable.
+Home Assistant is read over one websocket: states are kept in memory, so a
+control tick reads nothing over the network.
+
+**Setpoint control or mode control.**  Every tick the control loop sends a
+battery or charger a power *and* what it is for: `charge`, `discharge`,
+`hold`, `absorb_surplus` (PV surplus only), `self_consumption` or `stop`.
+
+- *Setpoint control* (`number`, `charge_discharge`, `current`, `power`,
+  `action`, `mode_power`): Energy Assistant decides the power every tick, also
+  when following the PV surplus.
+- *Mode control* (`modes`): each behaviour maps to one of the device's own
+  modes (`option` of the `mode` select), with an optional power or current
+  number and fixed values (`set: {entity: value}`).  The device follows
+  surplus and load itself — faster, fewer writes, and it keeps a sensible mode
+  if Energy Assistant stops (`release`).  A behaviour without a mode falls
+  back to the closest one.
+
+```yaml
+- id: home_battery
+  category: battery
+  type: homeassistant_battery
+  capabilities:
+    power_w: { entity: sensor.battery_power }
+    soc_pct: { entity: sensor.battery_soc }
+    power_setpoint:
+      control: modes
+      mode: select.battery_working_mode
+      modes:
+        charge:           { option: Forcible charge, power: number.battery_forcible_power }
+        discharge:        { option: Forcible discharge, power: number.battery_forcible_power }
+        self_consumption: { option: Maximise self consumption }
+        absorb_surplus:   { option: Maximise self consumption,
+                            set: { number.battery_max_discharge_power: 0 } }
+  params: { capacity_kwh: 10, max_charge_kw: 5, max_discharge_kw: 5 }
+```
+
+Writes go only on a mismatch (a value changed by hand is put back), at most
+every 5 s per value; an entity that still shows another value a minute after
+a write is logged once and reported as "not followed" in the device's state.
+Chargers stop below `min_current_a` (6 A) and, following the surplus, keep
+the minimum for `stop_delay_s` (60 s) so a passing cloud does not switch them
+off.  Thermostats put back their `normal` target or mode when Energy
+Assistant stops and when no command came for 30 min; targets stay inside the
+entity's own range.
+
+**Presets.**  When you add a battery, charger or thermal load, the config UI
+offers presets for common integrations: pick one, enter the entity prefix,
+"Fill in the form", check and save.  Presets marked "not yet checked" are
+written from the integration's documentation and source; please report what
+you had to change.
+
+| Preset | Category | Checked on a real installation |
+|---|---|---|
+| openWB chargepoint (openWB 2 integration) | charger | yes |
+| Heater with a thermostat (HVAC mode / target temperature) | thermal_load | yes (generic thermostat) |
+| Wallbox (core integration) | charger | not yet |
+| go-e Charger (go-eCharger API v2) | charger | not yet |
+| Huawei LUNA2000 (Huawei Solar) | battery | not yet |
+| SolarEdge battery (SolarEdge Modbus Multi) | battery | not yet |
+| Hot-water tank (water heater entity) | thermal_load | not yet |
+
+New presets are a YAML file in `src/energy_assistant/presets/` (format in
+`core/presets.py`); the tests check every preset against the schemas.
+
 ### Thermal loads and switches
 
 A load that keeps a measured value between two thresholds (aquarium cooler,
@@ -279,7 +368,10 @@ and it reads its value from `capabilities.temperature_c` (`type:
 homeassistant_thermal`).  The `switch` device it is `controlled_by` (a plug or
 relay, `type: homeassistant_switch`) is the means: it holds `rated_power_w`,
 reports the power (its optional `power_w` sensor, else the rated power while
-on) and receives the on/off commands.  The planner schedules the load in cheap
+on) and receives the on/off commands.  A thermostat (`climate` or `water_heater`
+entity) switches itself: `type: homeassistant_thermostat` with its own
+`params.rated_power_w` and no switch (see Home Assistant devices).  The
+planner schedules the load in cheap
 or PV hours; the control loop keeps it inside its thresholds whatever the plan
 says.  Stored thermal models and savings are keyed by the thermal load's id.
 

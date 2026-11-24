@@ -1,0 +1,43 @@
+title: Huawei LUNA2000 battery (Huawei Solar integration)
+category: battery
+integration: Huawei Solar (custom, wlcrs/huawei_solar)
+url: https://github.com/wlcrs/huawei_solar
+verified: false
+description: >-
+  Works through the working mode and the maximum charge / discharge powers:
+  self-consumption, storing PV surplus only (discharge limit 0) and hold.
+  Charging from the grid needs the integration's forcible_charge service,
+  which this preset does not use: a planned grid charge stores PV surplus
+  only.  Needs "elevated permissions" in the integration.  Check that the
+  charge/discharge power is positive while charging (else set invert_sign)
+  and set the two "full" limits to your battery's maximum.
+variables:
+  prefix:
+    label: Battery device prefix
+    example: batteries
+device:
+  type: homeassistant_battery
+  capabilities:
+    power_w: { entity: "sensor.{prefix}_charge_discharge_power" }
+    soc_pct: { entity: "sensor.{prefix}_state_of_capacity" }
+    power_setpoint:
+      control: modes
+      mode: "select.{prefix}_working_mode"
+      modes:
+        self_consumption:
+          option: maximise_self_consumption
+          set:
+            "number.{prefix}_maximum_charging_power": 5000
+            "number.{prefix}_maximum_discharging_power": 5000
+        absorb_surplus:
+          option: maximise_self_consumption
+          set:
+            "number.{prefix}_maximum_charging_power": 5000
+            "number.{prefix}_maximum_discharging_power": 0
+        hold:
+          option: maximise_self_consumption
+          set:
+            "number.{prefix}_maximum_charging_power": 0
+            "number.{prefix}_maximum_discharging_power": 0
+      release: self_consumption
+  params: { capacity_kwh: 10, max_charge_kw: 5, max_discharge_kw: 5, min_soc_pct: 5 }
