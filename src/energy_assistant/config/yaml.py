@@ -32,6 +32,8 @@ file without a restart.
 
 from __future__ import annotations
 
+import os
+import secrets as secrets_module
 from pathlib import Path
 from typing import Any
 
@@ -47,18 +49,39 @@ from ..core.device_model import DeviceConfigError, parse_devices
 from ..secrets import SecretNotFoundError, SecretsManager
 
 
-def _make_loader(secrets: SecretsManager) -> type[yaml.SafeLoader]:
-    """Return a SafeLoader subclass that resolves ``!secret`` tags."""
+def _make_loader(secrets: SecretsManager | None, missing: list[str]) -> type[yaml.SafeLoader]:
+    """Return a SafeLoader subclass that resolves ``!secret`` tags.
+
+    A secret that is not defined resolves to ``""`` and its name is added to
+    *missing*, so every missing secret is reported, not only the first.
+    Without *secrets* every ``!secret`` resolves to ``""`` (``fallback_config``).
+    """
 
     class _SecretLoader(yaml.SafeLoader):
         pass
 
     def _secret_constructor(loader: yaml.SafeLoader, node: yaml.ScalarNode) -> str:
-        name = loader.construct_scalar(node)
-        return secrets.get(name)
+        name = str(loader.construct_scalar(node))
+        if secrets is None:
+            return ""
+        try:
+            return secrets.get(name)
+        except SecretNotFoundError:
+            if name not in missing:
+                missing.append(name)
+            return ""
 
     _SecretLoader.add_constructor("!secret", _secret_constructor)
     return _SecretLoader
+
+
+def yaml_error_message(exc: yaml.YAMLError) -> str:
+    """A YAML syntax error as one line, with the line and column it is at."""
+    mark = getattr(exc, "problem_mark", None) or getattr(exc, "context_mark", None)
+    problem = getattr(exc, "problem", None) or getattr(exc, "context", None) or str(exc)
+    if mark is None:
+        return f"config.yaml is not valid YAML: {problem}"
+    return f"config.yaml is not valid YAML: line {mark.line + 1}, column {mark.column + 1}: {problem}"
 
 
 class YamlConfigLoader:
@@ -77,7 +100,8 @@ class YamlConfigLoader:
         self._path = Path(path)
         if secrets is None:
             secrets = SecretsManager(self._path.parent / "secrets.yaml")
-        self._loader = _make_loader(secrets)
+        self._missing: list[str] = []
+        self._loader = _make_loader(secrets, self._missing)
 
     def load(self) -> AppConfig:
         """Parse the YAML file and return a fully-structured ``AppConfig``.
@@ -93,14 +117,15 @@ class YamlConfigLoader:
         """Parse *text* as the content of the config file (``!secret`` tags are
         resolved as for the file itself).  Used to check an edited config
         before it is written."""
+        self._missing.clear()
         try:
             raw: dict[str, Any] = yaml.load(text, Loader=self._loader) or {}
-        except SecretNotFoundError as exc:
-            raise DeviceConfigError([
-                f"secret {exc.name!r} is not defined in secrets.yaml"
-            ]) from exc
         except yaml.YAMLError as exc:
-            raise DeviceConfigError([f"config.yaml is not valid YAML: {exc}"]) from exc
+            raise DeviceConfigError([yaml_error_message(exc)]) from exc
+        if self._missing:
+            raise DeviceConfigError([
+                f"secret {name!r} is not defined in secrets.yaml" for name in self._missing
+            ])
 
         if "topology" in raw:
             raise DeviceConfigError([(
@@ -137,7 +162,7 @@ class YamlConfigLoader:
             errors.extend(exc.errors)
         if errors:
             raise DeviceConfigError(errors)
-        backends = _parse_backends(raw.get("backends") or {})
+        backends = with_supervisor_default(_parse_backends(raw.get("backends") or {}))
         raw_tariffs: dict[str, Any] = raw.get("tariffs") or {}
         default_tariff_id = _find_default_tariff(raw_tariffs)
         return AppConfig(
@@ -152,6 +177,79 @@ class YamlConfigLoader:
             energy_dashboard=raw.get("energy_dashboard") or {},
             default_tariff_id=default_tariff_id,
         )
+
+
+#: The Home Assistant Core API as the Supervisor proxies it for an add-on
+#: (``homeassistant_api: true`` in the add-on's config.yaml).
+SUPERVISOR_CORE_URL = "http://supervisor/core"
+SUPERVISOR_CORE_WS_URL = "ws://supervisor/core/websocket"
+
+
+def supervisor_homeassistant() -> HomeAssistantConfig | None:
+    """The Home Assistant this add-on runs in, when running as an add-on
+    (the Supervisor sets ``SUPERVISOR_TOKEN``); else ``None``."""
+    token = os.environ.get("SUPERVISOR_TOKEN", "").strip()
+    if not token:
+        return None
+    return HomeAssistantConfig(
+        url=SUPERVISOR_CORE_URL, token=token, ws_url=SUPERVISOR_CORE_WS_URL, supervisor=True,
+    )
+
+
+def with_supervisor_default(backends: BackendsConfig) -> BackendsConfig:
+    """*backends* with the add-on's own Home Assistant when none is configured.
+    An explicit ``backends.homeassistant`` (e.g. a remote HA) always wins."""
+    if backends.homeassistant is None:
+        backends.homeassistant = supervisor_homeassistant()
+    return backends
+
+
+def fallback_config(text: str) -> AppConfig:
+    """What runs while the config file has problems: no devices, tariffs or
+    forecasts — only what keeps the UI usable and safe.
+
+    * ``server`` (port, API token, trusted hosts) and ``logging`` are taken
+      over when they can be read.  When the file mentions ``api_token`` but
+      its ``server:`` section cannot be read, the API is locked down to the
+      trusted hosts (HA ingress, localhost) rather than left open.
+    * ``backends.homeassistant`` when it can be read (else the add-on's own
+      Home Assistant), so the entity pickers keep working.  MQTT is left
+      out: the publisher would remove the entities of the devices that are
+      missing from this empty configuration.
+    """
+    try:
+        raw = yaml.load(text, Loader=_make_loader(None, [])) or {}
+    except yaml.YAMLError:
+        raw = {}
+    if not isinstance(raw, dict):
+        raw = {}
+
+    def section(name: str) -> dict[str, Any] | None:
+        value = raw.get(name)
+        if value is None:
+            return {}
+        return dict(value) if isinstance(value, dict) else None
+
+    server = section("server")
+    if server is None or (not server.get("api_token") and "api_token" in text):
+        # An unguessable token: only the trusted hosts get in.
+        server = {"api_token": secrets_module.token_urlsafe(32)}
+    homeassistant = None
+    backends = section("backends") or {}
+    ha = backends.get("homeassistant")
+    if isinstance(ha, dict) and isinstance(ha.get("url"), str) and ha.get("token"):
+        try:
+            homeassistant = HomeAssistantConfig(
+                url=ha["url"], token=str(ha["token"]),
+                timeout_s=float(ha.get("timeout_s", 10.0)),
+            )
+        except (TypeError, ValueError):
+            homeassistant = None
+    return AppConfig(
+        backends=with_supervisor_default(BackendsConfig(homeassistant=homeassistant)),
+        server=server,
+        logging=section("logging") or {},
+    )
 
 
 #: Device plugin types that were renamed: old → new.

@@ -73,6 +73,9 @@ class HAClient:
         Long-lived access token created in the HA profile page.
     timeout:
         Per-request timeout in seconds.
+    ws_url:
+        Websocket URL, when it is not ``<url>/api/websocket`` (the Supervisor
+        proxy serves it at ``ws://supervisor/core/websocket``).
     """
 
     def __init__(
@@ -80,6 +83,7 @@ class HAClient:
         url: str,
         token: str,
         timeout: float = _DEFAULT_TIMEOUT,
+        ws_url: str | None = None,
     ) -> None:
         self._client = httpx.AsyncClient(
             base_url=url.rstrip("/"),
@@ -91,6 +95,7 @@ class HAClient:
         )
         self._base_url = url.rstrip("/")
         self._token = token
+        self._ws_url_override = ws_url
         self._timeout = timeout
         self._ws: HAWebSocket | None = None
         self._startup_deadline: float | None = None
@@ -100,6 +105,8 @@ class HAClient:
     # ------------------------------------------------------------------
 
     def _ws_url(self) -> str:
+        if self._ws_url_override:
+            return self._ws_url_override
         return "ws" + self._base_url[len("http"):] + "/api/websocket"
 
     def _ssl_context(self) -> ssl.SSLContext | None:

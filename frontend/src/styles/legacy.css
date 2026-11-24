@@ -340,6 +340,7 @@ th.num, td.num { text-align:right; font-variant-numeric:tabular-nums; }
 .cfg-toolbar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:10px; }
 .cfg-hint { font-size:.75rem; color:var(--muted-foreground); line-height:1.35; }
 .cfg-notice { background:var(--success-soft); color:var(--success); border-radius:8px; padding:8px 12px; margin-bottom:10px; font-weight:600; font-size:.86rem; }
+.cfg-notice-wait { background:var(--warning-soft); color:var(--warning); }
 .cfg-pending { display:flex; align-items:center; gap:10px; flex-wrap:wrap; background:var(--warning-soft); color:var(--warning); border-radius:8px; padding:8px 12px; margin-bottom:10px; font-size:.86rem; }
 .cfg-group-head { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; margin-bottom:6px; }
 .cfg-group-head h2 { margin-bottom:0; }

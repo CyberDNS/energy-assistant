@@ -16,6 +16,17 @@ export function isEmpty(v) {
   return false
 }
 
+// "409: {"detail":{"errors":[…]}}" → the problems themselves.
+function readableError(e) {
+  const text = String(e).replace(/^Error: /, '')
+  const m = /^\d+: (.*)$/s.exec(text)
+  try {
+    const errors = JSON.parse(m?.[1] ?? '')?.detail?.errors
+    if (Array.isArray(errors) && errors.length) return errors.join(' · ')
+  } catch { /* not JSON */ }
+  return text
+}
+
 // Shared state of the configuration UI: the schemas, the content of
 // config.yaml and what the pickers offer (devices, tariffs, entities, secrets).
 // Created once by ConfigView; every editor component reads it with useConfig().
@@ -31,7 +42,7 @@ export function provideConfig() {
       file.value = await fetchConfigFile()
       error.value = null
     } catch (e) {
-      error.value = String(e).replace(/^Error: /, '')
+      error.value = readableError(e)
     }
   }
   async function loadEntities() {

@@ -63,6 +63,11 @@ class HomeAssistantConfig:
     url: str
     token: str
     timeout_s: float = 10.0
+    #: Websocket URL when it is not ``<url>/api/websocket`` (Supervisor proxy).
+    ws_url: str | None = None
+    #: The Home Assistant this add-on runs in, reached through the Supervisor
+    #: (no ``backends.homeassistant`` configured) — see ``config/yaml.py``.
+    supervisor: bool = False
 
 
 @dataclass

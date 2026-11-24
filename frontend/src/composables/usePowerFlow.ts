@@ -38,8 +38,17 @@ export interface FailSafeStatus {
   events?: FailSafeEvent[]
 }
 
+/** running, or waiting for a working config.yaml (nothing is planned or controlled). */
+export interface ConfigurationState {
+  state: 'running' | 'configuration_needed'
+  problems: string[]
+  devices: number
+  homeassistant: { source: 'supervisor' | 'config', label: string } | null
+}
+
 export interface Status {
   timestamp: string
+  configuration?: ConfigurationState
   planning?: boolean
   dry_run?: boolean
   failsafe?: FailSafeStatus
