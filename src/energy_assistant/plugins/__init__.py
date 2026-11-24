@@ -35,6 +35,7 @@ from . import (  # noqa: E402
     homeassistant_thermostat,
     homeassistant_vehicle,
     learned,
+    learned_pv,
     modbus,
     openwb_homeassistant,
     openwb_mqtt,
@@ -58,6 +59,7 @@ homeassistant_thermal.register(registry)
 homeassistant_thermostat.register(registry)
 homeassistant_vehicle.register(registry)
 learned.register(registry)
+learned_pv.register(registry)
 modbus.register(registry)
 openwb_homeassistant.register(registry)
 openwb_mqtt.register(registry)

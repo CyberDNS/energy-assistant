@@ -287,10 +287,14 @@ class _TariffZone:
 def _learning_category(item: dict[str, Any]) -> str:
     """Learning-tab category of one ``/api/learned`` entry, one per learning
     method: ``consumption`` (daily energy of a consumer, regressed on
-    temperature and day type, times an hourly shape), ``thermal`` (devices
-    kept between a min and a max: aquarium, fridge, AC) and ``storage``
-    (battery round-trip efficiency from closed charge/discharge cycles)."""
-    return {"thermal": "thermal", "efficiency": "storage"}.get(item.get("kind", ""), "consumption")
+    temperature and day type, times an hourly shape), ``pv`` (the PV system
+    learned from its production against past weather forecasts),
+    ``thermal`` (devices kept between a min and a max: aquarium, fridge, AC)
+    and ``storage`` (battery round-trip efficiency from closed
+    charge/discharge cycles)."""
+    return {"thermal": "thermal", "efficiency": "storage", "pv": "pv"}.get(
+        item.get("kind", ""), "consumption"
+    )
 
 
 async def _current_export_price(tariffs: dict[str, TariffModel]) -> float:
