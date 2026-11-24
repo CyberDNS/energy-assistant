@@ -10,6 +10,7 @@ export function editorFor(spec, value) {
   if (spec.secret || (isObj && ('!secret' in value || '!hidden' in value))) return 'secret'
   if (spec.widget === 'load_profile') return 'profile'
   if (spec.widget?.startsWith('learning')) return 'learning'
+  if (spec.widget === 'weekdays') return 'weekdays'
   if (spec.plugin) return 'plugin'
   if (spec.ref) return 'device'
   if (spec.tariff) return 'tariff'
@@ -50,8 +51,11 @@ export default defineComponent({
       .filter(d => d.id !== props.selfId && (props.spec.ref.includes('*') || props.spec.ref.includes(d.category)))
       .map(d => ({ value: d.id, label: `${d.label} (${d.id})` })))
     const tariffOptions = computed(() => cfg.tariffs.value.map(t => ({ value: t, label: t })))
+    // An unset device tariff means the default tariff; an unset base tariff
+    // (a time-of-use tariff on top of another one) means none.
+    const defaultTariff = computed(() => (props.spec.widget === 'base_tariff' ? null : cfg.defaultTariff.value))
     const set = (v) => emit('update:modelValue', v)
-    return { cfg, editor, deviceOptions, tariffOptions, set }
+    return { cfg, editor, deviceOptions, tariffOptions, defaultTariff, set }
   },
 })
 </script>
@@ -60,9 +64,10 @@ export default defineComponent({
   <SecretPicker v-if="editor === 'secret'" :model-value="modelValue" :suggest="name" :aria-label="ariaLabel" @update:model-value="set" />
   <LoadProfileEditor v-else-if="editor === 'profile'" :model-value="modelValue" @update:model-value="set" />
   <LearningEditor v-else-if="editor === 'learning'" :model-value="modelValue" :kind="spec.widget.split(':')[1]" @update:model-value="set" />
+  <WeekdaysEditor v-else-if="editor === 'weekdays'" :model-value="modelValue" :aria-label="ariaLabel" @update:model-value="set" />
   <PluginEditor v-else-if="editor === 'plugin'" :kind="spec.plugin" scope="device" optional :model-value="modelValue" @update:model-value="set" />
   <OptionSelect v-else-if="editor === 'device'" :options="deviceOptions" :model-value="modelValue" :aria-label="ariaLabel" @update:model-value="set" />
-  <OptionSelect v-else-if="editor === 'tariff'" :options="tariffOptions" :default-value="cfg.defaultTariff.value" :model-value="modelValue" :aria-label="ariaLabel" @update:model-value="set" />
+  <OptionSelect v-else-if="editor === 'tariff'" :options="tariffOptions" :default-value="defaultTariff" :model-value="modelValue" :aria-label="ariaLabel" @update:model-value="set" />
   <TableEditor v-else-if="editor === 'table'" :fields="spec.items.fields" :model-value="modelValue" :self-id="selfId" @update:model-value="set" />
   <ListEditor v-else-if="editor === 'list'" :item="spec.items" :model-value="modelValue" :self-id="selfId" @update:model-value="set" />
   <MapEditor v-else-if="editor === 'map'" :value-spec="spec.values" :key-spec="spec.keys ?? null" :model-value="modelValue" @update:model-value="set" />

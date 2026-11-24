@@ -57,6 +57,35 @@ tariffs:
   # heatpump:
   #   type: flat_rate
   #   import_price_eur_per_kwh: 0.178
+  # Fixed prices by time of day, weekday and season (day/night tariff).
+  # A window's times apply to each listed day: mon-fri 22:00-06:00 covers
+  # 00:00-06:00 and 22:00-24:00 Monday to Friday.  Times on quarter hours.
+  # Overlapping windows, and times no window covers without a default
+  # period, are config errors.
+  # daynight:
+  #   type: time_of_use
+  #   timezone: Europe/Berlin
+  #   periods:
+  #     - name: night
+  #       price_eur_per_kwh: 0.24
+  #       windows:
+  #         - { days: [mon-fri], from: "22:00", to: "06:00" }
+  #         - { days: [sat, sun], all_day: true }
+  #     - name: day
+  #       price_eur_per_kwh: 0.32
+  #       default: true              # everything no window covers
+  #   seasons:                       # optional: other prices in a date range
+  #     - { from: "11-01", to: "02-28", periods: { day: 0.34 } }
+  #   export_price_eur_per_kwh: 0.08
+  # The same with base: is added on top of another tariff, e.g. time-variable
+  # grid fees (§14a Modul 3) on the spot price; then make it the default.
+  # household_with_fees:
+  #   type: time_of_use
+  #   base: household
+  #   periods:
+  #     - { name: low, price_eur_per_kwh: -0.06, windows: [{ from: "00:00", to: "06:00" }] }
+  #     - { name: high, price_eur_per_kwh: 0.04, windows: [{ days: [mon-fri], from: "17:00", to: "21:00" }] }
+  #     - { name: standard, price_eur_per_kwh: 0.0, default: true }
 
 # ---------------------------------------------------------------------------
 # Tasmota devices on the LAN (type: tasmota)

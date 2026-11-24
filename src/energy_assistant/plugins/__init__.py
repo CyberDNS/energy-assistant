@@ -42,6 +42,7 @@ from . import (  # noqa: E402
     tasmota,
     tibber,
     tibber_local,
+    time_of_use,
     zendure,
 )
 
@@ -64,4 +65,5 @@ static_profile.register(registry)
 tasmota.register(registry)
 tibber.register(registry)
 tibber_local.register(registry)
+time_of_use.register(registry)
 zendure.register(registry)

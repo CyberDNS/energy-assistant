@@ -42,7 +42,7 @@ from ..core.tariff import TariffModel
 from ..core.topology import TopologyNode, build_topology
 from ..plugins import registry as plugin_registry
 from ..plugins._homeassistant.client import HAClient
-from .config_validation import forecast_errors, learning_errors
+from .config_validation import forecast_errors, learning_errors, tariff_build_order
 from .forecast_config import effective_forecast_configs
 
 _log = logging.getLogger(__name__)
@@ -296,11 +296,16 @@ def build(
         ctx = make_build_context(app_config)
 
     # --- Tariffs ---
-    tariffs: dict[str, TariffModel] = {}
-    for name, cfg in app_config.tariffs.items():
-        tariff = plugin_registry.build_tariff(name, cfg, ctx)
+    # A tariff built on another one (``base:``) comes after it and finds it
+    # in ``ctx.tariffs``; the result keeps the configured order.
+    ctx.tariffs = {}
+    for name in tariff_build_order(app_config.tariffs):
+        tariff = plugin_registry.build_tariff(name, app_config.tariffs[name], ctx)
         if tariff is not None:
-            tariffs[name] = tariff
+            ctx.tariffs[name] = tariff
+    tariffs: dict[str, TariffModel] = {
+        name: ctx.tariffs[name] for name in app_config.tariffs if name in ctx.tariffs
+    }
 
     # --- Devices (validated, then built in two passes) ---
     validate_plugins(app_config.devices, app_config.tariffs)

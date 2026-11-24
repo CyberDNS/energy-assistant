@@ -120,14 +120,14 @@ and what comes later. Open items link to their GitHub issue.
 ## Later: features
 
 - [ ] Phase-aware EV charging: fuse limit, 1/3-phase switching; first check the openWB interface (#69)
-- [ ] Time-variable grid fees (§14a EnWG Modul 3), later §14a dimming (#71)
+- [ ] Time-variable grid fees (§14a EnWG Modul 3), later §14a dimming (#71); the fees can already be a `time_of_use` tariff on top of the energy price (`base:`, #104), still open: operator examples, fee shown separately in the UI
 - [ ] Heat pump as controllable load via SG-Ready (#66); climate / water heater control via HA already possible with `homeassistant_thermostat` (#130)
 
 ## Community readiness
 
 - [ ] Issue forms for device requests and problem reports (#101)
 - [ ] Support page: anonymised, encrypted support bundle with replayable scenario, pre-filled issue (#102)
-- [ ] Tariffs: ENTSO-E day-ahead with fee/tax formula (#103), time-of-use (#104), power-dependent charges for Luxembourg and Flanders (#105)
+- [ ] Tariffs: ENTSO-E day-ahead with fee/tax formula (#103), power-dependent charges for Luxembourg and Flanders (#105); time-of-use done (#104)
 - [x] Generic devices via Home Assistant entities for all categories, with presets (#106); still open: presets marked "not yet" verified on real installations
 - [ ] Generic devices: OCPP 1.6J (#107), Modbus SunSpec (#108)
 
