@@ -95,6 +95,10 @@ export const setConfigSecret = (name, value) =>
 export const deleteConfigSecret = (name) =>
   configCall(`/api/config/secrets/${encodeURIComponent(name)}`, { method: 'DELETE' })
 export const reloadConfig = () => configCall('/api/config/reload', { method: 'POST' })
+// config.yaml as text (the editor of last resort, also when it is not valid YAML).
+export const fetchConfigText = () => configCall('/api/config/text')
+export const saveConfigText = (text, revision) =>
+  configCall('/api/config/text', _json('PUT', { text, revision }))
 // Small and cheap: whether config.yaml on disk differs from what is running.
 export const fetchConfigState = () => call('/api/config/state')
 // Savings slots since `start` (a Date), with their totals.

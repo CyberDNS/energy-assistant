@@ -30,6 +30,48 @@ Three channels are available:
 | Energy Assistant (edge)       | Pre-release       |
 | Energy Assistant              | Stable            |
 
+### First start
+
+1. Install the add-on and start it. No `config.yaml` and no access token are
+   needed.
+2. Open **Energy Assistant** in the sidebar. It is connected to the Home
+   Assistant it runs in already (shown as "Home Assistant (this
+   installation)" on the start page and under Settings → Connections) and
+   opens on a start page with the first steps.
+3. **Add a device** (start with the meter at the grid connection), then your
+   tariff. Each one is applied as soon as it is saved; the plan follows within
+   seconds.
+
+How the add-on reaches its Home Assistant: through the Supervisor
+(`http://supervisor/core/api`, websocket `ws://supervisor/core/websocket`)
+with the add-on's own `SUPERVISOR_TOKEN` (the add-on has
+`homeassistant_api: true`). A `backends.homeassistant` in `config.yaml`
+(URL + long-lived token, e.g. a Home Assistant on another machine) takes its
+place. Outside the add-on (`SUPERVISOR_TOKEN` not set) only a configured
+`backends.homeassistant` is used.
+
+**A mistake in the configuration never stops Energy Assistant.** It starts
+anyway, in *configuration needed* state: the web UI, the settings and the
+Home Assistant connection work, nothing is planned or controlled. A red notice
+on every page lists every problem (an unknown setting, a missing secret, a
+YAML syntax error with its line and column, …) with a way to fix it:
+
+- problems in a device, tariff or section: fix them in their Settings page.
+  While the file has problems, a change is saved even before everything is
+  valid, as long as it adds no new problem, so they can be fixed one by one;
+- a missing secret: set it under Settings → Secrets;
+- a file that is not valid YAML: Settings → **config.yaml** edits the file as
+  text and shows the line of the error.
+
+As soon as the file is valid it is applied, without a restart, and planning
+starts. A configuration that runs is never replaced from the UI by one with
+problems: such a change is refused and listed in the form. A device that
+cannot be reached at the start is shown as not responding; everything else
+runs.
+
+`GET /api/status` (and `/health`) report the state as `configuration`, and
+`GET /api/config/validate` lists the problems of the file as it is on disk.
+
 Recommended file locations in Home Assistant:
 
 - Config file (user-editable): `/config/config.yaml`
@@ -231,6 +273,7 @@ devices:
 | Connections | `backends:` (Home Assistant, MQTT broker) |
 | System | `optimizer:`, `controller:`, `energy_dashboard:`, `server:`, `logging:` |
 | Secrets | the entries of `secrets.yaml` |
+| config.yaml | the whole file as text (also when it is not valid YAML) |
 | User interface | theme and Home Assistant full-screen mode; stored in the browser, not in `config.yaml` |
 
 Every form is built from the same schemas the loader checks the file against,
@@ -268,8 +311,9 @@ cloud connection), and rarely needed ones are under "More settings".
 - If you edit `config.yaml` by hand, the tab offers **Apply now** (or
   `POST /api/config/reload`) instead of restarting the add-on.
 - The whole file is checked at startup too: an unknown section, an unknown or
-  ill-typed setting of a section, tariff, forecast or plugin stops the start
-  with a list of everything to fix.
+  ill-typed setting of a section, tariff, forecast or plugin is listed with
+  everything else to fix, and the app starts in *configuration needed* state
+  (see [First start](#first-start)).
 
 ### Home Assistant devices
 

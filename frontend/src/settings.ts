@@ -1,7 +1,7 @@
 // The categories of the Settings area.  `sections` are config.yaml sections
 // shown as forms; `panel` picks a dedicated editor.
 import type { Component } from 'vue'
-import { Cable, CloudSun, Cpu, KeyRound, Palette, PlugZap, ReceiptEuro } from '@lucide/vue'
+import { Cable, CloudSun, Cpu, FileCode, KeyRound, Palette, PlugZap, ReceiptEuro } from '@lucide/vue'
 
 export interface SettingsPage {
   id: string
@@ -10,7 +10,7 @@ export interface SettingsPage {
   icon: Component
   /** Tailwind classes of the icon tile. */
   tone: string
-  panel: 'devices' | 'collection' | 'sections' | 'secrets' | 'interface'
+  panel: 'devices' | 'collection' | 'sections' | 'secrets' | 'interface' | 'text'
   sections?: string[]
   /** Stored in this browser rather than in config.yaml. */
   local?: boolean
@@ -31,6 +31,8 @@ export const SETTINGS_PAGES: SettingsPage[] = [
     description: 'Optimizer, control loop and dry run, web server and logging' },
   { id: 'secrets', title: 'Secrets', icon: KeyRound, tone: 'bg-rose-600', panel: 'secrets',
     description: 'Passwords and tokens kept in secrets.yaml' },
+  { id: 'file', title: 'config.yaml', icon: FileCode, tone: 'bg-zinc-600', panel: 'text',
+    description: 'The whole configuration as text, for what the other pages do not cover' },
   { id: 'interface', title: 'User interface', icon: Palette, tone: 'bg-orange-500', panel: 'interface',
     local: true,
     description: 'Theme and how the app behaves inside Home Assistant, for this device' },

@@ -56,7 +56,6 @@ import signal
 import sys
 from pathlib import Path
 
-from .core.device_model import DeviceConfigError
 from .server import Application
 
 _DEFAULT_CONFIG = "config.yaml"
@@ -168,12 +167,9 @@ def main() -> None:
         return
     _configure_logging()
     config_path, db_path = _parse_args()
-    try:
-        asyncio.run(_run(config_path, db_path))
-    except DeviceConfigError as exc:
-        # A config mistake, not a crash: show the list of problems only.
-        logging.getLogger(__name__).error("%s", exc)
-        sys.exit(2)
+    # A config mistake never ends the process: the app then starts in
+    # "configuration needed" state and shows the problems in the web UI.
+    asyncio.run(_run(config_path, db_path))
 
 
 if __name__ == "__main__":

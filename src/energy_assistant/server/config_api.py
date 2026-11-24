@@ -14,6 +14,9 @@ Endpoints (all under ``/api/config``)::
     PUT    /secrets/{name}          set a secret in secrets.yaml (the value is write-only)
     DELETE /secrets/{name}          remove a secret that nothing uses
     POST   /reload                  apply config.yaml as it is on disk
+    GET    /validate                the problems of config.yaml as it is on disk
+    GET    /text                    config.yaml as text (the editor of last resort)
+    PUT    /text                    replace config.yaml with a text and apply it
 
 A change is first applied to the file text in memory (``config/store``) and
 that text is checked exactly as a start with it would be
@@ -21,6 +24,12 @@ that text is checked exactly as a start with it would be
 running configuration is then rebuilt without a restart
 (``Application.reload_config``).  If the rebuild fails, the previous file is
 restored.
+
+While config.yaml has problems ("configuration needed": nothing is planned or
+controlled, see ``Application.config_problems``) a change is also saved when
+it is not valid yet, as long as it adds no new problem — so the valid parts
+can be edited and the problems fixed one by one.  The fixed file is applied
+at once.  A running configuration is never replaced by one with problems.
 
 Secrets never leave the server: a ``!secret name`` value is exchanged as
 ``{"!secret": name}``, a plain value of a setting declared ``secret`` as
@@ -93,6 +102,11 @@ class SecretBody(BaseModel):
     value: str
 
 
+class TextBody(BaseModel):
+    text: str
+    revision: str | None = None
+
+
 def _errors_of(exc: Exception) -> list[str]:
     if isinstance(exc, DeviceConfigError):
         return list(exc.errors)
@@ -160,28 +174,53 @@ def mount_config_api(api: FastAPI, app: Application) -> None:
                  **prune_empty(unmask_secrets(settings, existing or {}))}
         return doc.with_entry(kind, item_id, prune_empty(entry))
 
-    async def _apply(new_text: str, doc: ConfigDocument, revision: str | None) -> dict[str, Any]:
-        """Check, write and reload; restores the file if the reload fails."""
+    async def _problems(text: str) -> list[str]:
+        """Every problem of *text* as config file content (empty: valid)."""
         try:
-            await app.check_config_text(new_text)
-        except Exception as exc:
-            raise HTTPException(422, {"errors": _errors_of(exc)}) from exc
+            await app.check_config_text(text)
+        except Exception as exc:  # noqa: BLE001
+            return _errors_of(exc)
+        return []
+
+    async def _apply(new_text: str, doc: ConfigDocument | None, revision: str | None,
+                     *, allow_problems: bool = False) -> dict[str, Any]:
+        """Check, write and reload; restores the file if the reload fails.
+
+        While the app waits for a configuration, *new_text* is saved even
+        with problems — if they were all there before (or *allow_problems*,
+        for the text editor) — and the result lists them."""
+        problems = await _problems(new_text)
+        if problems:
+            if not app.config_problems:
+                raise HTTPException(422, {"errors": problems})
+            if not allow_problems:
+                before = await _problems(doc.text) if doc is not None else []
+                new = [p for p in problems if p not in before]
+                if new:
+                    raise HTTPException(422, {"errors": new})
+        previous = doc.text if doc is not None else _store().text()
         try:
-            new_revision = _store().write(new_text, expected_revision=revision or doc.revision)
+            new_revision = _store().write(
+                new_text, expected_revision=revision or revision_of(previous)
+            )
         except ConfigConflictError as exc:
             raise HTTPException(409, {"errors": [str(exc)]}) from exc
         try:
             await app.reload_config()
         except Exception as exc:
+            if app.config_problems:
+                # Not running before either: keep the file, report what is left.
+                return {"ok": True, "revision": new_revision, "applied": False,
+                        "problems": app.config_problems}
             _log.error("Applying the edited config failed; restoring the previous file: %s", exc)
-            _store().write(doc.text)
+            _store().write(previous)
             raise HTTPException(
                 500, {"errors": [
                     ("could not apply the change — the previous configuration is running again"),
                     *_errors_of(exc),
                 ]}
             ) from exc
-        return {"ok": True, "revision": new_revision}
+        return {"ok": True, "revision": new_revision, "applied": True, "problems": []}
 
     async def _change(kind: str, item_id: str, body: ChangeBody) -> dict[str, Any]:
         async with edit_lock:
@@ -265,6 +304,7 @@ def mount_config_api(api: FastAPI, app: Application) -> None:
             secret["defined"] = secret["name"] in names or secret["from_env"]
         return {
             "revision": doc.revision,
+            "configuration": app.configuration_state(),
             # The file differs from what is running (edited by hand, not yet applied).
             "pending_reload": doc.revision != revision_of(app.loaded_config_text),
             "devices": devices,
@@ -289,6 +329,7 @@ def mount_config_api(api: FastAPI, app: Application) -> None:
         return {
             "revision": revision,
             "pending_reload": revision != revision_of(app.loaded_config_text),
+            "configuration": app.configuration_state(),
         }
 
     @api.get("/api/config/entities")
@@ -307,16 +348,48 @@ def mount_config_api(api: FastAPI, app: Application) -> None:
 
     # ── changing ───────────────────────────────────────────────────────
 
+    @api.get("/api/config/validate")
+    async def validate_config_file() -> dict:
+        """Every problem of config.yaml as it is on disk."""
+        text = _store().text()
+        problems = await _problems(text)
+        return {"ok": not problems, "errors": problems, "revision": revision_of(text)}
+
     @api.post("/api/config/validate")
     async def validate_config_change(body: ChangeBody) -> dict:
-        """Check one change (as it would be saved) against the whole config."""
+        """Check one change (as it would be saved) against the whole config.
+
+        While config.yaml has problems, only the problems this change adds
+        are ``errors`` (it can be saved without them); ``other_problems``
+        are those of the file that remain."""
         try:
             doc = _store().read()
             text = _edited_text(doc, body.kind or "", body.id or "", body.value, body.create)
-            await app.check_config_text(text)
         except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "errors": _errors_of(exc)}
-        return {"ok": True, "errors": []}
+            return {"ok": False, "errors": _errors_of(exc), "other_problems": []}
+        problems = await _problems(text)
+        if problems and app.config_problems:
+            before = await _problems(doc.text)
+            new = [p for p in problems if p not in before]
+            return {"ok": not new, "errors": new,
+                    "other_problems": [p for p in problems if p in before]}
+        return {"ok": not problems, "errors": problems, "other_problems": []}
+
+    @api.get("/api/config/text")
+    async def get_config_text() -> dict:
+        """config.yaml as text, with its problems."""
+        text = _store().text()
+        return {"text": text, "revision": revision_of(text), "errors": await _problems(text)}
+
+    @api.put("/api/config/text")
+    async def put_config_text(body: TextBody) -> dict:
+        """Replace config.yaml and apply it.  While the app runs, only a valid
+        file is accepted; while it waits for a configuration, any text is
+        saved (and its problems listed)."""
+        async with edit_lock:
+            result = await _apply(body.text, None, body.revision, allow_problems=True)
+            _log.info("Config: config.yaml replaced from the UI text editor")
+            return result
 
     @api.put("/api/config/devices/{device_id}")
     async def put_config_device(device_id: str, body: ChangeBody) -> dict:
@@ -365,14 +438,18 @@ def mount_config_api(api: FastAPI, app: Application) -> None:
             except ConfigStoreError as exc:
                 raise HTTPException(422, {"errors": [str(exc)]}) from exc
             if name in doc.secret_refs():
+                before = app.config_problems
                 try:
                     await app.reload_config()
                 except Exception as exc:
-                    _restore(path, previous)
-                    raise HTTPException(422, {"errors": [
-                        "the configuration does not work with this value — it was not changed",
-                        *_errors_of(exc),
-                    ]}) from exc
+                    # Waiting for a configuration and no new problem: keep it.
+                    new = [p for p in _errors_of(exc) if p not in before]
+                    if not before or new:
+                        _restore(path, previous)
+                        raise HTTPException(422, {"errors": [
+                            "the configuration does not work with this value — it was not changed",
+                            *(new or _errors_of(exc)),
+                        ]}) from exc
             _log.info("Config: secret %r set from the UI", name)
             return {"ok": True}
 

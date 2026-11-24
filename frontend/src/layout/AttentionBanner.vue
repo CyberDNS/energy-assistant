@@ -19,6 +19,8 @@ interface Notice {
   tone: 'danger' | 'warning'
   text: string
   detail?: string
+  /** A list of problems, one per line. */
+  items?: string[]
   action?: { label: string, to?: string, run?: () => void | Promise<void> }
   dismissible: boolean
 }
@@ -78,6 +80,20 @@ const notices = computed<Notice[]>(() => {
     })
   }
   const s = status.value
+  const configuration = s?.configuration
+  if (configuration?.state === 'configuration_needed') {
+    const unreadable = configuration.problems.some(p => p.includes('not valid YAML'))
+    out.push({
+      id: 'configuration-needed', tone: 'danger',
+      text: configuration.problems.length === 1
+        ? 'config.yaml has a problem. Nothing is planned or controlled until it is fixed.'
+        : `config.yaml has ${configuration.problems.length} problems. Nothing is planned or controlled until they are fixed.`,
+      items: configuration.problems,
+      action: route.path.startsWith('/settings') ? undefined
+        : { label: 'Fix in settings', to: unreadable ? '/settings/file' : '/settings' },
+      dismissible: false,
+    })
+  }
   if (s?.dry_run) {
     out.push({
       id: 'dry-run', tone: 'warning',
@@ -125,6 +141,9 @@ const notices = computed<Notice[]>(() => {
       <span class="min-w-0 flex-1 basis-60">
         <span class="font-medium">{{ n.text }}</span>
         <span v-if="n.detail" class="mt-0.5 block text-xs opacity-80 [overflow-wrap:anywhere]">{{ n.detail }}</span>
+        <ul v-if="n.items?.length" class="mt-1 list-disc space-y-0.5 pl-4 text-xs [overflow-wrap:anywhere]" data-testid="config-problems">
+          <li v-for="item in n.items" :key="item">{{ item }}</li>
+        </ul>
       </span>
       <template v-if="n.action">
         <Button

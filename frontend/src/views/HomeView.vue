@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { Ref } from 'vue'
 import type { Status } from '../composables/usePowerFlow'
-import { ChevronRight } from '@lucide/vue'
+import { Check, ChevronRight } from '@lucide/vue'
 import { computed, inject, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import EnergyFlow from '../components/EnergyFlow.vue'
@@ -125,12 +125,55 @@ const next = computed(() => controllable.value
   .sort((a, b) => a.minutes - b.minutes)
   .slice(0, 6))
 
+// ── nothing configured yet: the first steps instead of empty charts ──
+const configuration = computed(() => status.value?.configuration)
+const firstStart = computed(() => configuration.value?.state === 'running' && configuration.value.devices === 0)
+const homeAssistant = computed(() => configuration.value?.homeassistant ?? null)
+
 const eur = (v: number | null | undefined) => (v == null ? '—' : `${v < -0.005 ? '−' : ''}${Math.abs(v).toFixed(2)} €`)
 const kwh = (v: number | null | undefined) => (v == null ? '—' : `${fmt(v, v < 10 ? 2 : 1)} kWh`)
 </script>
 
 <template>
-  <div class="home">
+  <div v-if="firstStart" class="home">
+    <section class="panel full welcome" aria-label="Get started" data-testid="first-start">
+      <h2>Welcome to Energy Assistant</h2>
+      <p class="text-muted-foreground text-sm">
+        Nothing is set up yet. Add your devices and Energy Assistant starts planning: when to charge
+        the battery and the car, and when to run the loads, at the lowest cost.
+      </p>
+      <ol class="steps">
+        <li>
+          <span class="step-mark" :class="{ done: homeAssistant }">
+            <Check v-if="homeAssistant" class="size-4" /><template v-else>1</template>
+          </span>
+          <span class="min-w-0 flex-1">
+            <span class="block font-medium">Home Assistant</span>
+            <span v-if="homeAssistant" class="link-row-sub" data-testid="ha-connection">Connected to {{ homeAssistant.label }}</span>
+            <span v-else class="link-row-sub">Optional: needed for devices that are in Home Assistant.</span>
+          </span>
+          <RouterLink v-if="!homeAssistant" to="/settings/connections" class="btn btn-neutral">Connect</RouterLink>
+        </li>
+        <li>
+          <span class="step-mark">2</span>
+          <span class="min-w-0 flex-1">
+            <span class="block font-medium">Add your first device</span>
+            <span class="link-row-sub">Start with the meter at the grid connection, then PV, battery, car and loads.</span>
+          </span>
+          <RouterLink to="/settings/devices" class="btn btn-primary" data-testid="add-first-device">Add a device</RouterLink>
+        </li>
+        <li>
+          <span class="step-mark">3</span>
+          <span class="min-w-0 flex-1">
+            <span class="block font-medium">Your tariff</span>
+            <span class="link-row-sub">What electricity costs, so the plan can find the cheap hours.</span>
+          </span>
+          <RouterLink to="/settings/tariffs" class="btn btn-neutral">Add a tariff</RouterLink>
+        </li>
+      </ol>
+    </section>
+  </div>
+  <div v-else class="home">
     <div class="home-top">
       <section class="panel" aria-label="Power flow">
         <div class="panel-head">
@@ -234,5 +277,10 @@ const kwh = (v: number | null | undefined) => (v == null ? '—' : `${fmt(v, v <
 .figures dd { font-size: 1.25rem; font-weight: 650; letter-spacing: -.01em; font-variant-numeric: tabular-nums; }
 .figures-wide { grid-column: 1 / -1; padding-top: 12px; border-top: 1px solid var(--border); }
 .figures-wide dd { display: flex; align-items: baseline; gap: 12px; }
+.welcome { display: flex; flex-direction: column; gap: 12px; max-width: 760px; }
+.steps { display: flex; flex-direction: column; gap: 0; margin-top: 4px; }
+.steps li { display: flex; align-items: center; gap: 14px; padding: 12px 0; border-top: 1px solid var(--border); flex-wrap: wrap; }
+.step-mark { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 999px; background: var(--muted); color: var(--muted-foreground); font-weight: 650; font-size: .85rem; }
+.step-mark.done { background: var(--success-soft); color: var(--success); }
 .next-time { min-width: 3.2rem; flex: none; white-space: nowrap; font-variant-numeric: tabular-nums; font-weight: 650; color: var(--primary); }
 </style>

@@ -75,7 +75,7 @@ from ..assets.loader import (
     upcoming_days,
 )
 from ..assets.threshold import ThresholdControlContributor
-from ..config.yaml import YamlConfigLoader
+from ..config.yaml import YamlConfigLoader, fallback_config
 from ..core.change_gate import ChangeGate
 from ..core.composition import compose
 from ..core.config import AppConfig
@@ -85,7 +85,7 @@ from ..core.control import (
     StorageControlContributor,
     surplus_opportunity_price,
 )
-from ..core.device_model import DeviceCategory, DeviceSpec
+from ..core.device_model import DeviceCategory, DeviceConfigError, DeviceSpec
 from ..core.event import DeviceStateEvent, EventBus, PlanUpdatedEvent
 from ..core.execution_log import DeviceTick, ExecutionLog
 from ..core.failsafe import (
@@ -164,6 +164,13 @@ _SOC_PUSH_MIN_INTERVAL_S = 60.0
 # unplanned site then restarts level with the real one instead of carrying a
 # battery level from before the downtime.
 _SAVINGS_STATE_MAX_AGE = timedelta(hours=1)
+
+
+def _problems_of(exc: Exception) -> list[str]:
+    """The config problems an exception stands for (one line each)."""
+    if isinstance(exc, DeviceConfigError):
+        return list(exc.errors) or ["invalid configuration"]
+    return [str(exc) or type(exc).__name__]
 
 
 def _float_or_none(value: Any) -> float | None:
@@ -658,6 +665,11 @@ class Application:
         self._reloading = False
         self._runtime_tasks: list[asyncio.Task[None]] = []
         self._service_tasks: list[asyncio.Task[None]] = []
+        # Problems of the config file.  While there are any, the app runs in
+        # "configuration needed" state: the UI, the config API and the Home
+        # Assistant connection run on a fallback configuration
+        # (config/yaml.fallback_config), nothing is planned or controlled.
+        self._config_problems: list[str] = []
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -674,7 +686,13 @@ class Application:
         self._storage = SqliteStorageBackend(self._db_path)
         await self._storage.start()
 
-        await self._build_runtime(cfg)
+        try:
+            await self._build_runtime(cfg)
+        except Exception as exc:  # a config problem must not stop the process
+            if self._config_problems:
+                raise  # the fallback itself failed: a bug, not a config mistake
+            _log.exception("Could not build the configuration")
+            await self._enter_config_needed(_problems_of(exc))
 
         # API + loops.  The API and the history maintenance run for the whole
         # process lifetime; the other loops belong to the runtime and are
@@ -691,13 +709,67 @@ class Application:
         _log.info("All loops started")
 
     def _load_config(self) -> AppConfig:
-        """Read and parse the config file; remembers its text (``_config_text``)."""
+        """Read and parse the config file; remembers its text (``_config_text``).
+
+        A file with problems gives the fallback configuration and puts the
+        app in "configuration needed" state (``config_problems``)."""
         text = self._config_path.read_text() if self._config_path.exists() else ""
-        cfg = YamlConfigLoader(self._config_path).load_text(text)
         self._config_text = text
+        try:
+            cfg = YamlConfigLoader(self._config_path).load_text(text)
+            validate_plugins(cfg.devices, cfg.tariffs)
+        except Exception as exc:  # noqa: BLE001 — never stop on a config mistake
+            self._set_config_problems(_problems_of(exc))
+            return fallback_config(text)
+        self._config_problems = []
         return cfg
 
+    def _set_config_problems(self, problems: list[str]) -> None:
+        if problems != self._config_problems:
+            _log.error(
+                "Configuration needed — nothing is planned or controlled until "
+                "config.yaml is fixed (in the web UI under Settings):\n  - %s",
+                "\n  - ".join(problems),
+            )
+        self._config_problems = problems
+
+    async def _enter_config_needed(self, problems: list[str]) -> None:
+        """Run the fallback configuration (after building the real one failed)."""
+        self._set_config_problems(problems)
+        await self._close_devices_quietly()
+        await self._build_runtime(fallback_config(self._config_text),
+                                  getattr(self, "_build_ctx", None))
+
+    async def _close_devices_quietly(self) -> None:
+        if hasattr(self, "_registry"):
+            await self._close_devices()
+
+    @property
+    def config_problems(self) -> list[str]:
+        """Problems of the config file; empty when it is running."""
+        return list(self._config_problems)
+
+    def configuration_state(self) -> dict[str, Any]:
+        """``running`` or ``configuration_needed``, with the problems, and
+        which Home Assistant the app is connected to (for the UI)."""
+        ha = self._cfg.backends.homeassistant if hasattr(self, "_cfg") else None
+        return {
+            "state": "configuration_needed" if self._config_problems else "running",
+            "problems": list(self._config_problems),
+            "devices": len(self._cfg.devices) if hasattr(self, "_cfg") else 0,
+            "homeassistant": (
+                None if ha is None else
+                {"source": "supervisor", "label": "Home Assistant (this installation)"}
+                if ha.supervisor else {"source": "config", "label": ha.url}
+            ),
+        }
+
     def _start_loops(self) -> None:
+        if self._config_problems:
+            # Configuration needed: nothing is planned or controlled.
+            self._runtime_tasks = []
+            self.tasks = list(self._service_tasks)
+            return
         self._runtime_tasks = [
             asyncio.create_task(self._polling_loop(), name="polling"),
             asyncio.create_task(self._planning_loop(), name="planning"),
@@ -1039,26 +1111,42 @@ class Application:
         """
         async with self._reload_lock:
             text = self._config_path.read_text() if self._config_path.exists() else ""
-            await self.check_config_text(text)
-            cfg = YamlConfigLoader(self._config_path).load_text(text)
+            was_broken = bool(self._config_problems)
+            try:
+                await self.check_config_text(text)
+                cfg = YamlConfigLoader(self._config_path).load_text(text)
+            except Exception as exc:
+                if was_broken:
+                    # Nothing runs that the file could break: just show the
+                    # problems of the file as it is now.
+                    self._config_text = text
+                    self._set_config_problems(_problems_of(exc))
+                raise
             previous_text, previous_ctx = self._config_text, self._build_ctx
             self._reloading = True
             try:
                 await self._stop_runtime()
                 try:
+                    self._config_problems = []
                     await self._build_runtime(cfg, previous_ctx)
                     self._config_text = text
-                except Exception:
+                except Exception as exc:
                     _log.exception("Config reload failed — going back to the previous configuration")
                     await self._close_devices()
-                    await self._build_runtime(
-                        YamlConfigLoader(self._config_path).load_text(previous_text), previous_ctx
-                    )
+                    if was_broken:
+                        self._config_text = text
+                        await self._enter_config_needed(_problems_of(exc))
+                    else:
+                        await self._build_runtime(
+                            YamlConfigLoader(self._config_path).load_text(previous_text), previous_ctx
+                        )
                     raise
                 finally:
                     self._start_loops()
             finally:
                 self._reloading = False
+            if was_broken:
+                _log.info("Configuration fixed — planning and control start")
             _log.info("Configuration reloaded: %d devices", len(self._registry))
 
     async def _stop_runtime(self) -> None:
@@ -1070,10 +1158,13 @@ class Application:
         deadline = time.monotonic() + 120.0
         while self._plan_active_count and time.monotonic() < deadline:
             await asyncio.sleep(0.05)
-        try:
-            await self._storage.save_savings_state(self._savings.state.to_dict())
-        except Exception as exc:  # noqa: BLE001
-            _log.warning("Could not save the savings state before the reload: %s", exc)
+        # The fallback configuration (configuration needed) tracks nothing,
+        # so it must not overwrite the stored savings state.
+        if not self._config_problems:
+            try:
+                await self._storage.save_savings_state(self._savings.state.to_dict())
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("Could not save the savings state before the reload: %s", exc)
         if self._mqtt_publisher is not None:
             await self._mqtt_publisher.stop()
             self._mqtt_publisher = None
@@ -2410,7 +2501,7 @@ class Application:
         @api.get("/health")
         async def health() -> dict:
             """Liveness probe endpoint used by container health checks."""
-            return {"status": "ok"}
+            return {"status": "ok", "configuration": self.configuration_state()["state"]}
 
         async def _status_payload() -> dict:
             """Live snapshot: grid power, price, device states, setpoints, ledger.
@@ -2491,8 +2582,27 @@ class Application:
                         ),
                     }
                 )
+            # Devices that have not answered once since the start (unreachable):
+            # shown as unavailable rather than left out.
+            if self._first_poll_done.is_set():
+                for device in self._registry.all():
+                    if device.device_id in device_states_map:
+                        continue
+                    spec = self._cfg.devices.get(device.device_id)
+                    devices_payload.append({
+                        "device_id": device.device_id,
+                        "label": self._label(device.device_id),
+                        "category": device.category.value,
+                        "power_w": None,
+                        "soc_pct": None,
+                        "available": False,
+                        "timestamp": None,
+                        "is_virtual": spec is not None and spec.type == "generic_consumer",
+                        "forecast_power_w": None,
+                    })
 
             return {
+                "configuration": self.configuration_state(),
                 "timestamp": now.isoformat(),
                 "planning": self._plan_active_count > 0,
                 "grid_power_w": grid_power_w,

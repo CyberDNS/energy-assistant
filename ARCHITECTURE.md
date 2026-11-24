@@ -279,6 +279,32 @@ on every page offers it when the file on disk differs from what is running
 `server.port`, `server.api_token` and `server.trusted_hosts` still need a
 restart.
 
+### Configuration needed: a config mistake never stops the process
+
+`Application.start()` never fails on the configuration. When the file has
+problems (invalid YAML, schema errors, a missing secret, an unknown plugin)
+or building it raises, the problems are kept in `config_problems` and the
+runtime is built from `config/yaml.fallback_config()`: no devices, tariffs or
+forecasts; `server`, `logging` and `backends.homeassistant` when they can be
+read (the API is locked to the trusted hosts if the file names an
+`api_token` it cannot read); no MQTT (the publisher would remove the
+entities of the missing devices). Only the API and the history maintenance
+run — no polling, planning or control — and the stored savings state is not
+overwritten. `configuration_state()` (in `/api/status`, `/health`,
+`/api/config/state` and `/api/config/file`) tells the UI.
+
+In this state the config API saves a change that still leaves problems, as
+long as it adds none (`PUT /api/config/text` saves any text), and applies the
+file as soon as it is valid: `reload_config()` then builds the real runtime
+and starts the loops. While a configuration runs, a change with problems is
+refused as before.
+
+**Home Assistant of the add-on.** When `SUPERVISOR_TOKEN` is set and no
+`backends.homeassistant` is configured, the loader adds the Supervisor proxy
+(`http://supervisor/core`, websocket `ws://supervisor/core/websocket`) as the
+Home Assistant backend (`HomeAssistantConfig.supervisor`), so a new add-on
+install needs no token.
+
 ---
 
 ## Storage
