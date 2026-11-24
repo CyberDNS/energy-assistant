@@ -111,6 +111,8 @@ from ..core.savings import (
     SavingsState,
     SavingsTracker,
     day_ahead_window_end,
+    reference_prices,
+    stored_position,
 )
 from ..core.tariff import TariffModel
 from ..core.topology import TopologyNode
@@ -179,6 +181,41 @@ def _savings_totals(rows: list[dict]) -> dict[str, Any]:
         "ev_saving": sum(r["ev_saving"] for r in rows),
         "components": components,
         "hours": sum(r["hours"] for r in rows),
+    }
+
+
+def _stored_positions(
+    rows: list[dict], batteries: list[StorageConstraints]
+) -> tuple[list[float | None], list[float | None]]:
+    """Per slot: the reference price and the saving still stored in the real
+    house's batteries beyond the uncontrolled one's (``stored_position``
+    difference, € at the slot's end; None for slots without ledger values).
+    *rows*: every slot up to the window's end, oldest first."""
+    by_id = {sc.device_id: sc for sc in batteries}
+    prices = reference_prices([(r["slot_start"], r["hours"], r["import_price"]) for r in rows])
+    positions: list[float | None] = []
+    for row, price in zip(rows, prices):
+        pos = stored_position(row.get("stored_detail"), by_id, price)
+        positions.append(pos["difference"] if pos is not None else None)
+    return prices, positions
+
+
+def _stored_change(
+    totals: dict[str, Any], first: int, last: int, positions: list[float | None]
+) -> dict[str, Any]:
+    """Add the change of the stored saving over slots *first*..*last* (indices
+    into *positions*) to *totals*: ``stored_change`` and ``real_with_stored``
+    (the saving counting energy still stored).  Before the first slot both
+    houses start level (0 €)."""
+    start = positions[first - 1] if first > 0 else 0.0
+    end = positions[last] if last >= 0 else 0.0
+    change = end - start if start is not None and end is not None else None
+    return {
+        **totals,
+        "stored_position_start": start,
+        "stored_position_end": end,
+        "stored_change": change,
+        "real_with_stored": totals["real"] + change if change is not None else None,
     }
 
 
@@ -811,6 +848,7 @@ class Application:
             self._storage_constraints, self._cfg.devices, self._storage,
             self._build_ctx.data_dir,
         )
+        self._savings.set_batteries(self._planning_storage_constraints())
 
         # 7d — MQTT publisher (optional — only started when mqtt: is configured)
         if self._cfg.backends.mqtt:
@@ -1638,9 +1676,11 @@ class Application:
             )
 
         thermal_models, ambient_forecasts = await self._thermal_inputs(effective_horizon)
+        storage_constraints = self._planning_storage_constraints(refit=True)
+        self._savings.set_batteries(storage_constraints)
         context = OptimizationContext(
             device_states=device_states,
-            storage_constraints=self._planning_storage_constraints(refit=True),
+            storage_constraints=storage_constraints,
             threshold_constraints=self._threshold_constraints,
             thermal_models=thermal_models,
             ambient_forecasts=ambient_forecasts,
@@ -2233,8 +2273,8 @@ class Application:
     def _planning_storage_constraints(self, refit: bool = False) -> list[StorageConstraints]:
         """Storage constraints the plan runs on: the configured ones, with the
         learned efficiency for batteries set to ``efficiency: learned`` once
-        their estimate is confident.  The savings accounting keeps the
-        configured values (see plugins/learned/efficiency)."""
+        their estimate is confident.  The savings accounting runs on the
+        same values (see plugins/learned/efficiency)."""
         out = []
         for sc in self._storage_constraints:
             learner = self._efficiency_learners.get(sc.device_id)
@@ -2584,24 +2624,38 @@ class Application:
                 raise HTTPException(status_code=400, detail=f"bucket must be one of {_BUCKETS}")
             end = datetime.now(timezone.utc)
             start = end - timedelta(hours=max(0.25, hours))
-            rows = await self._storage.query_savings_slots(start, end)
-            by_bucket: dict[datetime, list[dict]] = defaultdict(list)
-            for row in rows:
-                by_bucket[_bucket_start(row["slot_start"], bucket)].append(row)
             all_rows = await self._storage.query_savings_slots(
-                datetime.min.replace(tzinfo=timezone.utc), end
+                datetime.min.replace(tzinfo=UTC), end
             )
+            prices, positions = _stored_positions(all_rows, self._savings.batteries)
+            first = next(
+                (i for i, r in enumerate(all_rows) if r["slot_start"] >= start), len(all_rows)
+            )
+            rows = all_rows[first:]
+            by_bucket: dict[datetime, list[int]] = defaultdict(list)
+            for i, row in enumerate(rows, start=first):
+                by_bucket[_bucket_start(row["slot_start"], bucket)].append(i)
+            last = len(all_rows) - 1
             return {
                 "start": start.isoformat(),
                 "end": end.isoformat(),
                 "bucket": bucket,
-                "totals": _savings_totals(rows),
+                "totals": _stored_change(
+                    _savings_totals(rows), first, last if rows else first - 1, positions
+                ),
                 "buckets": [
-                    {"start": b.isoformat(), **_savings_totals(b_rows)}
-                    for b, b_rows in sorted(by_bucket.items())
+                    {
+                        "start": b.isoformat(),
+                        **_stored_change(
+                            _savings_totals([all_rows[i] for i in idx]), idx[0], idx[-1],
+                            positions,
+                        ),
+                    }
+                    for b, idx in sorted(by_bucket.items())
                 ],
                 "stored": self._savings.stored(),
-                "all_time": _savings_totals(all_rows),
+                "reference_price": prices[-1] if prices else None,
+                "all_time": _stored_change(_savings_totals(all_rows), 0, last, positions),
                 "groups": self._savings_groups(),
                 # Per-slot detail (what batteries and cars did in both
                 # houses) for windows short enough to chart it.
@@ -2619,13 +2673,25 @@ class Application:
             end = _as_utc(end) if end is not None else datetime.now(timezone.utc)
             if end - start > timedelta(days=31):
                 raise HTTPException(status_code=400, detail="window is limited to 31 days")
-            rows = await self._storage.query_savings_slots(start, end)
+            all_rows = await self._storage.query_savings_slots(
+                datetime.min.replace(tzinfo=UTC), end
+            )
+            prices, positions = _stored_positions(all_rows, self._savings.batteries)
+            idx = [i for i, r in enumerate(all_rows) if r["slot_start"] >= start]
+            rows = [all_rows[i] for i in idx]
             return {
                 "start": start.isoformat(),
                 "end": end.isoformat(),
-                "totals": _savings_totals(rows),
+                "totals": _stored_change(
+                    _savings_totals(rows), idx[0] if idx else 0, idx[-1] if idx else -1,
+                    positions,
+                ),
                 "slots": [
-                    {**row, "slot_start": row["slot_start"].isoformat()} for row in rows
+                    {
+                        **all_rows[i], "slot_start": all_rows[i]["slot_start"].isoformat(),
+                        "reference_price": prices[i], "stored_position": positions[i],
+                    }
+                    for i in idx
                 ],
             }
 

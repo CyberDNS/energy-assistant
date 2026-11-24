@@ -1112,7 +1112,11 @@ class SqliteStorageBackend:
                 slot.real_ev_kwh, slot.uncontrolled_ev_kwh,
                 sum(slot.real_stored.values()), sum(slot.uncontrolled_stored.values()),
                 slot.import_price,
-                json.dumps({"real": slot.real_stored, "uncontrolled": slot.uncontrolled_stored}),
+                json.dumps({
+                    "real": slot.real_stored, "uncontrolled": slot.uncontrolled_stored,
+                    "real_value": slot.real_stored_value,
+                    "uncontrolled_value": slot.uncontrolled_stored_value,
+                }),
                 json.dumps(slot.components),
                 json.dumps({"evs": slot.evs, "devices": slot.devices}),
             ),

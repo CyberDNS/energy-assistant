@@ -7,7 +7,7 @@ Batteries here are lossless (η = 1) so the numbers can be checked by hand.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -29,7 +29,9 @@ from energy_assistant.core.savings import (
     SavingsTracker,
     SlotCorrection,
     day_ahead_window_end,
+    reference_prices,
     settle,
+    stored_position,
 )
 from energy_assistant.plugins.mqtt_publisher import _savings_discovery_configs
 from energy_assistant.storage.sqlite import SqliteStorageBackend
@@ -135,6 +137,9 @@ class TestBatteries:
         assert first.uncontrolled_battery_kwh == pytest.approx(0.0)
         assert first.real_stored["bat"] == pytest.approx(5.0)
         assert first.uncontrolled_stored["bat"] == pytest.approx(MIN)
+        # … and both ledgers, to value the saving still stored.
+        assert first.real_stored_value["bat"] == pytest.approx(0.20 + 0.80)
+        assert first.uncontrolled_stored_value["bat"] == pytest.approx(0.20)
         assert first.import_price == pytest.approx(0.20)
         assert second.real_battery_kwh == pytest.approx(-1.0)
 
@@ -151,6 +156,24 @@ class TestBatteries:
         # Uncontrolled: 1 kWh from a ledger of 1 kWh at 0.20 + 2 kWh at 0.08.
         assert second.uncontrolled_cost == pytest.approx(0.36 / 3, abs=1e-6)
         assert second.saving == pytest.approx(0.12 - 0.40, abs=1e-6)
+
+    def test_uncontrolled_battery_runs_on_the_learned_efficiency(self) -> None:
+        tracker = SavingsTracker([BAT], step_minutes=60)
+        assert tracker.batteries == [BAT]
+        learned = BAT.model_copy(update={"charge_efficiency": 0.8, "discharge_efficiency": 0.8})
+        tracker.set_batteries([learned])
+        # 2 kWh PV surplus: 1.6 kWh arrive in the uncontrolled battery.
+        _run(tracker, [_sample(m, -2.0) for m in range(62)])
+        assert tracker.state.unc["bat"].stored_kwh == pytest.approx(MIN + 1.6, abs=0.03)
+
+    def test_battery_on_the_grid_point_meter_only_gets_surplus_left_there(self) -> None:
+        """2 kWh household surplus while the heat pump draws 1.5 kWh: the
+        SMA-like battery sees only 0.5 kWh, the other one the full surplus."""
+        sma = BAT.model_copy(update={"own_meter": "grid_connection"})
+        for bat, stored in ((sma, MIN + 0.5), (BAT, MIN + 2.0)):
+            tracker = SavingsTracker([bat], step_minutes=60)
+            _run(tracker, [_sample(m, -2.0 + 1.5, secondary=[(1.5, 0.18)]) for m in range(62)])
+            assert tracker.state.unc["bat"].stored_kwh == pytest.approx(stored, abs=0.05)
 
     def test_negative_household_reading_without_pv_is_not_stored(self) -> None:
         """Grid meter and wallbox sampled at different moments can make the
@@ -474,6 +497,7 @@ class TestSavingsStorage:
             assert new["uncontrolled_stored_kwh"] == pytest.approx(2.0)
             assert new["import_price"] == pytest.approx(0.4)
             assert new["stored_detail"]["real"]["b2"] == pytest.approx(1.0)
+            assert new["stored_detail"]["real_value"] == {}
         finally:
             await db.stop()
 
@@ -618,6 +642,71 @@ class TestServerWiring:
             assert bad.status_code == 400
         finally:
             await app._storage.stop()
+
+
+    async def test_api_counts_the_saving_still_stored(self, tmp_path: Path) -> None:
+        """The real house holds 2 kWh more usable energy (ledger 0.10 €/kWh,
+        price 0.30, η = 1): 0.40 € still to book, on top of a −0.10 € saving."""
+        import httpx
+
+        app = await self._app(tmp_path)
+        try:
+            now = datetime.now(UTC)
+            for h, real_kwh, real_value in ((3, MIN, 0.10), (2, MIN + 2.0, 0.30)):
+                await app._storage.save_savings_slot(SavingsSlot(
+                    now - timedelta(hours=h), 0.25, 0.30, 0.20, 0.30, 0.20, 0.0,
+                    real_stored={"bat": real_kwh}, uncontrolled_stored={"bat": MIN},
+                    real_stored_value={"bat": real_value},
+                    uncontrolled_stored_value={"bat": 0.10},
+                    price_hours=0.25 * 0.30,
+                ))
+            transport = httpx.ASGITransport(app=app._build_api(), client=("127.0.0.1", 1))
+            async with httpx.AsyncClient(transport=transport, base_url="http://ea") as c:
+                day = (await c.get("/api/savings", params={"hours": 24})).json()
+                slots = (await c.get(
+                    "/api/savings/slots", params={"start": (now - timedelta(hours=2.5)).isoformat()}
+                )).json()
+            t = day["totals"]
+            assert t["real"] == pytest.approx(-0.20)
+            assert t["stored_change"] == pytest.approx(0.40)
+            assert t["real_with_stored"] == pytest.approx(0.20)
+            assert day["all_time"]["real_with_stored"] == pytest.approx(0.20)
+            assert day["reference_price"] == pytest.approx(0.30)
+            first, second = day["buckets"]
+            assert first["stored_change"] == pytest.approx(0.0)
+            assert second["stored_change"] == pytest.approx(0.40)
+            (row,) = slots["slots"]
+            assert row["stored_position"] == pytest.approx(0.40)
+            assert slots["totals"]["stored_change"] == pytest.approx(0.40)
+        finally:
+            await app._storage.stop()
+
+
+class TestStoredPosition:
+    def test_values_usable_energy_at_the_price_minus_ledger_cost(self) -> None:
+        bat = StorageConstraints(
+            device_id="bat", capacity_kwh=10.0, max_charge_kw=4.0, max_discharge_kw=4.0,
+            discharge_efficiency=0.9, min_soc_pct=10.0,
+        )
+        detail = {
+            "real": {"bat": 5.0}, "real_value": {"bat": 1.0},          # 0.20 €/kWh
+            "uncontrolled": {"bat": 1.0}, "uncontrolled_value": {"bat": 0.10},
+        }
+        pos = stored_position(detail, {"bat": bat}, 0.50)
+        # 4 kWh usable: 4 × 0.9 × 0.50 − 4 × 0.20; the floor is never usable.
+        assert pos["real"] == pytest.approx(4 * 0.45 - 0.8)
+        assert pos["uncontrolled"] == pytest.approx(0.0)
+        assert pos["difference"] == pytest.approx(1.0)
+
+    def test_old_slots_and_missing_prices_give_none(self) -> None:
+        assert stored_position({"real": {}, "uncontrolled": {}}, {"bat": BAT}, 0.3) is None
+        assert stored_position(None, {"bat": BAT}, 0.3) is None
+        full = {"real": {}, "uncontrolled": {}, "real_value": {}, "uncontrolled_value": {}}
+        assert stored_position(full, {"bat": BAT}, None) is None
+
+    def test_reference_price_is_the_trailing_time_weighted_mean(self) -> None:
+        slots = [(T0 + timedelta(hours=h), 1.0, p) for h, p in enumerate((0.2, 0.4, None, 0.6))]
+        assert reference_prices(slots, hours=2) == pytest.approx([0.2, 0.3, 0.4, 0.6])
 
 
 def test_kpi_sensor_is_a_monetary_total() -> None:

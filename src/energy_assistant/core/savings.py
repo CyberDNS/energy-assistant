@@ -46,8 +46,16 @@ battery or PV might have covered part of that energy.
 Device behaviour both houses share
 ----------------------------------
 * Battery power within ``StorageConstraints.standby_w`` is household load.
+* A battery with ``own_meter: grid_connection`` (an SMA whose Energy Meter
+  sits at the grid connection) charges in the uncontrolled house only from
+  surplus left at that point: PV a separately billed load such as the heat
+  pump uses is not available to it.
 * A real battery recharging itself below its minimum SoC (inverter
   protection) is mirrored onto the uncontrolled battery.
+* Both houses run on the same battery efficiency: the learned one once it is
+  in use (``efficiency: learned`` and a confident estimate), else the
+  configured one.  The real house's losses are what the SoC readings show,
+  so the uncontrolled house must not run on a better battery than it.
 * Real self-discharge and SoC jumps change the real ledger's kWh but not its
   value, so later uses of that battery's energy cost more — no correction
   needed.
@@ -67,6 +75,17 @@ neutral.
 
 Every slot also records the saving per component — ``batteries``, each car
 and each device — so the dashboard can explain the total.
+
+Stored energy
+-------------
+Because stored energy only counts when it is used, a house holding more of
+it looks worse until it uses it.  Each slot therefore also records both
+houses' ledgers at its end, and ``stored_position`` values the energy above
+the minimum SoC as the saving it would make if used now: discharged energy
+at the reference price (the mean import price of the last
+``REFERENCE_PRICE_HOURS``) minus its ledger cost.  The real minus the
+uncontrolled value is the saving still in the batteries; its change over a
+window can be added to the booked saving (the API's ``real_with_stored``).
 
 Housekeeping
 ------------
@@ -104,6 +123,9 @@ at least this often; unmatched device energy is neutral at that point."""
 
 BATTERIES = "batteries"
 """Component key of the battery part of the saving."""
+
+REFERENCE_PRICE_HOURS = 24.0
+"""Stored energy is valued at the mean import price of this many hours."""
 
 LIMIT_BAND_PCT = 2.0
 """Two batteries within this many % of capacity of the same SoC limit count
@@ -359,6 +381,9 @@ class SavingsSlot:
     real_stored: dict[str, float] = field(default_factory=dict)
     """Stored energy per battery at the end of the slot (kWh)."""
     uncontrolled_stored: dict[str, float] = field(default_factory=dict)
+    real_stored_value: dict[str, float] = field(default_factory=dict)
+    """Ledger value per battery at the end of the slot (€)."""
+    uncontrolled_stored_value: dict[str, float] = field(default_factory=dict)
     price_hours: float = 0.0
     """Σ import price × hours; see ``import_price``."""
     components: dict[str, float] = field(default_factory=dict)
@@ -503,6 +528,16 @@ class SavingsTracker:
         # and corrections to closed slots waiting to be persisted.
         self._prices: dict[datetime, float] = {}
         self._corrections: list[SlotCorrection] = []
+
+    @property
+    def batteries(self) -> list[StorageConstraints]:
+        """The battery constraints both houses run on."""
+        return list(self._batteries.values())
+
+    def set_batteries(self, batteries: Sequence[StorageConstraints]) -> None:
+        """Run both houses on new battery constraints — the learned
+        efficiency once it is in use.  The ledgers are kept."""
+        self._batteries = {sc.device_id: sc for sc in batteries}
 
     def pop_corrections(self) -> list[SlotCorrection]:
         """Corrections to already closed slots since the last call."""
@@ -694,6 +729,8 @@ class SavingsTracker:
         self._resync_devices(sample)
         slot.real_stored = {d: led.stored_kwh for d, led in self.state.real.items()}
         slot.uncontrolled_stored = {d: led.stored_kwh for d, led in self.state.unc.items()}
+        slot.real_stored_value = {d: led.value_eur for d, led in self.state.real.items()}
+        slot.uncontrolled_stored_value = {d: led.value_eur for d, led in self.state.unc.items()}
         return self._roll(sample.timestamp)
 
     # -- helpers ------------------------------------------------------------
@@ -834,13 +871,19 @@ class SavingsTracker:
         surplus = max(0.0, -(household + extra_load))
         if sample.pv_kw is not None:
             surplus = min(surplus, max(0.0, sample.pv_kw) * hours)
-        for device_id in self._batteries:
+        # A battery regulating on the grid connection point on its own: the
+        # surplus a separately billed load (heat pump) takes is gone for it.
+        secondary_kwh = sum(max(0.0, kw) * hours for kw, _ in sample.secondary)
+        site_surplus = max(0.0, surplus - secondary_kwh)
+        for device_id, sc in self._batteries.items():
             if device_id not in led or surplus <= 1e-12:
                 continue
-            take = min(surplus, charge_headroom(device_id), room(device_id))
+            avail = min(surplus, site_surplus) if sc.own_meter == "grid_connection" else surplus
+            take = min(avail, charge_headroom(device_id), room(device_id))
             if take > 0:
                 charge[device_id] = charge.get(device_id, 0.0) + take
                 surplus -= take
+                site_surplus = max(0.0, site_surplus - take)
 
         # … then the cars.
         end = sample.timestamp
@@ -993,6 +1036,65 @@ class SavingsTracker:
             cutoff = now - timedelta(days=3)
             self._prices = {k: v for k, v in self._prices.items() if k >= cutoff}
         return [slot] if slot.hours > 0 else []
+
+
+def reference_prices(
+    slots: Sequence[tuple[datetime, float, float | None]],
+    hours: float = REFERENCE_PRICE_HOURS,
+) -> list[float | None]:
+    """Time-weighted mean import price of the *hours* up to the end of each
+    slot.  *slots*: ``(slot_start, hours, import_price)``, oldest first."""
+    out: list[float | None] = []
+    lo = 0
+    sum_ph = sum_h = 0.0
+    for start, h, price in slots:
+        if price is not None and h > 0:
+            sum_ph += price * h
+            sum_h += h
+        while slots[lo][0] <= start - timedelta(hours=hours):
+            _, h0, p0 = slots[lo]
+            if p0 is not None and h0 > 0:
+                sum_ph -= p0 * h0
+                sum_h -= h0
+            lo += 1
+        out.append(sum_ph / sum_h if sum_h > 1e-9 else None)
+    return out
+
+
+def stored_position(
+    stored_detail: Mapping[str, Mapping[str, float]] | None,
+    batteries: Mapping[str, StorageConstraints],
+    price: float | None,
+) -> dict[str, float] | None:
+    """Saving still in each house's batteries, valued at *price*.
+
+    *stored_detail*: a slot's ``{"real": {id: kWh}, "uncontrolled": …,
+    "real_value": {id: €}, "uncontrolled_value": …}``.  Energy above the
+    minimum SoC is what can still be used; used now, it would replace
+    ``kWh × discharge efficiency`` of grid energy at *price* and cost its
+    ledger share.  Returns ``real`` / ``uncontrolled`` (€) and their
+    ``difference`` (real − uncontrolled: saving the real house has still to
+    book), or None for slots recorded without ledger values.
+    """
+    if not stored_detail or price is None:
+        return None
+    result: dict[str, float] = {}
+    for house in ("real", "uncontrolled"):
+        kwh_by = stored_detail.get(house)
+        value_by = stored_detail.get(f"{house}_value")
+        if kwh_by is None or value_by is None:
+            return None
+        total = 0.0
+        for device_id, kwh in kwh_by.items():
+            sc = batteries.get(device_id)
+            if sc is None or device_id not in value_by or kwh <= 1e-9:
+                continue
+            usable = max(0.0, kwh - sc.capacity_kwh * sc.min_soc_pct / 100.0)
+            avg_cost = value_by[device_id] / kwh
+            total += usable * (sc.discharge_efficiency * price - avg_cost)
+        result[house] = total
+    result["difference"] = result["real"] - result["uncontrolled"]
+    return result
 
 
 def day_ahead_window_end(now: datetime, lead: timedelta) -> datetime:
