@@ -21,9 +21,12 @@ Vendor control logic differs too much to be a register mapping, so the
 profile selects a named strategy (see ``control.py``).  The strategy turns a
 ``DeviceCommand`` into register values; this class encodes and writes them.
 
-Every command is written, even when the value is unchanged — the control loop
-re-sends its setpoint each tick, which also serves as a refresh for inverters
-that fall back to a default when commands stop.
+By default every command is written, even when the value is unchanged — the
+control loop re-sends its setpoint each tick, which also serves as a refresh
+for inverters that fall back to a default when commands stop.  A strategy
+with ``refresh_s`` is written only when its register values change, and
+unchanged values again after ``refresh_s``.  A strategy with ``release()``
+is handed back to the device's own operation by ``release``.
 
 Without a strategy the device is read-only and ignores commands (the
 ``Device`` protocol allows that).
@@ -32,6 +35,7 @@ Without a strategy the device is read-only and ignores commands (the
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timezone
 
 from ...core.change_gate import ChangeGate
@@ -83,6 +87,8 @@ class ModbusDevice:
         self._polled = profile.polled_registers()
         self._blocks = codec.plan_reads((r.table, r.address, r.count) for r in self._polled)
         self._log_gate = ChangeGate()
+        self._last_writes: tuple[tuple[str, float], ...] | None = None
+        self._last_write_at = 0.0
 
     @property
     def device_id(self) -> str:
@@ -174,6 +180,34 @@ class ModbusDevice:
             extra={key: pick(source) for key, source in self._profile.extra.items()},
         )
 
+    async def _write(self, writes: list[tuple[str, float]]) -> None:
+        self._last_writes = None  # a failed write must be retried
+        for name, value in writes:
+            reg = self._profile.registers[name]
+            raw = value / reg.scale
+            if not reg.type.startswith("f"):
+                raw = int(round(raw))
+            words = codec.encode(raw, reg.type, self._profile.word_order)
+            await self._client.write(reg.address, words, self._unit_id)
+        self._last_writes = tuple(writes)
+        self._last_write_at = time.monotonic()
+
+    async def release(self) -> None:
+        """Hand the device back to its own operation, if the strategy can
+        (see ``control.py``).  Raises ``ModbusError`` when a write fails."""
+        release = getattr(self._strategy, "release", None)
+        if release is None:
+            return
+        writes = release()
+        await self._write(writes)
+        self._last_writes = None  # the next command is always written
+        self._log_gate.changed("writes", ())
+        self._log_gate.changed("mode", None)
+        _log.info(
+            "ModbusDevice %r: released to its own operation (%s)", self._device_id,
+            ", ".join(f"{name} = {value:g}" for name, value in writes),
+        )
+
     async def send_command(self, command: DeviceCommand) -> None:
         """Translate *command* via the profile's strategy and write the result.
 
@@ -190,19 +224,26 @@ class ModbusDevice:
             return
 
         writes = self._strategy.plan(command)
-        for name, value in writes:
-            reg = self._profile.registers[name]
-            raw = value / reg.scale
-            if not reg.type.startswith("f"):
-                raw = int(round(raw))
-            words = codec.encode(raw, reg.type, self._profile.word_order)
-            await self._client.write(reg.address, words, self._unit_id)
-
         summary = tuple(writes)
+        refresh_s = getattr(self._strategy, "refresh_s", None)
+        if (
+            refresh_s is not None
+            and summary == self._last_writes
+            and time.monotonic() - self._last_write_at < refresh_s
+        ):
+            return
+        await self._write(writes)
+
         if self._log_gate.changed("writes", summary):
             # A non-zero write is a genuine setpoint; all-zero covers both
-            # "idle" and requests the hardware cannot act on.
-            level = logging.INFO if any(value for _, value in writes) else logging.DEBUG
+            # "idle" and requests the hardware cannot act on.  A strategy
+            # that tracks a setpoint (``refresh_s``) logs at INFO only when
+            # its first register (the mode) changes.
+            if refresh_s is not None:
+                first = writes[0] if writes else None
+                level = logging.INFO if self._log_gate.changed("mode", first) else logging.DEBUG
+            else:
+                level = logging.INFO if any(value for _, value in writes) else logging.DEBUG
             _log.log(
                 level,
                 "ModbusDevice %r: %s (requested %s = %s)",
