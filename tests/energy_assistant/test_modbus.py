@@ -6,6 +6,7 @@ import asyncio
 import logging
 import socket
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from helpers.fake_modbus_client import FakeModbusClient
@@ -303,12 +304,37 @@ async def test_device_without_strategy_is_read_only() -> None:
 # ── control ──────────────────────────────────────────────────────────────────
 
 
-def _controlled_sma(client: FakeModbusClient, **cfg) -> ModbusDevice:
+def _limit_sma(client: FakeModbusClient, **cfg) -> ModbusDevice:
+    """The SMA with the former discharge-limit strategy (still available)."""
     profile = load_profile(SMA)
     strategy = build_strategy(
-        profile.control.strategy, profile.control.registers, {"max_discharge_kw": 2.5, **cfg}
+        "discharge_limit_pct", {"register": "active_power_limit"},
+        {"max_discharge_kw": 2.5, **cfg},
     )
     return ModbusDevice("sma_battery", client, profile, strategy=strategy)
+
+
+def _controlled_sma(client: FakeModbusClient, **cfg) -> ModbusDevice:
+    """The SMA with its profile's strategy (battery management)."""
+    profile = load_profile(SMA)
+    strategy = build_strategy(
+        profile.control.strategy, profile.control.registers,
+        {"max_charge_kw": 3.0, "max_discharge_kw": 2.5, **cfg},
+    )
+    return ModbusDevice("sma_battery", client, profile, strategy=strategy)
+
+
+# Battery management registers of the SBS: mode, charge min/max, discharge
+# min/max, grid setpoint, active power limit.
+_BMS = (40236, 40793, 40795, 40797, 40799, 40801, 40016)
+
+
+def _bms_values(client: FakeModbusClient) -> dict[int, int]:
+    """Last value written per register (decoded)."""
+    out: dict[int, int] = {}
+    for address, words, _unit in client.written:
+        out[address] = codec.decode(words, "s16" if len(words) == 1 else "s32")
+    return out
 
 
 def _set_power(value: float) -> DeviceCommand:
@@ -328,7 +354,7 @@ def _set_power(value: float) -> DeviceCommand:
 )
 async def test_sma_discharge_limit_written_as_s16_percent(power_w: float, pct: int) -> None:
     client = _sma_client()
-    device = _controlled_sma(client)
+    device = _limit_sma(client)
 
     await device.send_command(_set_power(power_w))
 
@@ -340,7 +366,7 @@ async def test_sma_discharge_limit_written_as_s16_percent(power_w: float, pct: i
 async def test_sma_control_percentages() -> None:
     """Setpoint → active power limit (%), as the former sma_modbus_iobroker plugin wrote it."""
     client = _sma_client()
-    device = _controlled_sma(client, max_discharge_kw=3.9, voltage_max_v=250.0)
+    device = _limit_sma(client, max_discharge_kw=3.9, voltage_max_v=250.0)
     for power_w in (-4500, -3900, -2000, -777, -1, 0, 500):
         await device.send_command(_set_power(power_w))
     assert [words[0] for _, words, _ in client.written] == [100, 92, 47, 18, 0, 0, 0]
@@ -348,7 +374,7 @@ async def test_sma_control_percentages() -> None:
 
 async def test_control_writes_every_command_and_logs_only_changes(caplog) -> None:
     client = _sma_client()
-    device = _controlled_sma(client)
+    device = _limit_sma(client)
     with caplog.at_level(logging.INFO):
         for _ in range(3):
             await device.send_command(_set_power(-1375))
@@ -377,6 +403,82 @@ def test_strategy_requires_max_discharge() -> None:
         build_strategy("discharge_limit_pct", {"register": "active_power_limit"}, {})
 
 
+@pytest.mark.parametrize(
+    ("power_w", "expected"),
+    [
+        # charge: charge mode, exactly P (rounded to 50 W, capped at 3 kW)
+        (1234.0, (2289, 1250, 1250, 0, 0, 0, 100)),
+        (5000.0, (2289, 3000, 3000, 0, 0, 0, 100)),
+        # discharge: default mode, no charging, discharge up to |P|
+        (-1000.0, (2424, 0, 0, 0, 1000, 0, 100)),
+        (-9000.0, (2424, 0, 0, 0, 2500, 0, 100)),
+        # idle, and setpoints that round to nothing: hold
+        (0.0, (2424, 0, 0, 0, 0, 0, 100)),
+        (20.0, (2424, 0, 0, 0, 0, 0, 100)),
+    ],
+)
+async def test_sma_battery_management_writes(power_w: float, expected: tuple) -> None:
+    client = _sma_client()
+    device = _controlled_sma(client)
+    await device.send_command(_set_power(power_w))
+    assert [a for a, _, _ in client.written] == list(_BMS)
+    assert tuple(_bms_values(client)[a] for a in _BMS) == expected
+    assert device.controls_charge is True
+
+
+async def test_sma_battery_management_writes_only_changes_and_refreshes(monkeypatch) -> None:
+    import energy_assistant.plugins.modbus.device as device_mod
+
+    now = [1000.0]
+    monkeypatch.setattr(device_mod.time, "monotonic", lambda: now[0])
+    client = _sma_client()
+    device = _controlled_sma(client)
+    for value in (1000.0, 1010.0, 990.0):   # all round to 1000 W
+        await device.send_command(_set_power(value))
+    assert len(client.written) == len(_BMS)
+    await device.send_command(_set_power(1100.0))
+    assert len(client.written) == 2 * len(_BMS)
+    now[0] += 301.0   # unchanged, but due for a refresh
+    await device.send_command(_set_power(1100.0))
+    assert len(client.written) == 3 * len(_BMS)
+
+
+async def test_sma_release_hands_back_self_consumption_and_rewrites_next_command() -> None:
+    client = _sma_client()
+    device = _controlled_sma(client)
+    await device.send_command(_set_power(500.0))
+    client.written.clear()
+    await device.release()
+    assert tuple(_bms_values(client)[a] for a in _BMS) == (2424, 0, 3000, 0, 2500, 0, 100)
+    client.written.clear()
+    await device.send_command(_set_power(500.0))   # same as before the release
+    assert _bms_values(client)[40236] == 2289
+
+
+async def test_failed_write_is_retried_next_tick() -> None:
+    client = _sma_client()
+    device = _controlled_sma(client)
+    client.offline = True
+    with pytest.raises(ModbusError):
+        await device.send_command(_set_power(500.0))
+    client.offline = False
+    await device.send_command(_set_power(500.0))
+    assert _bms_values(client)[40236] == 2289
+
+
+async def test_release_without_release_support_does_nothing() -> None:
+    client = _sma_client()
+    await _limit_sma(client).release()
+    await _sma_device(client).release()
+    assert client.written == []
+
+
+def test_battery_management_requires_both_power_limits() -> None:
+    profile = load_profile(SMA)
+    with pytest.raises(ControlConfigError, match="max_charge_kw"):
+        build_strategy(profile.control.strategy, profile.control.registers, {"max_discharge_kw": 3})
+
+
 # ── plugin factory ───────────────────────────────────────────────────────────
 
 
@@ -400,8 +502,9 @@ def test_factory_builds_device_and_shares_connection() -> None:
 
 def test_factory_enables_control_only_when_configured() -> None:
     base = {"category": "battery", "profile": SMA, "host": "192.0.2.10"}
-    assert _build({**base, "max_discharge_kw": 3.9})[0].read_only is False
-    assert _build({**base, "max_discharge_kw": 3.9, "read_only": True})[0].read_only is True
+    limits = {"max_charge_kw": 3.0, "max_discharge_kw": 3.9}
+    assert _build({**base, **limits})[0].read_only is False
+    assert _build({**base, **limits, "read_only": True})[0].read_only is True
     # Strategy cannot be configured -> device still built, but read-only.
     assert _build(base)[0].read_only is True
 
@@ -500,3 +603,39 @@ async def test_tcp_client_unreachable_host() -> None:
         await client.read("input", 30775, 2, 3)
     device = ModbusDevice("sma_battery", client, load_profile(SMA))
     assert (await device.get_state()).available is False
+
+
+# ── Application: release at start, reload and stop ───────────────────────────
+
+
+class _ReleasingDevice:
+    device_id = "sma_battery"
+
+    def __init__(self, fail: bool = False) -> None:
+        self.released = 0
+        self.fail = fail
+
+    async def release(self) -> None:
+        self.released += 1
+        if self.fail:
+            raise ModbusError("offline")
+
+
+def _app_with(devices: list, dry_run: bool):
+    from energy_assistant.server import Application
+
+    app = Application.__new__(Application)
+    app._dry_run = dry_run
+    app._registry = SimpleNamespace(all=lambda: devices)
+    return app
+
+
+async def test_application_releases_devices_but_not_in_dry_run(caplog) -> None:
+    ok, failing = _ReleasingDevice(), _ReleasingDevice(fail=True)
+    await _app_with([failing, ok, SimpleNamespace(device_id="meter")], dry_run=False)._release_devices()
+    assert (failing.released, ok.released) == (1, 1)
+    assert "Could not release device" in caplog.text
+
+    dry = _ReleasingDevice()
+    await _app_with([dry], dry_run=True)._release_devices()
+    assert dry.released == 0

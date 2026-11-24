@@ -36,6 +36,16 @@ class ControlStrategy(Protocol):
         ...
 
 
+# Optional strategy attributes (read with getattr by ``ModbusDevice``):
+#
+# * ``refresh_s: float`` — write a command only when its register values
+#   change, and repeat unchanged values at most this often.  Without it every
+#   command is written.
+# * ``release() -> list[tuple[str, float]]`` — writes that hand the device
+#   back to its own operation; sent when Energy Assistant starts, reloads and
+#   stops.
+
+
 class DischargeLimitPct:
     """Cap discharge power through one "percent of rated power" register.
 
@@ -82,9 +92,106 @@ class DischargeLimitPct:
         return [(self._register, pct)]
 
 
+class BmsOperatingMode:
+    """Command charge and discharge power through the battery management
+    (``CmpBMS``) registers of the SMA Sunny Boy Storage.
+
+    The registers (all U32 holding, write-only) and their use follow the
+    evcc template for the SBS 3.7/5.0/6.0 and were verified on an SBS 3.7
+    (2026-11-24: a 500 W charge command was followed within 2 s, from the
+    grid as well):
+
+    ========== =================================== ==========================
+    role       register                            values
+    ========== =================================== ==========================
+    mode       40236 CmpBMS.OpMod                  2424 default, 2289 charge
+    charge_min 40793 CmpBMS.BatChaMinW             W
+    charge_max 40795 CmpBMS.BatChaMaxW             W
+    dsch_min   40797 CmpBMS.BatDschMinW            W
+    dsch_max   40799 CmpBMS.BatDschMaxW            W
+    grid       40801 CmpBMS.GridWSpt               W (target at its meter)
+    power_limit 40016 active power limit           % (kept at 100)
+    ========== =================================== ==========================
+
+    ``set_power_w`` (platform sign: positive = charge), rounded to
+    ``bms_step_w`` (default 50 W) so small changes of a tracking setpoint do
+    not cause writes:
+
+    * ``> 0`` — charge mode with charge min = max = P: exactly P, from PV or
+      the grid.
+    * ``< 0`` — default mode, no charging, discharge up to |P|: the inverter
+      covers the load at its own meter up to that cap.
+    * ``0`` — default mode with charge and discharge max 0: hold.
+
+    ``release()`` — default mode with the full limits: the inverter's own
+    self-consumption, as without Energy Assistant.  The inverter does **not**
+    fall back to it on its own when commands stop (verified: a charge command
+    held for minutes), so it is sent at every start, reload and stop.
+
+    Unchanged commands are repeated every ``refresh_s`` only — the values
+    are parameters, not a cyclic setpoint.
+
+    Device config keys: ``max_charge_kw`` and ``max_discharge_kw`` (required),
+    ``bms_step_w``.
+    """
+
+    controls_charge = True
+    refresh_s = 300.0
+
+    MODE_DEFAULT = 2424
+    MODE_CHARGE = 2289
+
+    def __init__(self, registers: dict[str, str], device_cfg: dict[str, Any]) -> None:
+        self._r = registers
+        self._max_charge_w = float(device_cfg.get("max_charge_kw") or 0.0) * 1000.0
+        self._max_discharge_w = float(device_cfg.get("max_discharge_kw") or 0.0) * 1000.0
+        if self._max_charge_w <= 0 or self._max_discharge_w <= 0:
+            raise ControlConfigError("'max_charge_kw' and 'max_discharge_kw' must be set and positive")
+        self._step_w = float(device_cfg.get("bms_step_w", 50.0))
+        if self._step_w <= 0:
+            raise ControlConfigError("'bms_step_w' must be positive")
+
+    def _writes(
+        self, mode: int, cha_min: float, cha_max: float, dsch_min: float, dsch_max: float
+    ) -> list[tuple[str, float]]:
+        r = self._r
+        return [
+            (r["mode"], mode),
+            (r["charge_min"], cha_min),
+            (r["charge_max"], cha_max),
+            (r["discharge_min"], dsch_min),
+            (r["discharge_max"], dsch_max),
+            (r["grid_setpoint"], 0),
+            (r["power_limit"], 100),
+        ]
+
+    def plan(self, command: DeviceCommand) -> list[tuple[str, float]]:
+        if command.command != "set_power_w":
+            raise NotImplementedError(
+                f"bms_operating_mode does not support command {command.command!r}"
+            )
+        power_w = round(float(command.value) / self._step_w) * self._step_w
+        if power_w > 0:
+            p = min(power_w, self._max_charge_w)
+            return self._writes(self.MODE_CHARGE, p, p, 0, 0)
+        if power_w < 0:
+            return self._writes(self.MODE_DEFAULT, 0, 0, 0, min(-power_w, self._max_discharge_w))
+        return self._writes(self.MODE_DEFAULT, 0, 0, 0, 0)
+
+    def release(self) -> list[tuple[str, float]]:
+        return self._writes(
+            self.MODE_DEFAULT, 0, self._max_charge_w, 0, self._max_discharge_w
+        )
+
+
 # strategy name -> (class, register roles the profile must supply)
 STRATEGIES: dict[str, tuple[type, tuple[str, ...]]] = {
     "discharge_limit_pct": (DischargeLimitPct, ("register",)),
+    "bms_operating_mode": (
+        BmsOperatingMode,
+        ("mode", "charge_min", "charge_max", "discharge_min", "discharge_max",
+         "grid_setpoint", "power_limit"),
+    ),
 }
 
 
