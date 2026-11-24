@@ -86,6 +86,12 @@ class OptimizationContext:
     constraints: list[Constraint] = field(default_factory=list)
     horizon: timedelta = field(default_factory=lambda: timedelta(hours=24))
     battery_cost_basis: dict[str, float] = field(default_factory=dict)
+    battery_refill_kwh: dict[str, float] = field(default_factory=dict)
+    """Energy (kWh stored) each battery can expect to take in from PV surplus
+    in the 24 h after the horizon.  Energy left at the end above
+    ``max − refill`` would only push that PV out to the grid, so it is worth
+    the feed-in price, not the usual terminal value.  Missing = unknown (the
+    whole end energy keeps the terminal value)."""
     ev_charging_goals: list[EvChargingGoal] = field(default_factory=list)
     secondary_loads: list[SecondaryTariffLoad] = field(default_factory=list)
     """Separately billed inflexible loads — see ``SecondaryTariffLoad``.

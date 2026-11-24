@@ -339,6 +339,54 @@ def _infer_effective_horizon(
     return step_td * n_steps
 
 
+#: Window after the planning horizon whose PV surplus counts as refill.
+_REFILL_WINDOW = timedelta(hours=24)
+
+
+def _step_value(points: list[ForecastPoint], ts: datetime) -> float | None:
+    """Value of a step series (each point holds until the next) at *ts*."""
+    value = None
+    for p in points:
+        if p.timestamp > ts:
+            break
+        value = p.value
+    return value
+
+
+def _battery_refill_kwh(
+    pv: list[ForecastPoint],
+    consumption: list[ForecastPoint],
+    start: datetime,
+    batteries: list[StorageConstraints],
+    window: timedelta = _REFILL_WINDOW,
+    step: timedelta = timedelta(minutes=15),
+) -> dict[str, float]:
+    """Energy (kWh stored) each battery can take in from PV surplus in
+    ``[start, start + window)``: per step the surplus (PV − consumption)
+    is shared by charge power, capped at each battery's charge power and
+    stored with its charge efficiency.  Empty when the PV forecast does not
+    reach the end of the window (unknown, not zero)."""
+    pv = sorted(pv, key=lambda p: p.timestamp)
+    consumption = sorted(consumption, key=lambda p: p.timestamp)
+    end = start + window
+    if not pv or not batteries or pv[-1].timestamp < end - timedelta(hours=1):
+        return {}
+    total_charge = sum(sc.max_charge_kw for sc in batteries)
+    if total_charge <= 0:
+        return {}
+    h = step.total_seconds() / 3600.0
+    refill = {sc.device_id: 0.0 for sc in batteries}
+    t = start
+    while t < end:
+        surplus = (_step_value(pv, t) or 0.0) - (_step_value(consumption, t) or 0.0)
+        if surplus > 0:
+            for sc in batteries:
+                share = surplus * sc.max_charge_kw / total_charge
+                refill[sc.device_id] += min(share, sc.max_charge_kw) * h * sc.charge_efficiency
+        t += step
+    return {b: round(v, 3) for b, v in refill.items()}
+
+
 def _extend_forecast_points_with_daily_repeat(
     points: list[ForecastPoint],
     horizon: timedelta,
@@ -1643,6 +1691,32 @@ class Application:
             _log.debug("Next planning run at %s", scheduled.isoformat())
             await asyncio.sleep((scheduled - now).total_seconds())
 
+    async def _battery_refill(
+        self, effective_horizon: timedelta, batteries: list[StorageConstraints]
+    ) -> dict[str, float]:
+        """PV surplus each battery can take in during the 24 h after the
+        plan (see ``_battery_refill_kwh``); empty when unknown."""
+        start = datetime.now(UTC) + effective_horizon
+        span = effective_horizon + _REFILL_WINDOW + timedelta(hours=1)
+        providers = [
+            p for p in self._forecast_providers
+            if getattr(p, "quantity", None) in (ForecastQuantity.PV_GENERATION, ForecastQuantity.CONSUMPTION)
+        ]
+        try:
+            ahead = await _collect_forecasts(providers, span)
+            refill = _battery_refill_kwh(
+                ahead.get(ForecastQuantity.PV_GENERATION, []),
+                ahead.get(ForecastQuantity.CONSUMPTION, []),
+                start, batteries,
+            )
+        except Exception as exc:  # noqa: BLE001 — never break planning
+            _log.warning("PV refill after the horizon unavailable: %s", exc)
+            return {}
+        self._last_battery_refill = refill
+        if refill:
+            _log.debug("PV refill in the 24 h after the plan: %s kWh", refill)
+        return refill
+
     async def _run_plan(self) -> None:
         """Assemble context, optimize, publish plan, refresh price cache."""
         if self._reloading:
@@ -1839,6 +1913,7 @@ class Application:
         thermal_models, ambient_forecasts = await self._thermal_inputs(effective_horizon)
         storage_constraints = self._planning_storage_constraints(refit=True)
         self._savings.set_batteries(storage_constraints)
+        battery_refill = await self._battery_refill(effective_horizon, storage_constraints)
         context = OptimizationContext(
             device_states=device_states,
             storage_constraints=storage_constraints,
@@ -1849,6 +1924,7 @@ class Application:
             forecasts=forecasts,
             horizon=effective_horizon,
             battery_cost_basis=self._ledger.all_cost_bases(),
+            battery_refill_kwh=battery_refill,
             ev_charging_goals=ev_goals,
             secondary_loads=secondary_loads,
             max_import_kw=self._topology.max_import_kw if self._topology else None,
