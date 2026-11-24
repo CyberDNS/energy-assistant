@@ -124,6 +124,19 @@ SECTION_SCHEMAS: dict[str, SectionSchema] = {
                                                      "begins (s)"),
                 "dry_run": ParamSpec(bool, default=False,
                                      description="Log control commands instead of sending them"),
+                "plan_stale_after_min": ParamSpec(float, advanced=True, **_POSITIVE,
+                                                  label="Release after no plan for (min)",
+                                                  description="Without a current plan for this "
+                                                              "long every device goes back to its "
+                                                              "own operation (default: 45 min, at "
+                                                              "least 3 planning intervals)"),
+                "control_stuck_after_min": ParamSpec(float, advanced=True, **_POSITIVE,
+                                                     label="Release after no control for (min)",
+                                                     description="Without a control tick for this "
+                                                                 "long every device goes back to "
+                                                                 "its own operation (default: 10 "
+                                                                 "min, at least 10 control "
+                                                                 "intervals)"),
                 "ev_feasibility_margin": ParamSpec(float, minimum=1, default=1.2, advanced=True,
                                                    label="EV deadline reserve factor",
                                                    description="Time reserve factor before an EV "

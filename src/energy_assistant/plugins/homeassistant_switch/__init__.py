@@ -13,6 +13,11 @@ Configuration
                                    as the power reading when no power sensor
                                    is bound, and by the planner for the device
                                    this switch controls.
+``release_state``                — what the switch does when Energy Assistant
+                                   lets go of it (stop, reload, stale plan,
+                                   stuck control loop): ``on`` (default, the
+                                   load's own thermostat takes over), ``off``
+                                   or ``leave`` (unchanged).
 
 Example::
 
@@ -34,7 +39,7 @@ from typing import Any
 
 from ...core.device_model import Capability as Cap
 from ...core.device_model import DeviceCategory as C
-from ...core.device_model import DeviceConfigError
+from ...core.device_model import DeviceConfigError, ParamSpec
 from ...core.plugin_registry import BuildContext, PluginRegistry
 from .._homeassistant.actuators import SWITCH_BINDING, parse_switch
 from .._homeassistant.bindings import binding_specs, parse_bindings
@@ -42,6 +47,7 @@ from .._homeassistant.bindings import binding_specs, parse_bindings
 _log = logging.getLogger(__name__)
 
 _READINGS = frozenset({Cap.POWER_W, Cap.ENERGY_IN_KWH})
+RELEASE_STATES = ("on", "off", "leave")
 
 
 def register(registry: PluginRegistry) -> None:
@@ -54,7 +60,13 @@ def register(registry: PluginRegistry) -> None:
             Cap.SWITCH: SWITCH_BINDING,
             **{cap: binding_specs(cap) for cap in _READINGS},
         },
-        settings={},
+        settings={
+            "release_state": ParamSpec(
+                str, choices=RELEASE_STATES, default="on", label="When released",
+                choice_labels={"on": "Switch on", "off": "Switch off", "leave": "Leave as is"},
+                description="State when Energy Assistant stops or lets go of the switch "
+                            "(on: the load's own thermostat or timer takes over)"),
+        },
     )
 
 
@@ -83,4 +95,5 @@ def _build(device_id: str, cfg: dict[str, Any], ctx: BuildContext) -> object | N
         power=readings.get(Cap.POWER_W),
         energy=readings.get(Cap.ENERGY_IN_KWH),
         rated_power_w=float(rated) if rated is not None else None,
+        release_state=str(cfg.get("release_state") or "on"),
     )

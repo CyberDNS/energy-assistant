@@ -109,9 +109,10 @@ POWER_SETPOINT_BINDING: dict[str, ParamSpec] = {
                        keys=ParamSpec(str, choices=_BEHAVIOURS, choice_labels=_MODE_LABELS),
                        description="Per behaviour (charge, absorb_surplus, stop): option, "
                                    "current or power, set"),
-    "release": ParamSpec(str, label="On stop", choices=_BEHAVIOURS, choice_labels=_MODE_LABELS,
-                         when=_when("modes"),
-                         description="Mode set when Energy Assistant stops (default: none)"),
+    "release": ParamSpec(str, label="When released", choices=_BEHAVIOURS,
+                         choice_labels=_MODE_LABELS, when=_when("modes"),
+                         description="Mode set when Energy Assistant stops or lets go of the "
+                                     "charger (default: the PV surplus mode, if configured)"),
     "soc_limit": ParamSpec(str, entity=True, domains=NUMBER_DOMAINS, units=_PERCENT,
                            label="SoC limit number",
                            description="Gets the target SoC when charging is commanded"),
@@ -364,7 +365,8 @@ def parse_control(
                    if entry.get("power") else None),
             fixed=fixed,
         )
-    release = Behaviour(raw["release"]) if raw.get("release") else None
+    release = Behaviour(raw["release"]) if raw.get("release") else (
+        Behaviour.ABSORB_SURPLUS if Behaviour.ABSORB_SURPLUS in modes else None)
     if release is not None and release not in modes:
         errors.append(f"{where}: release {release.value!r} has no mode in 'modes'")
     if errors:

@@ -63,6 +63,8 @@ class DischargeLimitPct:
     The voltage factor (default 253 V / 230 V) accounts for the inverter's
     rated power being specified at the upper grid-voltage limit.
 
+    ``release()`` writes 100 %: no limit, the inverter's own operation.
+
     Device config keys: ``max_discharge_kw`` (required), ``voltage_max_v``,
     ``voltage_nominal_v``.
     """
@@ -90,6 +92,10 @@ class DischargeLimitPct:
         else:
             pct = int(round(min(100.0, max(0.0, -power_w / self._full_scale_w * 100.0))))
         return [(self._register, pct)]
+
+    def release(self) -> list[tuple[str, float]]:
+        """100 %: the inverter discharges as it would without a limit."""
+        return [(self._register, 100)]
 
 
 class BmsOperatingMode:

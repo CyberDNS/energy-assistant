@@ -85,6 +85,19 @@ const notices = computed<Notice[]>(() => {
       action: { label: 'Open settings', to: '/settings/system' }, dismissible: true,
     })
   }
+  // Devices handed back to their own operation by the fail-safe (not at
+  // start-up, which only waits for the first plan).
+  const safe = s?.failsafe
+  if (safe?.released && safe.reason && safe.reason !== 'start' && !s?.dry_run) {
+    const since = safe.since ? new Date(safe.since).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : null
+    out.push({
+      id: 'failsafe:' + (safe.since ?? ''), tone: 'danger',
+      text: `Energy Assistant has released all devices to their own operation: ${safe.reason_text ?? safe.reason}.`,
+      detail: [since && `Since ${since}`, safe.detail, 'Control resumes by itself once this is resolved.']
+        .filter(Boolean).join(' · '),
+      action: { label: 'Open plan', to: '/plan' }, dismissible: true,
+    })
+  }
   // A charger without a car is unavailable by design.
   const down = (s?.devices ?? []).filter(d => d.available === false && d.category !== 'charger')
   if (down.length) {
