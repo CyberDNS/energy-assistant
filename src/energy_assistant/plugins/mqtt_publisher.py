@@ -99,7 +99,7 @@ from ..assets.ev import (
 )
 from ..core.config import MqttConfig
 from ..core.device_model import DeviceCategory, DeviceSpec
-from ..core.models import EV_DISPLAY_MODES, DeviceState
+from ..core.models import EV_DISPLAY_MODES, Behaviour, DeviceState
 from ..core.price_curve import PriceSlot, current_slot, price_curve_payload
 
 _log = logging.getLogger(__name__)
@@ -200,7 +200,6 @@ _CATEGORY_SKIP_FIELDS: dict[DeviceCategory, frozenset[str]] = {
 _RECONNECT_DELAY_S = 30
 CHARGING_MODES = ("instant_charging", "pv_charging", "stop", "disconnected", "disabled")
 # Sentinel boundary between PV and Instant mode — see assets/ev.py.
-_MODE_THRESHOLD_W = 500.0
 # ISO weekday (1=Mon … 7=Sun) → topic / unique_id key
 _WEEKDAY_KEYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 _WEEKDAY_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
@@ -1354,18 +1353,18 @@ def _device_reading_messages(
     return msgs
 
 
-def charging_mode_from_setpoint(setpoint_w: float | None, *, disabled: bool) -> str:
-    """Map the EV contributor's commanded sentinel to a ``CHARGING_MODES`` value.
+def charging_mode_from_behaviour(behaviour: Behaviour | None, *, disabled: bool) -> str:
+    """Map the EV contributor's commanded behaviour to a ``CHARGING_MODES`` value.
 
-    The contributor returns ``None`` only when the chargepoint is disabled or
-    the car is not connected (see ``EvChargerContributor.desired_setpoint_w``).
+    No behaviour means no command: the chargepoint is disabled or the car is
+    not connected (see ``EvChargerContributor.desired_setpoint_w``).
     """
     if disabled:
         return "disabled"
-    if setpoint_w is None:
+    if behaviour is None:
         return "disconnected"
-    if setpoint_w > _MODE_THRESHOLD_W:
+    if behaviour is Behaviour.CHARGE:
         return "instant_charging"
-    if setpoint_w > 0:
+    if behaviour is Behaviour.ABSORB_SURPLUS:
         return "pv_charging"
     return "stop"

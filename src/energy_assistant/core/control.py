@@ -84,6 +84,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from .grid_limit import GridLimit, GridLimitGuard
 from .ledger import BatteryCostLedger
 from .models import (
+    Behaviour,
     ControlIntent,
     DeviceCommand,
     DeviceState,
@@ -91,6 +92,7 @@ from .models import (
     StorageConstraints,
     ThresholdConstraints,
     intent_display_mode,
+    resolve_behaviour,
 )
 from .realtime_slice_optimizer import StorageSliceInput, optimize_storage_slice
 
@@ -362,7 +364,11 @@ class ControlContributor(Protocol):
        marginal cost of the energy you're commanding (default: use
        ``live.current_price_eur_per_kwh``).  This is important for EV
        chargers that may have a separate tariff.
-    3. ``register_contributor(contributor)`` on the ``ControlLoop`` instance.
+    3. Optionally implement ``behaviour_for(setpoint_w, intent, live, *,
+       curtailed)`` returning the ``Behaviour`` the setpoint is for (batteries
+       and chargers); it is sent with the command so a mode-controlled device
+       can pick the matching mode.  Without it commands carry no behaviour.
+    4. ``register_contributor(contributor)`` on the ``ControlLoop`` instance.
 
     No other changes are needed.
     """
@@ -472,6 +478,41 @@ class StorageControlContributor:
         surplus_w = max(0.0, -live.grid_power_w - live.ev_pv_reserved_w)
         return min(surplus_w, max_charge_w) if surplus_w > 1.0 else 0.0
 
+    def behaviour_for(
+        self,
+        setpoint_w: float | None,
+        intent: ControlIntent | None,
+        live: LiveSituation,
+        *,
+        curtailed: bool = False,
+    ) -> Behaviour | None:
+        """What *setpoint_w* is for (see ``Behaviour``).
+
+        * planned charge from the grid → ``CHARGE`` (``HOLD`` when nothing can
+          be charged, e.g. full); a PV-only planned charge → ``ABSORB_SURPLUS``
+        * planned discharge → ``DISCHARGE`` when it may export, else
+          ``SELF_CONSUMPTION`` (follow the load, absorb surplus)
+        * idle or no plan → ``ABSORB_SURPLUS`` (never discharge)
+        * curtailed by the grid limit → forced: ``CHARGE`` at the lower
+          power, or ``HOLD``
+        """
+        if setpoint_w is None:
+            return None
+        if curtailed:
+            if setpoint_w > 0.5:
+                return Behaviour.CHARGE
+            return Behaviour.DISCHARGE if setpoint_w < -0.5 else Behaviour.HOLD
+        planned_kw = intent.power_kw if intent is not None else 0.0
+        if planned_kw > 0.001:
+            pv_only = (intent is not None and not intent.grid_allowed) or self._constraints.no_grid_charge
+            if pv_only:
+                return Behaviour.ABSORB_SURPLUS
+            return Behaviour.CHARGE if setpoint_w > 0.5 else Behaviour.HOLD
+        if planned_kw < -0.001:
+            export = intent is not None and intent.export_allowed and setpoint_w < -0.5
+            return Behaviour.DISCHARGE if export else Behaviour.SELF_CONSUMPTION
+        return Behaviour.DISCHARGE if setpoint_w < -0.5 else Behaviour.ABSORB_SURPLUS
+
     # Grid limit participation (see core/grid_limit.py).
 
     def expected_draw_w(self, setpoint_w: float, live: LiveSituation) -> float | None:
@@ -563,6 +604,9 @@ class ControlLoop:
         # (used by the execution log, see core/execution_log.py).
         self.last_modes: dict[str, str] = {}
         self.last_intents: dict[str, ControlIntent | None] = {}
+        # Behaviour per device from the same tick (None = not a battery or
+        # charger, or no command).
+        self.last_behaviours: dict[str, Behaviour | None] = {}
         # Energy delivered per storage device in the current charge slot
         # (see _slot_energy_target_w).
         self._slot_energy: dict[str, _SlotEnergy] = {}
@@ -666,7 +710,7 @@ class ControlLoop:
             device_id: (setpoint_w, intent)
             for device_id, setpoint_w, _mode, intent in rows
         }
-        self._remember(rows)
+        self._remember(rows, live)
 
         for contributor in self._contributors:
             setpoint_w, intent = setpoints[contributor.device_id]
@@ -674,7 +718,8 @@ class ControlLoop:
             if setpoint_w is not None:
                 device = registry.get(contributor.device_id)
                 if device is not None:
-                    await self._send(device, contributor.device_id, setpoint_w)
+                    await self._send(device, contributor.device_id, setpoint_w,
+                                     self.last_behaviours.get(contributor.device_id))
                 else:
                     _log.warning(
                         "ControlLoop: device %r not found in registry — skipping",
@@ -717,13 +762,21 @@ class ControlLoop:
                     charge_efficiency=contributor._constraints.charge_efficiency,
                 )
 
-    async def _send(self, device: Any, device_id: str, setpoint_w: float) -> None:
+    async def _send(
+        self, device: Any, device_id: str, setpoint_w: float, behaviour: Behaviour | None,
+    ) -> None:
         """Command one device.  A failure is logged and does not stop the tick:
         the other devices still get their commands, the ledger is still
-        updated, and the device is commanded again on the next tick."""
+        updated, and the device is commanded again on the next tick.
+
+        The behaviour is narrowed to what the device supports (its optional
+        ``supported_behaviours``, see ``resolve_behaviour``)."""
+        behaviour = resolve_behaviour(
+            behaviour, setpoint_w, getattr(device, "supported_behaviours", None))
         try:
             await device.send_command(DeviceCommand(
                 device_id=device_id, command="set_power_w", value=round(setpoint_w, 1),
+                behaviour=behaviour,
             ))
         except asyncio.CancelledError:
             raise
@@ -754,15 +807,35 @@ class ControlLoop:
         current grid import demand (same logic as ``tick()``).
         """
         full = self._compute_setpoints(live)
-        self._remember(full)
+        self._remember(full, live)
         return [(device_id, setpoint_w, mode) for device_id, setpoint_w, mode, _intent in full]
 
     def _remember(
-        self, rows: list[tuple[str, float | None, str, ControlIntent | None]]
+        self, rows: list[tuple[str, float | None, str, ControlIntent | None]],
+        live: LiveSituation,
     ) -> None:
         self.last_setpoints = {did: sp for did, sp, _m, _i in rows}
         self.last_modes = {did: mode for did, _sp, mode, _i in rows}
         self.last_intents = {did: intent for did, _sp, _m, intent in rows}
+        self.last_behaviours = self.behaviours(rows, live)
+
+    def behaviours(
+        self,
+        rows: list[tuple[str, float | None, str, ControlIntent | None]],
+        live: LiveSituation,
+    ) -> dict[str, Behaviour | None]:
+        """The behaviour of each row's setpoint (``behaviour_for`` of its
+        contributor; ``None`` without one, or without a setpoint)."""
+        curtailed = set(self._grid_guard.curtailed) if self._grid_guard is not None else set()
+        by_id = {c.device_id: c for c in self._contributors}
+        out: dict[str, Behaviour | None] = {}
+        for did, sp, _mode, intent in rows:
+            behaviour_for = getattr(by_id.get(did), "behaviour_for", None)
+            out[did] = (
+                behaviour_for(sp, intent, live, curtailed=did in curtailed)
+                if behaviour_for is not None and sp is not None else None
+            )
+        return out
 
     # ------------------------------------------------------------------
     # Helpers

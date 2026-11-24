@@ -28,8 +28,9 @@ Vehicles (``push_vehicle_soc`` / ``assign_vehicle``, see ``core/vehicles.py``):
 The car's SoC is not read here: it belongs to the vehicle device, and the
 session logic lays it over the charger's state.
 
-The ``set_power_w`` sentinel encoding is identical to the HA-based plugin
-(see ``assets/ev.py``):  >500 W → instant, 0<x≤500 W → pv, 0 → stop.
+``set_power_w`` commands carry a behaviour (see ``assets/ev.py``):
+``charge`` → instant charging at the commanded power, ``absorb_surplus`` →
+PV charging (openWB follows the surplus itself), ``stop`` → stop.
 
 Chargemode set payloads use the SHORT mode names (``instant``/``pv``/``stop``)
 while the read topic reports the long ones (``instant_charging``/
@@ -73,12 +74,11 @@ import aiomqtt
 
 from ...core.config import MqttConfig
 from ...core.device_model import DeviceCategory
-from ...core.models import DeviceCommand, DeviceState
+from ...core.models import Behaviour, DeviceCommand, DeviceState, charger_behaviour
 from ...core.plugin_registry import SharedPool
 
 _log = logging.getLogger(__name__)
 
-_MODE_THRESHOLD_W = 500.0
 _RECONNECT_DELAY_S = 30
 # Pause between successive simpleAPI set publishes — see module docstring.
 _INTER_PUBLISH_DELAY_S = 2.0
@@ -406,18 +406,16 @@ class OpenWBMqttDevice:
         await self._bridge.publish(f"set/chargepoint/{self._cp_id}/config/ev", str(vehicle_id))
 
     async def send_command(self, command: DeviceCommand) -> None:
-        """Translate a ``set_power_w`` sentinel into simpleAPI set topics."""
+        """Translate a ``set_power_w`` command's behaviour into simpleAPI set topics."""
         if command.command != "set_power_w":
             return
         self._bridge.ensure_started()
 
         value = float(command.value) if command.value is not None else 0.0
-        if value > _MODE_THRESHOLD_W:
-            mode = self._mode_instant
-        elif value > 0.0:
-            mode = self._mode_pv
-        else:
-            mode = self._mode_stop
+        mode = {
+            Behaviour.CHARGE: self._mode_instant,
+            Behaviour.ABSORB_SURPLUS: self._mode_pv,
+        }.get(charger_behaviour(command), self._mode_stop)
 
         current_mode = _normalize_mode(self._value("chargemode"))
 

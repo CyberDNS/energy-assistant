@@ -6,22 +6,27 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from helpers.fake_ha_client import FakeHAClient
 
 from energy_assistant.assets.ev import (
     EvChargerContributor,
     EvChargingAsset,
     build_goal_from_parts,
 )
-from energy_assistant.core.control import ControlLoop, LiveSituation, StorageControlContributor
+from energy_assistant.core.control import (
+    ControlLoop,
+    LiveSituation,
+    StorageControlContributor,
+)
 from energy_assistant.core.ledger import BatteryCostLedger
 from energy_assistant.core.models import (
+    Behaviour,
     ControlIntent,
     DeviceCommand,
     DeviceState,
     StorageConstraints,
 )
 from energy_assistant.plugins.openwb_homeassistant.device import OpenWBDevice
-from helpers.fake_ha_client import FakeHAClient
 
 
 def _asset(device_id: str = "wallbox") -> EvChargingAsset:
@@ -101,7 +106,7 @@ def _ev_intent(now: datetime, power_kw: float, grid_allowed: bool) -> ControlInt
 
 def test_pv_sourced_intent_maps_to_pv_mode_not_instant() -> None:
     """A planned charging slot with grid_allowed=False is PV-surplus energy —
-    it must map to the PV sentinel, not instant charging (which would pull
+    it must map to PV charging (absorb surplus), not instant charging (which would pull
     the shortfall from the grid, contradicting the plan and the UI)."""
     now = datetime.now(timezone.utc)
     contrib = EvChargerContributor(_asset())
@@ -111,7 +116,7 @@ def test_pv_sourced_intent_maps_to_pv_mode_not_instant() -> None:
 
     setpoint = contrib.desired_setpoint_w(_ev_intent(now, 4.8, grid_allowed=False), live)
     assert setpoint is not None
-    assert 0.0 < setpoint <= 500.0  # PV sentinel range
+    assert contrib.behaviour_for(setpoint, None, live) is Behaviour.ABSORB_SURPLUS
 
 
 def test_grid_allowed_intent_maps_to_instant() -> None:
@@ -222,8 +227,9 @@ def test_unplanned_ev_yields_pv_surplus_to_planned_ev() -> None:
     ])
 
     setpoints = {d: w for d, w, _m in loop.describe_setpoints(_two_ev_live(now))}
-    assert 0.0 < setpoints["wallbox_a"] <= 500.0   # PV sentinel — the planned EV
+    assert loop.last_behaviours["wallbox_a"] is Behaviour.ABSORB_SURPLUS  # the planned EV
     assert setpoints["wallbox_b"] == 0.0            # yields (Stop)
+    assert loop.last_behaviours["wallbox_b"] is Behaviour.STOP
 
 
 def test_both_planned_evs_stay_in_pv_mode() -> None:
@@ -234,8 +240,8 @@ def test_both_planned_evs_stay_in_pv_mode() -> None:
     ])
 
     setpoints = {d: w for d, w, _m in loop.describe_setpoints(_two_ev_live(now))}
-    assert 0.0 < setpoints["wallbox_a"] <= 500.0
-    assert 0.0 < setpoints["wallbox_b"] <= 500.0
+    assert loop.last_behaviours["wallbox_a"] is Behaviour.ABSORB_SURPLUS
+    assert loop.last_behaviours["wallbox_b"] is Behaviour.ABSORB_SURPLUS
 
 
 def test_no_planned_ev_keeps_opportunistic_pv() -> None:
@@ -243,9 +249,9 @@ def test_no_planned_ev_keeps_opportunistic_pv() -> None:
     now = datetime.now(timezone.utc)
     loop, _ = _two_ev_loop(now, plan_intents=[])
 
-    setpoints = {d: w for d, w, _m in loop.describe_setpoints(_two_ev_live(now))}
-    assert 0.0 < setpoints["wallbox_a"] <= 500.0
-    assert 0.0 < setpoints["wallbox_b"] <= 500.0
+    loop.describe_setpoints(_two_ev_live(now))
+    assert loop.last_behaviours["wallbox_a"] is Behaviour.ABSORB_SURPLUS
+    assert loop.last_behaviours["wallbox_b"] is Behaviour.ABSORB_SURPLUS
 
 
 def test_stale_sparse_ev_intent_expires_and_yields() -> None:
@@ -264,7 +270,7 @@ def test_stale_sparse_ev_intent_expires_and_yields() -> None:
 
     setpoints = {d: w for d, w, _m in loop.describe_setpoints(_two_ev_live(now))}
     assert setpoints["wallbox_a"] == 0.0            # stale slot expired → yields
-    assert 0.0 < setpoints["wallbox_b"] <= 500.0    # current holder keeps PV mode
+    assert loop.last_behaviours["wallbox_b"] is Behaviour.ABSORB_SURPLUS  # keeps PV mode
 
 
 def test_battery_leaves_reserved_surplus_for_planned_ev() -> None:
@@ -323,7 +329,8 @@ def test_grid_planned_ev_does_not_force_others_to_yield() -> None:
 
     setpoints = {d: w for d, w, _m in loop.describe_setpoints(_two_ev_live(now))}
     assert setpoints["wallbox_a"] == 11_000.0       # instant at planned power
-    assert 0.0 < setpoints["wallbox_b"] <= 500.0    # opportunistic PV allowed
+    assert loop.last_behaviours["wallbox_a"] is Behaviour.CHARGE
+    assert loop.last_behaviours["wallbox_b"] is Behaviour.ABSORB_SURPLUS  # opportunistic PV
 
 
 # ---------------------------------------------------------------------------
@@ -358,7 +365,8 @@ async def test_openwb_writes_mode_when_current_mode_unreadable() -> None:
     client = FakeHAClient(states={})  # mode entity missing → read returns None
     dev = OpenWBDevice("wallbox", client, entity_mode="select.mode", entity_soc="sensor.soc")
 
-    await dev.send_command(DeviceCommand(device_id="wallbox", command="set_power_w", value=1.0))
+    await dev.send_command(DeviceCommand(device_id="wallbox", command="set_power_w", value=0.0,
+                                         behaviour=Behaviour.ABSORB_SURPLUS))
 
     assert client.calls == [
         ("select", "select_option", {"entity_id": "select.mode", "option": "PV Charging"}),

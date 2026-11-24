@@ -9,7 +9,7 @@ import pytest
 
 from energy_assistant.core.config import MqttConfig
 from energy_assistant.core.device_model import DeviceCategory
-from energy_assistant.core.models import DeviceCommand
+from energy_assistant.core.models import Behaviour, DeviceCommand
 from energy_assistant.plugins.openwb_mqtt import device as device_module
 from energy_assistant.plugins.openwb_mqtt.device import (
     OpenWBMqttBridge,
@@ -76,8 +76,9 @@ def _device(bridge: FakeBridge, **kwargs) -> OpenWBMqttDevice:
     return OpenWBMqttDevice("wallbox", bridge, chargepoint_id=5, **kwargs)
 
 
-def _cmd(value: float) -> DeviceCommand:
-    return DeviceCommand(device_id="wallbox", command="set_power_w", value=value)
+def _cmd(value: float, behaviour: Behaviour | None = None) -> DeviceCommand:
+    return DeviceCommand(device_id="wallbox", command="set_power_w", value=value,
+                         behaviour=behaviour)
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +166,7 @@ async def test_mode_write_skipped_when_already_in_desired_mode() -> None:
     # Read topic reports the long name; set payload is the short one —
     # reconciliation must treat "pv_charging" as matching desired "pv".
     bridge = FakeBridge({("5", "chargemode"): "pv_charging"})
-    await _device(bridge).send_command(_cmd(1.0))  # PV sentinel
+    await _device(bridge).send_command(_cmd(0.0, Behaviour.ABSORB_SURPLUS))
     assert bridge.published == []
 
 
