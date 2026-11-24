@@ -69,6 +69,13 @@ class FakeHAClient:
             self._states[entity_id] = str(data["value"])
         elif service == "select_option":
             self._states[entity_id] = str(data["option"])
+        elif service == "set_hvac_mode":
+            self._states[entity_id] = str(data["hvac_mode"])
+        else:  # climate / water heater services that set an attribute
+            key = {"set_temperature": "temperature", "set_preset_mode": "preset_mode",
+                   "set_operation_mode": "operation_mode"}.get(service)
+            if key is not None:
+                self.attributes.setdefault(entity_id, {})[key] = data[key]
 
     async def get_statistics(
         self,

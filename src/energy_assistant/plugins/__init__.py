@@ -32,6 +32,7 @@ from . import (  # noqa: E402
     homeassistant_sensor,
     homeassistant_switch,
     homeassistant_thermal,
+    homeassistant_thermostat,
     homeassistant_vehicle,
     learned,
     modbus,
@@ -53,6 +54,7 @@ homeassistant_charger.register(registry)
 homeassistant_sensor.register(registry)  # also the old name generic_homeassistant
 homeassistant_switch.register(registry)
 homeassistant_thermal.register(registry)
+homeassistant_thermostat.register(registry)
 homeassistant_vehicle.register(registry)
 learned.register(registry)
 modbus.register(registry)
