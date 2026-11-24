@@ -2,42 +2,12 @@
 
 from __future__ import annotations
 
-import logging
 import time
 from typing import Any
 
 from ...core.device_model import Capability, DeviceCategory
 from ...core.models import DeviceCommand, DeviceState
-from .._homeassistant.client import EntityState
-
-_log = logging.getLogger(__name__)
-
-_ON = {"on", "true", "home", "connected", "plugged"}
-# Unit of a distance sensor → factor to km.
-_TO_KM = {"km": 1.0, "m": 0.001, "mi": 1.609344}
-
-
-def _float(entity: EntityState | None) -> float | None:
-    if entity is None or entity.state is None:
-        return None
-    try:
-        return float(entity.state)
-    except (TypeError, ValueError):
-        return None  # "unavailable", "unknown", …
-
-
-def _bool(entity: EntityState | None) -> bool | None:
-    if entity is None or entity.state in (None, "unavailable", "unknown"):
-        return None
-    return str(entity.state).lower() in _ON
-
-
-def _km(entity: EntityState | None) -> float | None:
-    value = _float(entity)
-    if value is None or entity is None:
-        return None
-    unit = str(entity.attributes.get("unit_of_measurement") or "km").lower()
-    return value * _TO_KM.get(unit, 1.0)
+from .._homeassistant.bindings import ReadBinding, Reading
 
 
 class HAVehicleDevice:
@@ -52,13 +22,13 @@ class HAVehicleDevice:
         device_id: str,
         client: Any,
         *,
-        entities: dict[Capability, str],
+        bindings: dict[Capability, ReadBinding],
         refresh_entity: str | None = None,
         poll_interval_s: float = 30.0,
     ) -> None:
         self._device_id = device_id
         self._client = client
-        self._entities = dict(entities)
+        self._bindings = dict(bindings)
         self._refresh_entity = refresh_entity
         self._poll_interval_s = poll_interval_s
         self._cached: DeviceState | None = None
@@ -76,35 +46,29 @@ class HAVehicleDevice:
     def can_refresh(self) -> bool:
         return self._refresh_entity is not None
 
-    async def _read(self, capability: Capability) -> EntityState | None:
-        entity_id = self._entities.get(capability)
-        if entity_id is None:
-            return None
-        try:
-            return await self._client.get_entity(entity_id)
-        except Exception as exc:  # noqa: BLE001 — one bad entity must not hide the others
-            _log.debug("Vehicle %r: reading %s failed: %s", self._device_id, entity_id, exc)
-            return None
+    async def _read(self, capability: Capability) -> Reading | None:
+        binding = self._bindings.get(capability)
+        return await binding.read(self._client) if binding is not None else None
 
     async def get_state(self) -> DeviceState:
         now = time.monotonic()
         if self._cached is not None and now - self._cached_at < self._poll_interval_s:
             return self._cached
         soc = await self._read(Capability.SOC_PCT)
-        soc_pct = _float(soc)
+        soc_pct = soc.value if soc is not None else None
         extra: dict[str, Any] = {
             "soc_timestamp": (
-                soc.last_reported.isoformat()
-                if soc is not None and soc.last_reported is not None and soc_pct is not None
+                soc.reported_at.isoformat()
+                if soc is not None and soc.reported_at is not None and soc_pct is not None
                 else None
             ),
         }
-        if Capability.RANGE_KM in self._entities:
-            extra["range_km"] = _km(await self._read(Capability.RANGE_KM))
-        if Capability.PLUGGED in self._entities:
-            extra["car_plugged"] = _bool(await self._read(Capability.PLUGGED))
-        if Capability.LOCATION_HOME in self._entities:
-            extra["location_home"] = _bool(await self._read(Capability.LOCATION_HOME))
+        for cap, key in ((Capability.RANGE_KM, "range_km"),
+                         (Capability.PLUGGED, "car_plugged"),
+                         (Capability.LOCATION_HOME, "location_home")):
+            if cap in self._bindings:
+                reading = await self._read(cap)
+                extra[key] = reading.value if reading is not None else None
         state = DeviceState(
             device_id=self._device_id,
             soc_pct=soc_pct,

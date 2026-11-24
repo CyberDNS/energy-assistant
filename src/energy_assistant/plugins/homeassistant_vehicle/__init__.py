@@ -35,8 +35,9 @@ from typing import Any
 
 from ...core.device_model import Capability as Cap
 from ...core.device_model import DeviceCategory as C
-from ...core.device_model import DeviceConfigError, ParamSpec
+from ...core.device_model import ParamSpec
 from ...core.plugin_registry import BuildContext, PluginRegistry
+from .._homeassistant.bindings import bindings_for, parse_bindings
 
 _log = logging.getLogger(__name__)
 
@@ -50,6 +51,7 @@ def register(registry: PluginRegistry) -> None:
         description="SoC, range, plug and location from the car integration in Home Assistant.",
         categories={C.VEHICLE},
         bindable=_BINDABLE,
+        bindings=bindings_for(_BINDABLE),
         settings={
             "refresh_entity": ParamSpec(str, entity=True, label="Refresh button",
                                         description="Button entity that makes the car report "
@@ -63,17 +65,7 @@ def register(registry: PluginRegistry) -> None:
 def _build(device_id: str, cfg: dict[str, Any], ctx: BuildContext) -> object | None:
     from .device import HAVehicleDevice
 
-    caps = cfg.get("capabilities") or {}
-    entities: dict[Cap, str] = {}
-    for name, binding in caps.items():
-        entity = binding.get("entity")
-        unknown = set(binding) - {"entity"}
-        if not isinstance(entity, str) or not entity or unknown:
-            raise DeviceConfigError([(
-                f"device {device_id!r} (homeassistant_vehicle): capabilities.{name} must be "
-                "{entity: <entity id>}"
-            )])
-        entities[Cap(name)] = entity
+    readings = parse_bindings(device_id, "homeassistant_vehicle", cfg, _BINDABLE)
     if ctx.ha_client is None:
         _log.warning(
             "Device %r (homeassistant_vehicle) requires Home Assistant backend — skipping",
@@ -84,7 +76,7 @@ def _build(device_id: str, cfg: dict[str, Any], ctx: BuildContext) -> object | N
     return HAVehicleDevice(
         device_id=device_id,
         client=ctx.ha_client,
-        entities=entities,
+        bindings=readings,
         refresh_entity=str(refresh) if refresh else None,
         poll_interval_s=float(cfg.get("poll_interval_s", 30.0)),
     )

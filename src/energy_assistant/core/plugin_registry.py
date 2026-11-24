@@ -34,6 +34,8 @@ loader can check the ``devices:`` section at startup:
                 errors, and the config UI builds its form from them.
 ``binding``     the keys a capability binding of this plugin accepts
                 (default: ``entity``).
+``bindings``    per capability, when its binding accepts other keys than
+                ``binding`` (e.g. ``import_entity`` only for power).
 
 Tariff and forecast plugins declare their ``settings`` the same way
 (``register_tariff`` / ``register_forecast``); ``core/config_schema`` checks
@@ -85,9 +87,16 @@ class DevicePluginInfo:
     bindable: frozenset[Capability] = frozenset()
     settings: Mapping[str, ParamSpec] | None = None
     binding: Mapping[str, ParamSpec] = field(default_factory=dict)
+    bindings: Mapping[Capability, Mapping[str, ParamSpec]] = field(default_factory=dict)
     title: str = ""
     """Display name (default: the type name, humanized)."""
     description: str = ""
+    legacy: bool = False
+    """Old name of another type: still accepted, not offered for new devices."""
+
+    def binding_for(self, capability: Capability) -> Mapping[str, ParamSpec]:
+        """The keys a binding of *capability* accepts."""
+        return self.bindings.get(capability, self.binding)
 
     def to_dict(self) -> dict[str, Any]:
         """JSON form for the config UI (``GET /api/config/schema``)."""
@@ -103,6 +112,11 @@ class DevicePluginInfo:
                 else specs_to_dict(self.settings)
             ),
             "binding": specs_to_dict(self.binding),
+            "bindings": {
+                cap.value: specs_to_dict(specs)
+                for cap, specs in sorted(self.bindings.items(), key=lambda i: i[0].value)
+            },
+            "legacy": self.legacy,
         }
 
 
@@ -205,8 +219,10 @@ class PluginRegistry:
         bindable: frozenset[Capability] | set[Capability] = frozenset(),
         settings: Mapping[str, ParamSpec] | None = None,
         binding: Mapping[str, ParamSpec] | None = None,
+        bindings: Mapping[Capability, Mapping[str, ParamSpec]] | None = None,
         title: str = "",
         description: str = "",
+        legacy: bool = False,
     ) -> None:
         """Register *factory* for devices with ``type: <type_name>``.
 
@@ -216,8 +232,10 @@ class PluginRegistry:
             When ``True`` the factory will be called in the second pass,
             after all non-deferred devices have been built and added to
             ``BuildContext.device_registry``.
-        categories, provides, bindable, settings, binding:
+        categories, provides, bindable, settings, binding, bindings:
             Plugin metadata, see the module docstring.
+        legacy:
+            An old type name kept for existing configs.
         """
         self._device[type_name] = DevicePluginInfo(
             type_name=type_name,
@@ -230,8 +248,10 @@ class PluginRegistry:
             binding=dict(binding) if binding is not None else (
                 dict(ENTITY_BINDING) if bindable else {}
             ),
+            bindings={cap: dict(specs) for cap, specs in (bindings or {}).items()},
             title=title,
             description=description,
+            legacy=legacy,
         )
 
     def device_infos(self) -> list[DevicePluginInfo]:

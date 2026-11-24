@@ -6,35 +6,38 @@ State reported
     The bound power sensor, else ``rated_power_w`` while on and 0 while off
     (None when neither is known).
 
+``DeviceState.energy_kwh``
+    The bound energy counter, if any.
+
 ``DeviceState.extra["switch_state"]``
     Raw HA state of the switch entity ("on" / "off" / "unavailable").
+
+``DeviceState.extra["actuator"]``
+    Whether the switch follows what was written (``ActuatorHealth``).
 
 Command handling
 ----------------
 ``set_power_w``
-    value > 0 → ``homeassistant.turn_on``, value == 0 → ``homeassistant.turn_off``.
+    value > 0 → on, value == 0 → off, through the shared ``SwitchActuator``:
+    only written on a mismatch (so the control tick doesn't spam
+    turn_on/turn_off, and a plug toggled by hand is put back), rate-limited,
+    and reported when the switch does not follow.
 """
 
 from __future__ import annotations
 
+import contextlib
 import logging
+from typing import Any
 
 from ...core.device_model import DeviceCategory
 from ...core.models import DeviceCommand, DeviceState
-from .._homeassistant.client import HAClientProtocol
+from .._homeassistant.actuators import SwitchActuator
+from .._homeassistant.bindings import ReadBinding
 
 _log = logging.getLogger(__name__)
 
-_GONE = {"unavailable", "unknown", "none"}
-
-
-def _to_float(value: object) -> float | None:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+_GONE = {"unavailable", "unknown", "none", ""}
 
 
 class HASwitchDevice:
@@ -43,15 +46,17 @@ class HASwitchDevice:
     def __init__(
         self,
         device_id: str,
-        client: HAClientProtocol,
-        entity_switch: str,
-        entity_power: str | None = None,
+        client: Any,
+        switch: SwitchActuator,
+        power: ReadBinding | None = None,
+        energy: ReadBinding | None = None,
         rated_power_w: float | None = None,
     ) -> None:
         self._device_id = device_id
         self._client = client
-        self._entity_switch = entity_switch
-        self._entity_power = entity_power
+        self._switch = switch
+        self._power = power
+        self._energy = energy
         self._rated_power_w = rated_power_w
 
     @property
@@ -64,58 +69,36 @@ class HASwitchDevice:
 
     @property
     def entity_switch(self) -> str:
-        return self._entity_switch
+        return self._switch.entity_id
 
     async def get_state(self) -> DeviceState:
         try:
-            raw = str(await self._client.get_entity_state(self._entity_switch))
-            on = raw.lower() == "on"
-            power_w: float | None = None
-            if self._entity_power is not None:
-                power_w = _to_float(await self._client.get_entity_state(self._entity_power))
-            if power_w is None and self._rated_power_w is not None:
-                power_w = self._rated_power_w if on else 0.0
-            return DeviceState(
-                device_id=self._device_id,
-                power_w=power_w,
-                available=raw.lower() not in _GONE,
-                extra={"switch_state": raw, "on": on},
-            )
+            entity = await self._client.get_entity(self._switch.entity_id)
         except Exception:  # noqa: BLE001 — reported as unavailable
             _log.warning("HASwitchDevice %r: failed to read state from Home Assistant",
                          self._device_id, exc_info=True)
             return DeviceState(device_id=self._device_id, available=False)
+        raw = str(entity.state) if entity is not None and entity.state is not None else "unavailable"
+        on = raw.lower() == "on"
+        power_w: float | None = None
+        if self._power is not None:
+            power_w = (await self._power.read(self._client)).value
+        if power_w is None and self._rated_power_w is not None:
+            power_w = self._rated_power_w if on else 0.0
+        energy = (await self._energy.read(self._client)).value if self._energy else None
+        return DeviceState(
+            device_id=self._device_id,
+            power_w=power_w,
+            energy_kwh=energy,
+            available=raw.lower() not in _GONE,
+            extra={"switch_state": raw, "on": on,
+                   "actuator": self._switch.health.to_dict()},
+        )
 
     async def send_command(self, command: DeviceCommand) -> None:
-        """Switch on (``set_power_w`` > 0) or off (0).
-
-        Reconciles first: reads the switch and only calls the HA service on a
-        mismatch, so the control tick doesn't spam turn_on/turn_off — and an
-        actual correction (e.g. someone toggled the plug by hand) shows in
-        the log at INFO level.  If the read fails the command is sent anyway.
-        """
+        """Switch on (``set_power_w`` > 0) or off (0)."""
         if command.command != "set_power_w":
             return
         want_on = command.value is not None and float(command.value) > 0
-
-        current: str | None = None
-        try:
-            raw = await self._client.get_entity_state(self._entity_switch)
-            current = str(raw).lower() if raw is not None else None
-        except Exception as exc:  # noqa: BLE001 — read failed: write unconditionally
-            _log.debug("HASwitchDevice %r: reading %s failed: %s", self._device_id,
-                       self._entity_switch, exc)
-
-        if current == ("on" if want_on else "off"):
-            return
-
-        try:
-            service = "turn_on" if want_on else "turn_off"
-            await self._client.call_service(
-                "homeassistant", service, {"entity_id": self._entity_switch}
-            )
-            _log.info("HASwitchDevice %r: switch %s → %s (was %r)", self._device_id,
-                      self._entity_switch, "on" if want_on else "off", current)
-        except Exception:  # noqa: BLE001 — retried on the next control tick
-            _log.warning("HASwitchDevice %r: failed to send command to %s",
-                         self._device_id, self._entity_switch, exc_info=True)
+        with contextlib.suppress(Exception):  # logged by the actuator, retried next tick
+            await self._switch.apply(want_on)
