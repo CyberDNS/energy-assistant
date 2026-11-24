@@ -27,6 +27,7 @@ from . import (  # noqa: E402
     flat_rate,
     forecast_solar,
     generic_consumer,
+    homeassistant_battery,
     homeassistant_sensor,
     homeassistant_switch,
     homeassistant_thermal,
@@ -46,6 +47,7 @@ differential.register(registry)
 flat_rate.register(registry)
 forecast_solar.register(registry)
 generic_consumer.register(registry)
+homeassistant_battery.register(registry)
 homeassistant_sensor.register(registry)  # also the old name generic_homeassistant
 homeassistant_switch.register(registry)
 homeassistant_thermal.register(registry)
