@@ -359,7 +359,7 @@ async def test_vehicle_device_unavailable_soc() -> None:
 
 
 def test_vehicle_plugin_rejects_bad_bindings() -> None:
-    with pytest.raises(DeviceConfigError, match="must be"):
+    with pytest.raises(DeviceConfigError, match="unknown key"):
         plugin_registry.build_device(
             "car", {"type": "homeassistant_vehicle", "category": "vehicle",
                     "capabilities": {"soc_pct": {"field": "x"}}},

@@ -35,7 +35,9 @@ export default defineComponent({
     for (const key of ['settings', 'capabilities', 'params']) form[key] ??= {}
 
     const categorySchema = computed(() => schema.value.categories.find(c => c.category === form.category) ?? null)
-    const plugins = computed(() => schema.value.plugins.filter(p => !p.categories.length || p.categories.includes(form.category)))
+    // Old type names (legacy) are only listed for a device that already uses one.
+    const plugins = computed(() => schema.value.plugins.filter(p =>
+      (!p.categories.length || p.categories.includes(form.category)) && (!p.legacy || p.type === form.type)))
     const plugin = computed(() => schema.value.plugins.find(p => p.type === form.type) ?? null)
 
     // A new device: take the only matching plugin, drop a plugin that does not fit.
@@ -68,7 +70,8 @@ export default defineComponent({
     const gridConnection = computed(() => form.category === 'meter' && !form.metered_by)
     // The binding's required key only counts when the capability must be bound.
     function bindingSpecs(c) {
-      return Object.fromEntries(Object.entries(plugin.value.binding).map(([k, spec]) =>
+      const specs = plugin.value.bindings?.[c.cap] ?? plugin.value.binding
+      return Object.fromEntries(Object.entries(specs).map(([k, spec]) =>
         [k, { ...spec, required: spec.required && c.required && !c.provided }]))
     }
     function setBinding(cap, value) {

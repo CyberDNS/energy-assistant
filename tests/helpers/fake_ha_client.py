@@ -24,6 +24,10 @@ class FakeHAClient:
         self.energy_prefs: dict[str, Any] | None = None
         # entity_id -> last_reported timestamp returned by get_entity
         self.reported: dict[str, datetime] = {}
+        # entity_id -> attributes returned by get_entity
+        self.attributes: dict[str, dict[str, Any]] = {}
+        # service calls change the state like Home Assistant would
+        self.apply_services = False
 
     async def get_entity_state(self, entity_id: str) -> Any:
         return self._states.get(entity_id)
@@ -37,7 +41,7 @@ class FakeHAClient:
         ts = self.reported.get(entity_id)
         return EntityState(
             state=None if self._states[entity_id] is None else str(self._states[entity_id]),
-            attributes={}, last_changed=ts, last_updated=ts, last_reported=ts,
+            attributes=dict(self.attributes.get(entity_id, {})), last_changed=ts, last_updated=ts, last_reported=ts,
         )
 
     async def call_service(
@@ -47,6 +51,24 @@ class FakeHAClient:
         data: dict[str, Any] | None = None,
     ) -> None:
         self.calls.append((domain, service, data or {}))
+        if self.apply_services:
+            self._apply_service(service, data or {})
+
+    def set_state(self, entity_id: str, state: Any, **attributes: Any) -> None:
+        self._states[entity_id] = state
+        if attributes:
+            self.attributes[entity_id] = attributes
+
+    def _apply_service(self, service: str, data: dict[str, Any]) -> None:
+        entity_id = data.get("entity_id")
+        if not isinstance(entity_id, str):
+            return
+        if service in ("turn_on", "turn_off"):
+            self._states[entity_id] = "on" if service == "turn_on" else "off"
+        elif service == "set_value":
+            self._states[entity_id] = str(data["value"])
+        elif service == "select_option":
+            self._states[entity_id] = str(data["option"])
 
     async def get_statistics(
         self,

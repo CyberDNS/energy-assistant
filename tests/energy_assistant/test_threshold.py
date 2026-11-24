@@ -501,13 +501,28 @@ class TestThresholdControlContributor:
         assert result == 0.0, "Should stay off — min_offtime not elapsed"
 
 
+def _ha_switch(client, entity, power_entity=None):
+    """A homeassistant_switch device built like the loader builds it."""
+    from energy_assistant.core.config import BackendsConfig
+    from energy_assistant.core.plugin_registry import BuildContext
+    from energy_assistant.plugins import registry
+
+    caps = {"switch": {"entity": entity}}
+    if power_entity:
+        caps["power_w"] = {"entity": power_entity}
+    return registry.build_device(
+        "plug", {"type": "homeassistant_switch", "category": "switch",
+                 "capabilities": caps, "rated_power_w": 150.0},
+        BuildContext(backends=BackendsConfig(), ha_client=client),
+    )
+
+
 class TestHASwitchDeviceReconciliation:
     """send_command must check the actual switch state before calling HA."""
 
     @staticmethod
-    def _device(client):
-        from energy_assistant.plugins.homeassistant_switch.device import HASwitchDevice
-        return HASwitchDevice("plug", client, entity_switch="switch.cooler", rated_power_w=150.0)
+    def _device(client, power_entity=None):
+        return _ha_switch(client, "switch.cooler", power_entity)
 
     async def test_skips_service_call_when_already_in_desired_state(self) -> None:
         from helpers.fake_ha_client import FakeHAClient
@@ -547,12 +562,10 @@ class TestHASwitchDeviceReconciliation:
     async def test_power_from_rated_or_measured(self) -> None:
         from helpers.fake_ha_client import FakeHAClient
 
-        from energy_assistant.plugins.homeassistant_switch.device import HASwitchDevice
         client = FakeHAClient(states={"switch.cooler": "on", "sensor.p": "142.5"})
         st = await self._device(client).get_state()
         assert (st.power_w, st.available, st.extra["on"]) == (150.0, True, True)
-        measured = HASwitchDevice("plug", client, entity_switch="switch.cooler",
-                                  entity_power="sensor.p", rated_power_w=150.0)
+        measured = self._device(client, power_entity="sensor.p")
         assert (await measured.get_state()).power_w == 142.5
         client._states["switch.cooler"] = "unavailable"
         assert (await self._device(client).get_state()).available is False
@@ -587,11 +600,15 @@ class TestThermalLoadDevice:
     async def test_unavailable_without_a_reading(self) -> None:
         from helpers.fake_ha_client import FakeHAClient
 
-        from energy_assistant.plugins.homeassistant_switch.device import HASwitchDevice
+        from energy_assistant.plugins._homeassistant.bindings import (
+            ReadBinding,
+            ValueKind,
+        )
         from energy_assistant.plugins.homeassistant_thermal.device import (
             ThermalLoadDevice,
         )
         client = FakeHAClient(states={"sensor.t": "unavailable", "switch.c": "on"})
-        switch = HASwitchDevice("plug", client, entity_switch="switch.c", rated_power_w=150.0)
-        st = await ThermalLoadDevice("cooler", client, "sensor.t", switch).get_state()
+        switch = _ha_switch(client, "switch.c")
+        sensor = ReadBinding("cooler", ValueKind.TEMPERATURE, entity="sensor.t")
+        st = await ThermalLoadDevice("cooler", client, sensor, switch).get_state()
         assert (st.available, st.power_w, st.extra["measured_value"]) == (False, 150.0, None)

@@ -16,7 +16,7 @@ Opt-in with a top-level ``energy_dashboard:`` section::
 
 Every "Individual device" of the Energy dashboard becomes a consumer:
 
-* with a power sensor (``stat_rate``) a ``generic_homeassistant`` device that
+* with a power sensor (``stat_rate``) a ``homeassistant_sensor`` device that
   reads it live and learns its forecast from it (default learning, see
   ``forecast_config``);
 * with only an energy meter, a virtual ``generic_consumer`` whose ``learned``
@@ -120,7 +120,7 @@ def add_dashboard_consumers(
             energy_dashboard=stat,
         )
         if rate is not None:
-            spec.type = "generic_homeassistant"
+            spec.type = "homeassistant_sensor"
             spec.capabilities = {Capability.POWER_W: {"entity": rate}}
             spec.learning = dict(learn_opts) if learning is not False else False
         else:

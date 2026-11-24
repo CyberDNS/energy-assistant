@@ -9,24 +9,30 @@ export default defineComponent({
   name: 'EntityPicker',
   props: {
     modelValue:  { default: undefined },
-    placeholder: { type: String, default: 'sensor.…' },
+    placeholder: { type: String, default: null },
+    // Entity domains to suggest (empty: all).
+    domains:     { type: Array, default: () => [] },
     ariaLabel:   { type: String, default: null },
   },
   emits: ['update:modelValue'],
   setup(props) {
-    const { entities } = useConfig()
+    const { entities: all } = useConfig()
+    const entities = computed(() => props.domains.length
+      ? all.value.filter(e => props.domains.includes(e.entity_id.split('.', 1)[0]))
+      : all.value)
+    const hint = computed(() => props.placeholder ?? `${props.domains[0] ?? 'sensor'}.…`)
     const listId = `entities-${++counter}`
-    const name = computed(() => entities.value.find(e => e.entity_id === props.modelValue)?.name ?? '')
-    const unknown = computed(() => !!props.modelValue && entities.value.length > 0
-      && !entities.value.some(e => e.entity_id === props.modelValue))
-    return { entities, listId, name, unknown }
+    const name = computed(() => all.value.find(e => e.entity_id === props.modelValue)?.name ?? '')
+    const unknown = computed(() => !!props.modelValue && all.value.length > 0
+      && !all.value.some(e => e.entity_id === props.modelValue))
+    return { entities, hint, listId, name, unknown }
   },
 })
 </script>
 
 <template>
   <span class="cfg-entity">
-    <input type="text" :value="modelValue ?? ''" :list="listId" :placeholder="placeholder" :aria-label="ariaLabel"
+    <input type="text" :value="modelValue ?? ''" :list="listId" :placeholder="hint" :aria-label="ariaLabel"
            autocapitalize="off" spellcheck="false"
            @input="$emit('update:modelValue', $event.target.value.trim() || undefined)" />
     <datalist :id="listId">

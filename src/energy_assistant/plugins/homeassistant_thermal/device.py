@@ -18,23 +18,11 @@ Command handling
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 from ...core.device_model import DeviceCategory
 from ...core.models import DeviceCommand, DeviceState
-from .._homeassistant.client import HAClientProtocol
-
-_log = logging.getLogger(__name__)
-
-
-def _to_float(value: object) -> float | None:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+from .._homeassistant.bindings import ReadBinding
 
 
 class ThermalLoadDevice:
@@ -43,13 +31,13 @@ class ThermalLoadDevice:
     def __init__(
         self,
         device_id: str,
-        client: HAClientProtocol,
-        entity_sensor: str,
+        client: Any,
+        sensor: ReadBinding,
         switch: Any,
     ) -> None:
         self._device_id = device_id
         self._client = client
-        self._entity_sensor = entity_sensor
+        self._sensor = sensor
         self._switch = switch
 
     @property
@@ -65,12 +53,7 @@ class ThermalLoadDevice:
         return str(self._switch.device_id)
 
     async def get_state(self) -> DeviceState:
-        try:
-            measured = _to_float(await self._client.get_entity_state(self._entity_sensor))
-        except Exception:  # noqa: BLE001 — no reading: reported as unavailable
-            _log.warning("ThermalLoadDevice %r: failed to read %s from Home Assistant",
-                         self._device_id, self._entity_sensor, exc_info=True)
-            measured = None
+        measured = (await self._sensor.read(self._client)).value
         switch = await self._switch.get_state()
         return DeviceState(
             device_id=self._device_id,

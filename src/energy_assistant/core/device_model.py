@@ -20,7 +20,7 @@ Config shape::
 
       - id: pv_production
         category: pv
-        type: generic_homeassistant
+        type: homeassistant_sensor
         capabilities:
           power_w: { entity: sensor.power_production_pv, invert_sign: true }
         metered_by: main_grid_meter
@@ -135,6 +135,10 @@ class ParamSpec:
     The config UI offers those devices in a dropdown."""
     entity: bool = False
     """The value is a Home Assistant entity id."""
+    domains: tuple[str, ...] = ()
+    """``entity``: the entity domains it may be (``sensor``, ``switch``, …;
+    empty = any, and the value is not checked).  Set: the value must be an
+    entity id of one of them, and the config UI only suggests these."""
     tariff: bool = False
     """The value is a tariff id."""
     items: ParamSpec | None = None
@@ -178,6 +182,14 @@ class ParamSpec:
                     return f"{key}: {problem}"
         return None
 
+    def _check_entity(self, value: str) -> str | None:
+        domain, dot, object_id = value.partition(".")
+        if not dot or not domain or not object_id:
+            return f"must be an entity id like sensor.name, got {value!r}"
+        if domain not in self.domains:
+            return f"must be a {' / '.join(self.domains)} entity, got {value!r}"
+        return None
+
     def applies(self, values: Mapping[str, Any], specs: Mapping[str, ParamSpec]) -> bool:
         """Whether the ``when`` condition holds for the sibling *values*."""
         for key, wanted in (self.when or {}).items():
@@ -217,6 +229,8 @@ class ParamSpec:
             out["ref"] = list(self.ref)
         if self.entity:
             out["entity"] = True
+        if self.domains:
+            out["domains"] = list(self.domains)
         if self.tariff:
             out["tariff"] = True
         if self.items is not None:
@@ -259,6 +273,9 @@ class ParamSpec:
             return problem
         if self.choices and value not in self.choices:
             return f"must be one of {', '.join(self.choices)}, got {value!r}"
+        if (self.entity and self.domains and isinstance(value, str)
+                and (problem := self._check_entity(value))):
+            return problem
         too_small = self.minimum is not None and isinstance(value, (int, float)) and (
             value < self.minimum or (self.exclusive_minimum and value == self.minimum)
         )
@@ -633,8 +650,15 @@ class DeviceSpec:
         return self.capabilities.get(capability)
 
     def bound_entity(self, capability: Capability) -> str | None:
-        """The HA entity bound to *capability*, if any."""
+        """The HA entity bound to *capability*, if its state is the value as is.
+
+        ``None`` when nothing is bound, or the binding reads an attribute,
+        scales the value or combines entities: the entity's history (learned
+        forecasts and models) would then not be the capability's value.
+        """
         b = self.capabilities.get(capability) or {}
+        if any(b.get(key) not in (None, "", 1, 1.0) for key in ("attribute", "scale")):
+            return None
         entity = b.get("entity")
         return entity if isinstance(entity, str) and entity else None
 

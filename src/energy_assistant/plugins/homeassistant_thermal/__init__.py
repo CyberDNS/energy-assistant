@@ -9,7 +9,10 @@ power is the switch's, and its on/off commands go to the switch.
 
 Configuration
 -------------
-``capabilities.temperature_c.entity``  — HA entity of the measured value.
+``capabilities.temperature_c``         — HA entity of the measured value (any
+                                         temperature binding, e.g. a climate
+                                         entity's ``current_temperature``
+                                         attribute).
 ``controlled_by``                      — the switch device (with
                                          ``params.rated_power_w``).
 ``params``                             — thresholds and the fallback thermal
@@ -46,6 +49,7 @@ from ...core.device_model import Capability as Cap
 from ...core.device_model import DeviceCategory as C
 from ...core.device_model import DeviceConfigError
 from ...core.plugin_registry import BuildContext, PluginRegistry
+from .._homeassistant.bindings import binding_specs, parse_bindings
 
 _log = logging.getLogger(__name__)
 
@@ -59,6 +63,7 @@ def register(registry: PluginRegistry) -> None:
         categories={C.THERMAL_LOAD},
         provides={Cap.POWER_W},
         bindable={Cap.TEMPERATURE_C},
+        bindings={Cap.TEMPERATURE_C: binding_specs(Cap.TEMPERATURE_C)},
         settings={},
     )
 
@@ -66,18 +71,18 @@ def register(registry: PluginRegistry) -> None:
 def _build(device_id: str, cfg: dict[str, Any], ctx: BuildContext) -> object | None:
     from .device import ThermalLoadDevice
 
+    readings = parse_bindings(device_id, "homeassistant_thermal", cfg, {Cap.TEMPERATURE_C})
+    if Cap.TEMPERATURE_C not in readings:
+        raise DeviceConfigError([(
+            f"device {device_id!r} (homeassistant_thermal) needs "
+            "'capabilities: {temperature_c: {entity: …}}'"
+        )])
     if ctx.ha_client is None:
         _log.warning(
             "Device %r (homeassistant_thermal) requires Home Assistant backend — skipping",
             device_id,
         )
         return None
-    entity_sensor = ((cfg.get("capabilities") or {}).get("temperature_c") or {}).get("entity")
-    if not entity_sensor:
-        raise DeviceConfigError([(
-            f"device {device_id!r} (homeassistant_thermal) needs "
-            "'capabilities: {temperature_c: {entity: …}}'"
-        )])
     switch_id = cfg.get("controlled_by")
     switch = ctx.device_registry.get(switch_id) if ctx.device_registry and switch_id else None
     if switch is None:
@@ -87,6 +92,6 @@ def _build(device_id: str, cfg: dict[str, Any], ctx: BuildContext) -> object | N
     return ThermalLoadDevice(
         device_id=device_id,
         client=ctx.ha_client,
-        entity_sensor=str(entity_sensor),
+        sensor=readings[Cap.TEMPERATURE_C],
         switch=switch,
     )

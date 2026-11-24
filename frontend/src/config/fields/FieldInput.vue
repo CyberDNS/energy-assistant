@@ -67,6 +67,6 @@ export default defineComponent({
   <MapEditor v-else-if="editor === 'map'" :value-spec="spec.values" :model-value="modelValue" @update:model-value="set" />
   <SchemaForm v-else-if="editor === 'object'" class="cfg-nested" :specs="spec.fields" :model-value="modelValue" :self-id="selfId" @update:model-value="set" />
   <JsonEditor v-else-if="editor === 'json'" :kind="spec.kind" :model-value="modelValue" :aria-label="ariaLabel" @update:model-value="set" />
-  <EntityPicker v-else-if="editor === 'entity'" :model-value="modelValue" :aria-label="ariaLabel" @update:model-value="set" />
+  <EntityPicker v-else-if="editor === 'entity'" :model-value="modelValue" :domains="spec.domains ?? []" :aria-label="ariaLabel" @update:model-value="set" />
   <ScalarInput v-else :spec="spec" :model-value="modelValue" :aria-label="ariaLabel" @update:model-value="set" />
 </template>

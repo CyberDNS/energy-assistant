@@ -258,7 +258,7 @@ def test_dashboard_consumers_are_added_with_learning():
     # heat pump already configured, the car charger excluded
     assert added == ["it_rack", "freezer", "nas"]
     rack = app.devices["it_rack"]
-    assert rack.type == "generic_homeassistant"
+    assert rack.type == "homeassistant_sensor"
     assert rack.bound_entity(Capability.POWER_W) == RACK
     assert rack.category is DeviceCategory.CONSUMER
     assert rack.label == "IT Rack"

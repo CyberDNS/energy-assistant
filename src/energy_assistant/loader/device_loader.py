@@ -219,7 +219,7 @@ def validate_plugins(
                               f"{cap.value!r} (bindable: {bindable})")
                 continue
             errors.extend(_spec_errors(
-                f"{where}: capabilities.{cap.value}", binding, info.binding, kind="key",
+                f"{where}: capabilities.{cap.value}", binding, info.binding_for(cap), kind="key",
             ))
         if info.settings is not None:
             errors.extend(_spec_errors(where, spec.settings, info.settings, kind="setting",
@@ -262,7 +262,7 @@ def _spec_errors(
         elif (problem := spec.check(value)) is not None:
             errors.append(f"{where}: {name} {problem}")
     for name, spec in specs.items():
-        if spec.required and values.get(name) in (None, ""):
+        if spec.required and values.get(name) in (None, "") and spec.applies(values, specs):
             errors.append(f"{where}: {kind} {name!r} is required{by_plugin}"
                           + (f" ({spec.description})" if spec.description else ""))
     return errors
