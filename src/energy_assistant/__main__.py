@@ -135,11 +135,16 @@ def _configure_logging() -> None:
 async def _run(config_path: Path, db_path: Path) -> None:
     app = Application(config_path=config_path, db_path=db_path)
     loop = asyncio.get_running_loop()
+    main_task = asyncio.current_task()
+    assert main_task is not None
 
     def _signal_handler(sig: signal.Signals) -> None:
+        # Only the main task: ``run_forever`` then stops the loops and
+        # releases every device while the device connections (MQTT bridges,
+        # the Home Assistant websocket) still run.  Cancelling all tasks here
+        # would close them first and no release could be sent.
         logging.getLogger(__name__).info("Received %s — shutting down", sig.name)
-        for task in asyncio.all_tasks(loop):
-            task.cancel()
+        main_task.cancel()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, _signal_handler, sig)

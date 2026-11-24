@@ -59,6 +59,13 @@ caches the retained template topic and the desired values are re-applied
 whenever they differ.  The template write and a chargemode set in the same
 command are still spaced ``_INTER_PUBLISH_DELAY_S`` apart because the
 chargemode handler also rewrites the template internally.
+
+Release (start, reload and stop of Energy Assistant, stale plan, stuck
+control loop): the instant charging current and SoC limit are put back to the
+values the template had before Energy Assistant first changed them (while
+the same car stays plugged in; openWB itself resets the template from the
+vehicle profile on unplug), then the chargemode is set to ``release_mode``
+(default ``pv``: PV charging; ``leave`` keeps the mode).
 """
 
 from __future__ import annotations
@@ -82,6 +89,9 @@ _log = logging.getLogger(__name__)
 _RECONNECT_DELAY_S = 30
 # Pause between successive simpleAPI set publishes — see module docstring.
 _INTER_PUBLISH_DELAY_S = 2.0
+
+#: ``release_mode`` values (``leave`` = do not change the chargemode).
+RELEASE_MODES = ("pv", "instant", "stop", "leave")
 
 
 def _to_float(value: Any) -> float | None:
@@ -325,6 +335,7 @@ class OpenWBMqttDevice:
         mode_instant: str = "instant",
         mode_pv: str = "pv",
         mode_stop: str = "stop",
+        release_mode: str = "pv",
     ) -> None:
         self._device_id = device_id
         self._bridge = bridge
@@ -337,6 +348,13 @@ class OpenWBMqttDevice:
         self._mode_pv = mode_pv
         self._mode_stop = mode_stop
         self._target_soc_pct: float | None = None
+        if release_mode not in RELEASE_MODES:
+            raise ValueError(f"release_mode must be one of {', '.join(RELEASE_MODES)}, "
+                             f"got {release_mode!r}")
+        self._release_mode = release_mode
+        # The template's instant charging values before Energy Assistant
+        # first changed them (put back by release); None = nothing changed.
+        self._instant_before: dict[str, Any] | None = None
 
     @property
     def device_id(self) -> str:
@@ -362,6 +380,9 @@ class OpenWBMqttDevice:
         power_w = _to_float(self._value("power"))
         plug_raw = self._value("plug_state")
         plugged = _to_bool(plug_raw) if plug_raw is not None else False
+        if plug_raw is not None and not plugged:
+            # openWB resets the template from the vehicle profile on unplug.
+            self._instant_before = None
         mode = _normalize_mode(self._value("chargemode"))
 
         # "available" = a car is connected and the broker is reachable; the
@@ -449,6 +470,52 @@ class OpenWBMqttDevice:
                     self._device_id, key, exc_info=True,
                 )
 
+    async def release(self) -> None:
+        """Put back the instant charging values, then set ``release_mode``."""
+        self._bridge.ensure_started()
+        if not self._bridge.connected:
+            raise ConnectionError(f"MQTT bridge {self._bridge.root_topic!r} not connected")
+        pending: list[tuple[str, str]] = []  # (key, payload)
+        if (template := self._restored_template()) is not None:
+            pending.append(("template", template))
+        mode = {"pv": self._mode_pv, "instant": self._mode_instant,
+                "stop": self._mode_stop}.get(self._release_mode)
+        if mode is not None and _normalize_mode(self._value("chargemode")) != mode:
+            pending.append(("chargemode", mode))
+        for i, (key, payload) in enumerate(pending):
+            if i:
+                await asyncio.sleep(_INTER_PUBLISH_DELAY_S)
+            if key == "template":
+                await self._bridge.publish_charge_template(self._cp_id, payload)
+            else:
+                await self._bridge.publish_set(self._cp_id, key, payload)
+        self._instant_before = None
+        if pending:
+            _log.info("OpenWBMqttDevice %r: released (%s)", self._device_id,
+                      ", ".join("instant values put back" if k == "template"
+                                else f"chargemode → {p!r}" for k, p in pending))
+
+    def _restored_template(self) -> str | None:
+        """The current template with the instant values from before Energy
+        Assistant changed them (None when there is nothing to put back)."""
+        before = self._instant_before
+        raw = self._value("charge_template")
+        if before is None or raw is None:
+            return None
+        try:
+            template = json.loads(raw)
+            instant = template["chargemode"]["instant_charging"]
+        except (ValueError, KeyError, TypeError):
+            return None
+        changed = False
+        for key, value in before.items():
+            if value is None:
+                continue
+            if instant.get(key) != value:
+                instant[key] = value
+                changed = True
+        return json.dumps(template) if changed else None
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -488,6 +555,8 @@ class OpenWBMqttDevice:
             self._min_current_a,
             min(self._max_current_a, round(value_w / (self._voltage_v * self._phases))),
         )
+        before = {"current": instant.get("current"),
+                  "limit": json.loads(json.dumps(instant.get("limit")))}
         changes: list[str] = []
         if instant.get("current") != target_a:
             instant["current"] = target_a
@@ -505,6 +574,8 @@ class OpenWBMqttDevice:
 
         if not changes:
             return []
+        if self._instant_before is None:
+            self._instant_before = before
         return [(
             "template", json.dumps(template),
             "charge template: " + ", ".join(changes),

@@ -466,9 +466,14 @@ async def test_failed_write_is_retried_next_tick() -> None:
     assert _bms_values(client)[40236] == 2289
 
 
-async def test_release_without_release_support_does_nothing() -> None:
+async def test_discharge_limit_release_lifts_the_limit() -> None:
     client = _sma_client()
     await _limit_sma(client).release()
+    assert client.written == [(40016, [100], 3)]
+
+
+async def test_release_without_a_strategy_does_nothing() -> None:
+    client = _sma_client()
     await _sma_device(client).release()
     assert client.written == []
 

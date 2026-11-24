@@ -1,6 +1,7 @@
 """Application — main orchestrator for the Energy Assistant platform.
 
-Wires all platform components together and runs three concurrent async loops:
+Wires all platform components together and runs three concurrent async loops
+(plus the fail-safe watchdog):
 
 Polling loop (``poll_interval_s``, default 30 s)
     Reads current state from every registered device, persists it to the
@@ -21,6 +22,11 @@ Control loop (``control_interval_s``, default 30 s)
     PV opportunity price, device states, elapsed dt) and calls
     ``ControlLoop.tick()``.  Each registered ``ControlContributor`` decides
     its desired setpoint; the loop sends commands and updates the ledger.
+
+Fail-safe (core/failsafe.py)
+    Every device is released to its own operation (``release()``) at start,
+    reload and stop, while the plan is stale, and when a watchdog task sees
+    no control tick for a while.
 
 Usage (CLI)::
 
@@ -82,6 +88,11 @@ from ..core.control import (
 from ..core.device_model import DeviceCategory, DeviceSpec
 from ..core.event import DeviceStateEvent, EventBus, PlanUpdatedEvent
 from ..core.execution_log import DeviceTick, ExecutionLog
+from ..core.failsafe import (
+    FailSafe,
+    default_control_stuck_after_s,
+    default_plan_stale_after_s,
+)
 from ..core.forecast import ForecastProvider
 from ..core.grid_limit import GridLimit
 from ..core.ledger import BatteryCostLedger
@@ -143,6 +154,9 @@ _log = logging.getLogger(__name__)
 
 # How often expired history rows are purged from SQLite.
 _RETENTION_INTERVAL_S = 3600.0
+# Time one device gets to go back to its own operation (fail-safe release).
+_RELEASE_TIMEOUT_S = 20.0
+
 # Shortest interval between two SoC pushes of one vehicle to its charger system.
 _SOC_PUSH_MIN_INTERVAL_S = 60.0
 
@@ -688,6 +702,7 @@ class Application:
             asyncio.create_task(self._polling_loop(), name="polling"),
             asyncio.create_task(self._planning_loop(), name="planning"),
             asyncio.create_task(self._control_task(), name="control"),
+            asyncio.create_task(self._failsafe.watch(), name="failsafe"),
         ]
         self.tasks = [*self._runtime_tasks, *self._service_tasks]
 
@@ -776,6 +791,21 @@ class Application:
         self._ledger = BatteryCostLedger()
         self._control_loop = ControlLoop(
             ledger=self._ledger, grid_limit=self._grid_limit()
+        )
+        # Releases every device when the plan goes stale or the control loop
+        # hangs (core/failsafe.py).
+        self._failsafe = FailSafe(
+            self._release_devices,
+            plan_stale_after_s=(
+                float(ctl["plan_stale_after_min"]) * 60.0
+                if ctl.get("plan_stale_after_min") is not None
+                else default_plan_stale_after_s(self._plan_interval_s)
+            ),
+            control_stuck_after_s=(
+                float(ctl["control_stuck_after_min"]) * 60.0
+                if ctl.get("control_stuck_after_min") is not None
+                else default_control_stuck_after_s(self._control_interval_s)
+            ),
         )
         for sc in self._storage_constraints:
             self._control_loop.register_contributor(StorageControlContributor(sc))
@@ -1051,20 +1081,31 @@ class Application:
         await self._close_devices()
 
     async def _release_devices(self) -> None:
-        """Hand devices that Energy Assistant drives through persistent
-        settings (e.g. the SMA's battery management) back to their own
-        operation — at start, reload and stop, so a forced charge never
-        outlives the process that commanded it.  Not in dry-run."""
+        """Hand every controlled device back to its own operation (each
+        device's ``release()``) — at start, reload and stop, and when the
+        fail-safe sees a stale plan or a stuck control loop, so a forced
+        charge, a stopped wallbox or a switched-off cooler never outlives the
+        control that commanded it.  Each device gets ``_RELEASE_TIMEOUT_S``;
+        one that hangs or fails does not keep the others from being
+        released.  Not in dry-run."""
         if getattr(self, "_dry_run", True) or not hasattr(self, "_registry"):
             return
-        for device in self._registry.all():
+
+        async def release_one(device: Any) -> None:
             release = getattr(device, "release", None)
             if release is None:
-                continue
+                return
             try:
-                await release()
+                await asyncio.wait_for(release(), _RELEASE_TIMEOUT_S)
+            except asyncio.CancelledError:
+                raise
+            except TimeoutError:
+                _log.warning("Could not release device %r: no answer within %.0f s",
+                             device.device_id, _RELEASE_TIMEOUT_S)
             except Exception as exc:  # noqa: BLE001
                 _log.warning("Could not release device %r: %s", device.device_id, exc)
+
+        await asyncio.gather(*(release_one(d) for d in self._registry.all()))
 
     async def _close_devices(self) -> None:
         """Stop the background work of devices that own some (pollers)."""
@@ -1790,6 +1831,7 @@ class Application:
 
             try:
                 await self._do_control_tick(dt_hours)
+                self._failsafe.tick_done()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -1998,7 +2040,8 @@ class Application:
                     )
             return
 
-        await self._control_loop.tick(live, self._registry)
+        command = await self._failsafe.check_plan(self._control_loop._active_plan, now)
+        await self._control_loop.tick(live, self._registry, send_commands=command)
         await self._record_execution(now, device_states)
 
         # Persist updated ledger state so it survives restarts.
@@ -2456,6 +2499,7 @@ class Application:
                 "current_price_eur_per_kwh": current_price,
                 "pv_opportunity_price_eur_per_kwh": self._pv_opportunity_price,
                 "dry_run": self._dry_run,
+                "failsafe": self._failsafe.to_dict(),
                 "devices": devices_payload,
                 "setpoints": [
                     {

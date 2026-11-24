@@ -16,6 +16,8 @@ Example config::
       type: openwb_mqtt
       chargepoint_id: 5
       root_topic: openwbbox   # default: openWB
+      release_mode: pv           # when Energy Assistant lets go: pv (default),
+                                 # instant, stop or leave
 
 The mode-encoding convention is documented in ``assets/ev.py``.
 """
@@ -26,7 +28,7 @@ from ...core.device_model import Capability as Cap
 from ...core.device_model import DeviceCategory as C
 from ...core.device_model import ParamSpec
 from ...core.plugin_registry import PluginRegistry
-from .device import OpenWBMqttDevice, get_bridge
+from .device import RELEASE_MODES, OpenWBMqttDevice, get_bridge
 
 
 def register(registry: PluginRegistry) -> None:
@@ -48,6 +50,13 @@ def register(registry: PluginRegistry) -> None:
             "mode_instant": ParamSpec(str, advanced=True, default="instant", description="openWB mode name"),
             "mode_pv": ParamSpec(str, advanced=True, default="pv", description="openWB mode name"),
             "mode_stop": ParamSpec(str, advanced=True, default="stop", description="openWB mode name"),
+            "release_mode": ParamSpec(
+                str, choices=RELEASE_MODES, default="pv", label="When released",
+                choice_labels={"pv": "PV charging", "instant": "Instant charging",
+                               "stop": "Stop", "leave": "Leave as is"},
+                description="Charge mode set when Energy Assistant stops or lets go of the "
+                            "chargepoint; the instant current and SoC limit it changed are "
+                            "put back too"),
         },
     )
 
@@ -74,4 +83,5 @@ def _build(device_id: str, cfg: dict, ctx) -> OpenWBMqttDevice:  # type: ignore[
         mode_instant=cfg.get("mode_instant", "instant"),
         mode_pv=cfg.get("mode_pv", "pv"),
         mode_stop=cfg.get("mode_stop", "stop"),
+        release_mode=cfg.get("release_mode", "pv"),
     )

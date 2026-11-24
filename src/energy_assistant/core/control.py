@@ -674,6 +674,8 @@ class ControlLoop:
         self,
         live: LiveSituation,
         registry: DeviceRegistry,
+        *,
+        send_commands: bool = True,
     ) -> None:
         """Execute one control tick.
 
@@ -693,6 +695,10 @@ class ControlLoop:
             Current energy situation snapshot.
         registry:
             Device registry used to look up and command devices.
+        send_commands:
+            False while the devices are released (``core/failsafe.py``):
+            no command is sent and no setpoint is reported, but the ledger
+            still books the measured energy.
         """
         if self._active_plan is None:
             # No plan has been computed yet (e.g. the first tick right after
@@ -711,11 +717,14 @@ class ControlLoop:
             for device_id, setpoint_w, _mode, intent in rows
         }
         self._remember(rows, live)
+        if not send_commands:
+            self.last_setpoints = {}
+            self.last_behaviours = {}
 
         for contributor in self._contributors:
             setpoint_w, intent = setpoints[contributor.device_id]
 
-            if setpoint_w is not None:
+            if setpoint_w is not None and send_commands:
                 device = registry.get(contributor.device_id)
                 if device is not None:
                     await self._send(device, contributor.device_id, setpoint_w,

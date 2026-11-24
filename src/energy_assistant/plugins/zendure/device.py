@@ -26,14 +26,25 @@ Properties whose reported value already matches are not re-sent: limit writes
 persist to the device's flash unless ``smartMode=1`` (set ``smart_mode: true``
 to enable it once on start-up, which Zendure recommends for frequent control).
 
+Release (start, reload and stop of Energy Assistant, stale plan, stuck
+control loop): both limits are cleared (``inputLimit=0``, ``outputLimit=0``,
+so no forced charge or discharge outlives the control) and the device is put
+back into its own mode — ``autoModel`` = ``release_auto_model`` from the
+config, else the ``autoModel`` the device reported before Energy Assistant
+first switched it to manual (remembered in ``state_path``, so it survives a
+crash and a restart).  Without either the device stays idle in manual mode
+until it is commanded again or switched back in the Zendure app.
+
 Sign convention: ``power_w > 0`` charging, ``< 0`` discharging.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 from ...core.change_gate import ChangeGate
 from ...core.device_model import DeviceCategory
@@ -71,6 +82,8 @@ class ZendureDevice:
         cycle_life: int | None = None,
         smart_mode: bool = False,
         stale_after_s: float = 300.0,
+        release_auto_model: int | None = None,
+        state_path: Path | None = None,
     ) -> None:
         self._device_id = device_id
         self._bridge = bridge
@@ -88,6 +101,9 @@ class ZendureDevice:
         self._smart_mode_sent = False
         self._stale_after_s = stale_after_s
         self._log_gate = ChangeGate()
+        self._release_auto_model = release_auto_model
+        self._state_path = state_path
+        self._own_auto_model = self._load_own_auto_model()
         bridge.register(product_key, device_key)
 
     # ------------------------------------------------------------------
@@ -208,6 +224,7 @@ class ZendureDevice:
             )
 
     async def _set_power(self, power_w: float) -> None:
+        self._remember_own_mode()
         writes: list[tuple[str, int]] = []
         if self._smart_mode and not self._smart_mode_sent:
             writes.append(("smartMode", 1))
@@ -245,3 +262,65 @@ class ZendureDevice:
             await self._bridge.write_properties(self._pk, self._dk, {name: value})
             sent.append(name)
         return sent
+
+    # ------------------------------------------------------------------
+    # Release
+    # ------------------------------------------------------------------
+
+    @property
+    def release_auto_model(self) -> int | None:
+        """The mode ``release()`` returns to (None = unknown: idle)."""
+        if self._release_auto_model is not None:
+            return self._release_auto_model
+        return self._own_auto_model
+
+    async def release(self) -> None:
+        """Clear both limits and put the device back into its own mode."""
+        self._bridge.ensure_started()
+        if not self._bridge.connected:
+            raise ConnectionError("Zendure MQTT bridge not connected")
+        target = self.release_auto_model
+        writes = [("inputLimit", 0), ("outputLimit", 0)]
+        if target is not None:
+            writes.append(("autoModel", target))
+        sent = await self._write(writes)
+        self._log_gate.changed("power", None)  # the next command is logged again
+        if target is None:
+            if self._log_gate.changed("release_unknown", True):
+                _log.warning(
+                    "ZendureDevice %r: released to idle — its own mode is not known; set "
+                    "'release_auto_model' to return it to its own operation", self._device_id,
+                )
+        elif sent:
+            _log.info("ZendureDevice %r: released to its own operation (autoModel=%d)",
+                      self._device_id, target)
+
+    def _remember_own_mode(self) -> None:
+        """Before the first switch to manual: remember the device's own mode."""
+        if self._own_auto_model is not None:
+            return
+        current = self._prop("autoModel", time.monotonic())
+        if current is None or int(current) == 0:
+            return
+        self._own_auto_model = int(current)
+        _log.info("ZendureDevice %r: own mode is autoModel=%d (restored on release)",
+                  self._device_id, self._own_auto_model)
+        if self._state_path is None:
+            return
+        try:
+            self._state_path.parent.mkdir(parents=True, exist_ok=True)
+            self._state_path.write_text(json.dumps({"own_auto_model": self._own_auto_model}))
+        except OSError as exc:
+            _log.warning("ZendureDevice %r: could not save its own mode: %s",
+                         self._device_id, exc)
+
+    def _load_own_auto_model(self) -> int | None:
+        if self._state_path is None or not self._state_path.exists():
+            return None
+        try:
+            value = json.loads(self._state_path.read_text()).get("own_auto_model")
+        except (OSError, ValueError, AttributeError) as exc:
+            _log.warning("ZendureDevice %r: could not read its saved own mode: %s",
+                         self._device_id, exc)
+            return None
+        return int(value) if isinstance(value, int) and value != 0 else None
