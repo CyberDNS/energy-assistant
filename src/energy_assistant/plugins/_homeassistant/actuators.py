@@ -220,8 +220,7 @@ class NumberActuator(Actuator):
         if step and step > 0:
             base = lo or 0.0
             value = base + round((value - base) / step) * step
-            value = round(value, 6)
-        return value
+        return round(value, 6)
 
     def _current(self, state: Any) -> float | None:
         try:
