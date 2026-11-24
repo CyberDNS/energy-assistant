@@ -939,6 +939,9 @@ class Application:
             await self._mqtt_publisher.stop()
         if hasattr(self, "_storage"):
             await self._storage.stop()
+        ha_client = getattr(getattr(self, "_build_ctx", None), "ha_client", None)
+        if ha_client is not None:
+            await ha_client.close()
         _log.info("Energy Assistant stopped")
 
     async def run_forever(self) -> None:

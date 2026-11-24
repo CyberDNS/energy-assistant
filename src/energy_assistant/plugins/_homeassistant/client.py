@@ -1,55 +1,39 @@
-"""Home Assistant REST API client."""
+"""Home Assistant client: websocket state cache, REST for the rest.
+
+Entity reads (``get_entity_state``, ``get_entity``, ``list_entities``) and
+service calls go over one persistent websocket (``websocket.HAWebSocket``):
+the states of all entities are kept in memory and updated as Home Assistant
+reports changes, so a control tick reads no entity over the network.  While
+the websocket is down they fall back to the REST API.  History, statistics
+and service calls that return data stay on REST (large, rare requests).
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Protocol, runtime_checkable
+import asyncio
+import logging
+import ssl
+from datetime import datetime
+from typing import Any, Protocol, Self, runtime_checkable
 
 import httpx
+
+from .client_types import EntityState, parse_ts
+from .websocket import HAWebSocket
+
+__all__ = ["EntityState", "HAClient", "HAClientProtocol"]
+
+_log = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT = 10.0
 # Long-term statistics queries span months of hourly rows — far slower than
 # a state read.
 _STATISTICS_TIMEOUT = 120.0
+#: How long the first reads wait for the websocket's initial sync before they
+#: use REST (startup: the first poll runs while the connection is set up).
+_STARTUP_WAIT_S = 5.0
 
-
-def _parse_ts(value: Any) -> datetime | None:
-    """Parse a timestamp as HA returns it: ISO string or epoch (s or ms)."""
-    if isinstance(value, str):
-        try:
-            ts = datetime.fromisoformat(value)
-        except ValueError:
-            return None
-        return ts.astimezone(timezone.utc) if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
-    if isinstance(value, (int, float)):
-        seconds = value / 1000.0 if value > 1e11 else float(value)
-        return datetime.fromtimestamp(seconds, tz=timezone.utc)
-    return None
-
-
-@dataclass(frozen=True)
-class EntityState:
-    """One entity's state as the REST API returns it."""
-
-    state: str | None
-    attributes: dict[str, Any]
-    last_changed: datetime | None
-    last_updated: datetime | None
-    last_reported: datetime | None
-    """When the integration last reported a value, even an unchanged one
-    (HA 2024.3+).  Falls back to ``last_updated`` on older versions."""
-
-    @classmethod
-    def from_api(cls, data: dict[str, Any]) -> EntityState:
-        updated = _parse_ts(data.get("last_updated"))
-        return cls(
-            state=data.get("state"),
-            attributes=dict(data.get("attributes") or {}),
-            last_changed=_parse_ts(data.get("last_changed")),
-            last_updated=updated,
-            last_reported=_parse_ts(data.get("last_reported")) or updated,
-        )
+_parse_ts = parse_ts  # kept for callers of the old private name
 
 
 @runtime_checkable
@@ -97,15 +81,92 @@ class HAClient:
             },
             timeout=timeout,
         )
+        self._base_url = url.rstrip("/")
+        self._token = token
+        self._timeout = timeout
+        self._ws: HAWebSocket | None = None
+        self._startup_deadline: float | None = None
+
+    # ------------------------------------------------------------------
+    # Websocket
+    # ------------------------------------------------------------------
+
+    def _ws_url(self) -> str:
+        return "ws" + self._base_url[len("http"):] + "/api/websocket"
+
+    def _ssl_context(self) -> ssl.SSLContext | None:
+        if not self._base_url.startswith("https"):
+            return None
+        # Same CA bundle httpx uses, so a slim image without system CAs
+        # still verifies the certificate.
+        import certifi
+
+        return ssl.create_default_context(cafile=certifi.where())
+
+    def _websocket(self) -> HAWebSocket:
+        """The websocket, started on first use (needs a running loop)."""
+        if self._ws is None:
+            self._ws = HAWebSocket(
+                self._ws_url(), self._token,
+                ssl_context=self._ssl_context(), timeout=self._timeout,
+            )
+            self._startup_deadline = asyncio.get_running_loop().time() + _STARTUP_WAIT_S
+        self._ws.start()
+        return self._ws
+
+    async def _cache(self) -> HAWebSocket | None:
+        """The websocket when its state cache is in sync, else ``None`` (use REST).
+
+        Until the first sync (at most ``_STARTUP_WAIT_S`` after the first
+        use) reads wait for it instead of falling back right away.
+        """
+        ws = self._websocket()
+        if ws.ready.is_set():
+            return ws
+        assert self._startup_deadline is not None
+        remaining = self._startup_deadline - asyncio.get_running_loop().time()
+        if remaining > 0:
+            try:
+                await asyncio.wait_for(ws.ready.wait(), remaining)
+            except TimeoutError:
+                pass
+        return ws if ws.ready.is_set() else None
+
+    async def start(self) -> None:
+        """Connect the websocket now (optional: the first read does it too)."""
+        await self._cache()
+
+    @property
+    def cache_ready(self) -> bool:
+        """The websocket state cache is in sync (reads need no request)."""
+        return self._ws is not None and self._ws.ready.is_set()
+
+    # ------------------------------------------------------------------
+    # Entities
+    # ------------------------------------------------------------------
 
     async def get_entity_state(self, entity_id: str) -> Any:
-        """Return the raw state string for *entity_id*, or ``None`` on error."""
+        """Return the raw state string for *entity_id* (``None`` if HA does not know it)."""
+        cache = await self._cache()
+        if cache is not None:
+            entity = cache.get(entity_id)
+            return entity.state if entity is not None else None
         resp = await self._client.get(f"/api/states/{entity_id}")
         resp.raise_for_status()
         return resp.json().get("state")
 
     async def list_entities(self) -> list[dict[str, str]]:
         """Every entity as ``{entity_id, name}``, sorted by id."""
+        cache = await self._cache()
+        if cache is not None:
+            return sorted(
+                (
+                    {"entity_id": eid,
+                     "name": str(entity.attributes.get("friendly_name") or "")}
+                    for eid, entity in cache.entities().items()
+                ),
+                key=lambda e: e["entity_id"],
+            )
         resp = await self._client.get("/api/states")
         resp.raise_for_status()
         return sorted(
@@ -122,6 +183,9 @@ class HAClient:
 
     async def get_entity(self, entity_id: str) -> EntityState | None:
         """Return state, attributes and timestamps of *entity_id* (None if unknown)."""
+        cache = await self._cache()
+        if cache is not None:
+            return cache.get(entity_id)
         resp = await self._client.get(f"/api/states/{entity_id}")
         if resp.status_code == 404:
             return None
@@ -131,7 +195,15 @@ class HAClient:
     async def call_service(
         self, domain: str, service: str, data: dict[str, Any]
     ) -> None:
-        """POST to ``/api/services/{domain}/{service}`` with *data* as JSON body."""
+        """Call a service: over the websocket when it is connected, else REST.
+
+        Raises when Home Assistant reports an error (or the connection drops
+        mid-call); callers retry on their next control tick.
+        """
+        ws = self._websocket()
+        if ws.connected:
+            await ws.call_service(domain, service, data)
+            return
         resp = await self._client.post(f"/api/services/{domain}/{service}", json=data)
         resp.raise_for_status()
 
@@ -259,27 +331,20 @@ class HAClient:
     async def get_energy_prefs(self) -> dict[str, Any]:
         """Return the Energy dashboard configuration (``energy/get_prefs``).
 
-        Only available over the WebSocket API; opens a short-lived connection
-        with the same token.
+        Only available over the WebSocket API: uses the open connection, or a
+        short-lived one while it is down.
         """
+        ws = self._websocket()
+        if ws.connected:
+            return await ws.command({"type": "energy/get_prefs"}) or {}
+
         import json
 
         import websockets
 
-        base = str(self._client.base_url).rstrip("/")
-        ws_url = "ws" + base[len("http"):] + "/api/websocket"
-        token = self._client.headers["Authorization"].removeprefix("Bearer ")
-        ssl_ctx = None
-        if ws_url.startswith("wss"):
-            # Same CA bundle httpx uses, so a slim image without system CAs
-            # still verifies the certificate.
-            import ssl
-
-            import certifi
-
-            ssl_ctx = ssl.create_default_context(cafile=certifi.where())
+        token = self._token
         async with websockets.connect(
-            ws_url, max_size=None, open_timeout=_DEFAULT_TIMEOUT, ssl=ssl_ctx
+            self._ws_url(), max_size=None, open_timeout=self._timeout, ssl=self._ssl_context()
         ) as ws:
             await ws.recv()  # auth_required
             await ws.send(json.dumps({"type": "auth", "access_token": token}))
@@ -296,10 +361,13 @@ class HAClient:
         return msg.get("result") or {}
 
     async def close(self) -> None:
+        if self._ws is not None:
+            await self._ws.close()
+            self._ws = None
         await self._client.aclose()
 
-    async def __aenter__(self) -> "HAClient":
+    async def __aenter__(self) -> Self:
         return self
 
-    async def __aexit__(self, *_: Any) -> None:
+    async def __aexit__(self, *_: object) -> None:
         await self.close()
