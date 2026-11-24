@@ -16,6 +16,7 @@ from energy_assistant.core.device_model import DeviceConfigError, parse_devices
 from energy_assistant.core.grid_limit import GridLimit
 from energy_assistant.core.ledger import BatteryCostLedger
 from energy_assistant.core.models import (
+    Behaviour,
     ControlIntent,
     DeviceState,
     EnergyPlan,
@@ -219,13 +220,20 @@ def test_real_ev_contributor_curtailment() -> None:
         asset_id="car", device_id="wb", label="Car", capacity_kwh=60.0,
         max_charge_kw=11.0, min_charge_kw=4.14,
     ))
-    live = LiveSituation(timestamp=_NOW, grid_power_w=0.0, dt_hours=0.0)
+    live = LiveSituation(timestamp=_NOW, grid_power_w=-2000.0, dt_hours=0.0, device_states={
+        "wb": DeviceState(device_id="wb", power_w=0.0, soc_pct=40.0, available=True)})
+    ev.set_force_charge(80.0)                       # charge at full power
+    assert ev.desired_setpoint_w(None, live) == 11_000.0
     assert ev.curtail_setpoint_w(11_000.0, 3000.0, live) == pytest.approx(8000.0)
     assert ev.curtail_setpoint_w(11_000.0, 8000.0, live) == 0.0
-    assert ev.curtail_setpoint_w(1.0, 5000.0, live) == 1.0          # PV mode: untouched
-    assert ev.expected_draw_w(1.0, live) is None
+    assert ev.behaviour_for(0.0, None, live) is Behaviour.STOP
     assert ev.expected_draw_w(0.0, live) == 0.0
     assert ev.expected_draw_w(7000.0, live) == 7000.0
+    ev.set_force_charge(None)                       # no goal: PV surplus
+    assert ev.desired_setpoint_w(None, live) == 2000.0   # the export it could take
+    assert ev.behaviour_for(2000.0, None, live) is Behaviour.ABSORB_SURPLUS
+    assert ev.curtail_setpoint_w(2000.0, 5000.0, live) == 2000.0   # PV mode: untouched
+    assert ev.expected_draw_w(2000.0, live) is None
 
 
 # ── Planner ───────────────────────────────────────────────────────────────────

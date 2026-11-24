@@ -15,15 +15,19 @@ Example config::
       - soc_pct: 100  # 80 → 100 %: ~1.8 × longer per kWh
         efficiency: 0.55
 
-Charger mode encoding
----------------------
-``EvChargerContributor.desired_setpoint_w`` returns a sentinel float that
-``OpenWBDevice.send_command`` interprets as an openWB charging mode:
+Charger behaviour
+-----------------
+``EvChargerContributor.desired_setpoint_w`` returns the charging power and
+remembers what it is for (``behaviour_for``, sent with the command as
+``DeviceCommand.behaviour``):
 
-  value > 500 W  → "Instant Charging" (charges at max_charge_kw)
-  0 < value ≤ 500 W  → "PV Charging"  (openWB manages surplus & phases)
-  value == 0.0   → "Stop"
-  None           → no command sent (car not connected, or chargepoint disabled)
+  ``CHARGE``          charge at the returned power (instant charging)
+  ``ABSORB_SURPLUS``  charge from PV surplus only; the returned power is EA's
+                      estimate of the surplus (the charger's power plus the
+                      export at the grid meter) for chargers EA drives by
+                      power; a charger with a PV mode follows the surplus itself
+  ``STOP``            don't charge (0 W)
+  ``None``            no command (car not connected, or chargepoint disabled)
 
 A disabled chargepoint always returns None: the assistant is fully hands-off
 so the wallbox (or the user via the openWB UI) controls charging itself.
@@ -36,9 +40,6 @@ EVs *without* a planned charging slot yield by commanding Stop instead of
 opportunistic PV mode — otherwise both wallboxes sit in PV mode and openWB
 splits the surplus by its own priority rules, overriding the plan.
 
-This encoding stays inside the existing ``ControlContributor`` protocol
-(``desired_setpoint_w`` returns ``float | None``) without changing the
-control loop.
 """
 
 from __future__ import annotations
@@ -48,16 +49,15 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
+from ..core.models import Behaviour
+
 if TYPE_CHECKING:
     from ..core.control import ControlIntent, LiveSituation
 
 _log = logging.getLogger(__name__)
 
-# Sentinel values sent by desired_setpoint_w and interpreted by OpenWBDevice.
-_INSTANT_SENTINEL_W = 11_000.0   # > 500 W → Instant Charging
-_PV_SENTINEL_W = 1.0             # 0 < x ≤ 500 W → PV Charging
-_STOP_W = 0.0                    # == 0 → Stop
-_MODE_THRESHOLD_W = 500.0        # boundary between PV and Instant
+_STOP = Behaviour.STOP
+_PV = Behaviour.ABSORB_SURPLUS
 
 # Default safety buffer applied to the feasibility check in
 # build_goal_from_parts: require 20% more time than the bare mathematical
@@ -339,9 +339,14 @@ class EvChargerContributor:
         self._disabled: bool = False
         self._force_target_soc: float | None = None
         self._guest_mode: str | None = None
-        # (setpoint, reason) last logged — only log on change so the normal
+        # (behaviour, reason) last logged — only log on change so the normal
         # 30 s control tick doesn't spam the log while nothing changed.
-        self._last_logged: tuple[float | None, str] | None = None
+        self._last_logged: tuple[Behaviour | float | None, str] | None = None
+        # What the last setpoint is for (see behaviour_for).
+        self._behaviour: Behaviour | None = None
+        # EA's estimate of the PV surplus this charger could take (W), set
+        # at the start of each desired_setpoint_w.
+        self._surplus_w = 0.0
 
     @property
     def device_id(self) -> str:
@@ -386,19 +391,27 @@ class EvChargerContributor:
 
     def _decide(
         self,
-        value: float | None,
+        value: float | Behaviour | None,
         reason: str,
         *,
         current_soc: float | None = None,
         goal: "EvChargingGoal | None" = None,
     ) -> float | None:
-        """Return *value*, logging a line whenever (value, reason) changes.
+        """Turn a decision into the setpoint and remember its behaviour.
 
-        Every decision path in ``desired_setpoint_w`` routes through here so
-        the log carries a full audit trail of mode changes — which branch
-        fired, and why — without spamming on every 30 s control tick while
-        nothing actually changed.
+        *value*: a power (W) to charge at, ``STOP``, ``ABSORB_SURPLUS`` (the
+        setpoint is then the surplus estimate) or ``None`` (no command).
+        Logs a line whenever (decision, reason) changes, so the log carries
+        a full audit trail of mode changes without spamming on every tick.
         """
+        if value is None:
+            self._behaviour, setpoint = None, None
+        elif value is Behaviour.STOP:
+            self._behaviour, setpoint = Behaviour.STOP, 0.0
+        elif value is Behaviour.ABSORB_SURPLUS:
+            self._behaviour, setpoint = Behaviour.ABSORB_SURPLUS, round(self._surplus_w, 1)
+        else:
+            self._behaviour, setpoint = Behaviour.CHARGE, float(value)
         key = (value, reason)
         if key != self._last_logged:
             self._last_logged = key
@@ -411,18 +424,31 @@ class EvChargerContributor:
                     f" infeasible={goal.infeasible} overdue={goal.overdue}]"
                 )
             soc_str = f"{current_soc:.0f}%" if current_soc is not None else "?"
+            what = (self._behaviour.value if self._behaviour is not Behaviour.CHARGE
+                    else f"charge {setpoint:.0f} W") if self._behaviour else "none"
             _log.info(
-                "EV %r (%s): soc=%s → setpoint=%s — %s%s",
-                self._asset.asset_id, self.device_id, soc_str, value, reason, detail,
+                "EV %r (%s): soc=%s → %s — %s%s",
+                self._asset.asset_id, self.device_id, soc_str, what, reason, detail,
             )
-        return value
+        return setpoint
+
+    def _estimate_surplus_w(self, live: LiveSituation) -> float:
+        """PV surplus this charger could take: its own power plus the export
+        at the grid meter (minus any import), within its power range."""
+        state = live.device_states.get(self.device_id)
+        own_w = max(0.0, (state.power_w or 0.0) if state is not None else 0.0)
+        grid_w = (live.default_zone_grid_power_w
+                  if live.default_zone_grid_power_w is not None else live.grid_power_w)
+        return max(0.0, min(self._asset.max_charge_kw * 1000.0, own_w - grid_w))
 
     def desired_setpoint_w(
         self,
         intent: "ControlIntent | None",
         live: "LiveSituation",
     ) -> float | None:
-        """Return a mode-encoding sentinel (see module docstring)."""
+        """Return the charging power; ``behaviour_for`` tells what it is for
+        (see module docstring)."""
+        self._surplus_w = self._estimate_surplus_w(live)
         if self._disabled:
             # Chargepoint disabled — hands off entirely, not even Stop.
             # The user hands control to the wallbox itself (manual mode
@@ -434,7 +460,7 @@ class EvChargerContributor:
             return self._decide(None, "not connected")
 
         if self._guest_mode == "off":
-            return self._decide(_STOP_W, "guest car — guest_mode off")
+            return self._decide(_STOP, "guest car — guest_mode off")
         if self._guest_mode == "instant":
             return self._decide(
                 self._asset.max_charge_kw * 1000.0, "guest car — guest_mode instant",
@@ -449,7 +475,7 @@ class EvChargerContributor:
         if self._force_target_soc is not None:
             if current_soc >= self._force_target_soc:
                 return self._decide(
-                    _STOP_W, f"force-charge target {self._force_target_soc:.0f}% reached",
+                    _STOP, f"force-charge target {self._force_target_soc:.0f}% reached",
                     current_soc=current_soc,
                 )
             return self._decide(
@@ -461,7 +487,7 @@ class EvChargerContributor:
         # Target fully met → Stop
         if goal is not None and current_soc >= goal.target_soc_pct:
             return self._decide(
-                _STOP_W, f"target {goal.target_soc_pct:.0f}% reached",
+                _STOP, f"target {goal.target_soc_pct:.0f}% reached",
                 current_soc=current_soc, goal=goal,
             )
 
@@ -482,7 +508,7 @@ class EvChargerContributor:
         # At charge limit but phase2 window not yet open → hold (Stop)
         if goal is not None and current_soc >= goal.charge_limit_soc_pct:
             return self._decide(
-                _STOP_W,
+                _STOP,
                 f"at charge_limit {goal.charge_limit_soc_pct:.0f}% — holding until "
                 f"phase2 opens at {goal.phase2_start_time.isoformat()}",
                 current_soc=current_soc, goal=goal,
@@ -497,10 +523,10 @@ class EvChargerContributor:
         if goal is None:
             if others_hold_pv:
                 return self._decide(
-                    _STOP_W, "no goal — yielding PV to another EV", current_soc=current_soc,
+                    _STOP, "no goal — yielding PV to another EV", current_soc=current_soc,
                 )
             return self._decide(
-                _PV_SENTINEL_W, "no goal — opportunistic PV", current_soc=current_soc,
+                _PV, "no goal — opportunistic PV", current_soc=current_soc,
             )
 
         # Optimizer planned a charging step
@@ -511,7 +537,7 @@ class EvChargerContributor:
                 # PV mode lets openWB track the real live surplus.  Instant
                 # charging would pull the shortfall from the grid.
                 return self._decide(
-                    _PV_SENTINEL_W, "plan: PV-sourced slot",
+                    _PV, "plan: PV-sourced slot",
                     current_soc=current_soc, goal=goal,
                 )
             planned = intent.power_kw
@@ -524,34 +550,47 @@ class EvChargerContributor:
         # Idle or no intent → opportunistic PV charging (unless yielding)
         if others_hold_pv:
             return self._decide(
-                _STOP_W, "idle — yielding PV to another EV",
+                _STOP, "idle — yielding PV to another EV",
                 current_soc=current_soc, goal=goal,
             )
         return self._decide(
-            _PV_SENTINEL_W, "idle — opportunistic PV",
+            _PV, "idle — opportunistic PV",
             current_soc=current_soc, goal=goal,
         )
+
+    def behaviour_for(
+        self,
+        setpoint_w: float | None,
+        intent: ControlIntent | None,
+        live: LiveSituation,
+        *,
+        curtailed: bool = False,
+    ) -> Behaviour | None:
+        """What the last setpoint is for (``STOP`` once curtailed to 0)."""
+        if setpoint_w is None or self._behaviour is None:
+            return None
+        if self._behaviour is Behaviour.ABSORB_SURPLUS:
+            return Behaviour.ABSORB_SURPLUS
+        return Behaviour.CHARGE if setpoint_w > 0.0 else Behaviour.STOP
 
     # Grid limit participation (see core/grid_limit.py).
 
     def expected_draw_w(self, setpoint_w: float, live: "LiveSituation") -> float | None:
-        """Instant charging draws the commanded power, Stop draws nothing;
-        in PV mode the wallbox follows the surplus itself (unknown)."""
-        if setpoint_w > _MODE_THRESHOLD_W:
-            return setpoint_w
-        if setpoint_w <= 0.0:
-            return 0.0
-        return None
+        """Charging draws the commanded power, Stop draws nothing; a charger
+        following the PV surplus decides itself (unknown)."""
+        if self._behaviour is Behaviour.ABSORB_SURPLUS:
+            return None
+        return max(0.0, setpoint_w)
 
     def curtail_setpoint_w(
         self, setpoint_w: float, reduce_by_w: float, live: "LiveSituation"
     ) -> float:
-        """Lower instant charging; below the minimum charge power, Stop."""
-        if setpoint_w <= _MODE_THRESHOLD_W:
+        """Lower the charging power; below the minimum charge power, Stop."""
+        if self._behaviour is not Behaviour.CHARGE or setpoint_w <= 0.0:
             return setpoint_w
         new_w = setpoint_w - reduce_by_w
-        min_w = max(self._asset.min_charge_kw * 1000.0, _MODE_THRESHOLD_W + 1.0)
-        return new_w if new_w >= min_w else _STOP_W
+        min_w = max(self._asset.min_charge_kw * 1000.0, 1.0)
+        return new_w if new_w >= min_w else 0.0
 
     def charge_price_eur_per_kwh(
         self,

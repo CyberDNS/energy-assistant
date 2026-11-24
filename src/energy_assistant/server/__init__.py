@@ -131,7 +131,7 @@ from ..plugins._homeassistant.client import HAClient
 from ..plugins.milp_highs import MilpHigsOptimizer
 from ..plugins.mqtt_publisher import (
     EvMqttPublisher,
-    charging_mode_from_setpoint,
+    charging_mode_from_behaviour,
     select_discovery_devices,
 )
 from ..storage.sqlite import HISTORY_5M_RETENTION, SqliteStorageBackend
@@ -1818,6 +1818,7 @@ class Application:
         now = datetime.now(timezone.utc)
         plan = self._display_plan or self._control_loop._active_plan
         setpoints = self._control_loop.last_setpoints
+        behaviours = self._control_loop.last_behaviours
         states: dict[str, tuple[str | None, str | None]] = {}
         for asset in self._ev_assets:
             goal = next((g for g in self._last_ev_goals if g.asset_id == asset.asset_id), None)
@@ -1828,8 +1829,8 @@ class Application:
             )
             # No tick has computed setpoints yet (no plan) → leave mode as is.
             charging_mode = (
-                charging_mode_from_setpoint(
-                    setpoints[asset.device_id],
+                charging_mode_from_behaviour(
+                    behaviours.get(asset.device_id),
                     disabled=asset.asset_id in self._disabled_chargepoints,
                 )
                 if asset.device_id in setpoints
@@ -2423,6 +2424,9 @@ class Application:
                 ),
             )
 
+            setpoint_rows = self._control_loop._compute_setpoints(live)
+            behaviours = self._control_loop.behaviours(setpoint_rows, live)
+
             devices_payload = []
             for s in device_states_map.values():
                 spec = self._cfg.devices.get(s.device_id)
@@ -2457,6 +2461,7 @@ class Application:
                     {
                         "device_id": did,
                         "setpoint_w": sp,
+                        "behaviour": b.value if (b := behaviours.get(did)) is not None else None,
                         "mode": mode,
                         "grid_allowed": intent.grid_allowed if intent is not None else None,
                         "export_allowed": intent.export_allowed if intent is not None else None,
@@ -2466,7 +2471,7 @@ class Application:
                             else None
                         ),
                     }
-                    for did, sp, mode, intent in self._control_loop._compute_setpoints(live)
+                    for did, sp, mode, intent in setpoint_rows
                 ],
                 "ledger": [
                     {

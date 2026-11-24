@@ -43,6 +43,56 @@ class DeviceState(BaseModel):
     """Plugin-specific extras (e.g. ``import_w``, ``export_w`` for bidirectional meters)."""
 
 
+class Behaviour(str, Enum):
+    """What the control loop wants a battery or charger to do this tick.
+
+    Sent with every ``set_power_w`` command (``DeviceCommand.behaviour``).
+    A device under *setpoint control* only uses the watt value (EA computes
+    it every tick, also for surplus following); a device under *mode
+    control* switches to the matching mode and lets its own logic follow
+    surplus and load.
+
+    ``CHARGE``            charge at the commanded power (W > 0)
+    ``DISCHARGE``         discharge at the commanded power (W < 0)
+    ``HOLD``              neither charge nor discharge (W = 0)
+    ``ABSORB_SURPLUS``    charge from PV surplus only, never discharge (W = EA's
+                          estimate of the surplus)
+    ``SELF_CONSUMPTION``  charge surplus and cover the load (W = EA's
+                          load-following setpoint)
+    ``STOP``              a charger does not charge (W = 0)
+    """
+
+    CHARGE = "charge"
+    DISCHARGE = "discharge"
+    HOLD = "hold"
+    ABSORB_SURPLUS = "absorb_surplus"
+    SELF_CONSUMPTION = "self_consumption"
+    STOP = "stop"
+
+
+def resolve_behaviour(
+    behaviour: Behaviour | None, value_w: float | None, supported: frozenset[Behaviour] | None,
+) -> Behaviour | None:
+    """*behaviour*, or the closest one a device supports.
+
+    *supported* ``None``: the device takes any behaviour.  Otherwise an
+    unsupported behaviour falls back to the forced one its watt value means
+    (> 0 charge, < 0 discharge, 0 hold, then stop) — EA then does the surplus
+    or load following itself through the watt value.  ``None`` when nothing
+    fits (the device gets the watt value only).
+    """
+    if behaviour is None or supported is None or behaviour in supported:
+        return behaviour
+    value = value_w or 0.0
+    if value > 0:
+        candidates = (Behaviour.CHARGE,)
+    elif value < 0:
+        candidates = (Behaviour.DISCHARGE,)
+    else:
+        candidates = (Behaviour.HOLD, Behaviour.STOP)
+    return next((b for b in candidates if b in supported), None)
+
+
 class DeviceCommand(BaseModel):
     """A command sent to a device via ``Device.send_command``."""
 
@@ -50,6 +100,24 @@ class DeviceCommand(BaseModel):
     command: str
     """E.g. ``"turn_on"``, ``"turn_off"``, ``"set_power_w"``."""
     value: Any = None
+    behaviour: Behaviour | None = None
+    """``set_power_w`` of a battery or charger: what *value* is for (see
+    ``Behaviour``).  ``None`` for other devices (switches, thermal loads)."""
+
+
+def charger_behaviour(command: DeviceCommand) -> Behaviour:
+    """``CHARGE``, ``ABSORB_SURPLUS`` or ``STOP`` for a charger's ``set_power_w``.
+
+    A command without a behaviour (sent by something other than the control
+    loop) charges at its value when > 0 and stops otherwise.
+    """
+    b = command.behaviour
+    if b in (Behaviour.CHARGE, Behaviour.ABSORB_SURPLUS):
+        return b
+    if b is None:
+        value = float(command.value) if command.value is not None else 0.0
+        return Behaviour.CHARGE if value > 0.0 else Behaviour.STOP
+    return Behaviour.STOP
 
 
 class StorageConstraints(BaseModel):

@@ -5,7 +5,7 @@ Registers the ``openwb_homeassistant`` device type which:
 - Writes the charging mode (PV Charging / Instant Charging / Stop) via
   a HA ``select`` entity.
 
-The mode-encoding convention is documented in ``assets/ev.py``.
+The behaviours are documented in ``assets/ev.py``.
 """
 
 from __future__ import annotations

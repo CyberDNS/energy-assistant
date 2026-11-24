@@ -1,18 +1,18 @@
 """OpenWBDevice — reads openWB chargepoint state from HA, writes charging mode.
 
 Charging mode is controlled by calling the HA ``select.select_option`` service
-on the ``entity_mode`` entity.  The mode is determined by interpreting the
-``set_power_w`` command value as a sentinel:
+on the ``entity_mode`` entity, from the behaviour of the ``set_power_w``
+command (see ``assets/ev.py``):
 
-  value > 500 W  → mode_instant  ("Instant Charging")
-  0 < value ≤ 500 W  → mode_pv    ("PV Charging")
-  value == 0.0   → mode_stop      ("Stop")
+  charge          → mode_instant  ("Instant Charging") at the commanded power
+  absorb_surplus  → mode_pv       ("PV Charging")
+  stop            → mode_stop     ("Stop")
 
 When ``entity_current_instant`` is configured, the target charging current
 (in A) is written to that HA number entity whenever instant mode is activated.
 The watt value is converted using: amps = round(power_w / (voltage_v * phases)).
 
-See ``assets/ev.py`` for the full encoding contract.
+See ``assets/ev.py`` for the behaviours.
 """
 
 from __future__ import annotations
@@ -21,12 +21,11 @@ import logging
 from typing import Any
 
 from ...core.device_model import DeviceCategory
-from ...core.models import DeviceCommand, DeviceState
+from ...core.models import Behaviour, DeviceCommand, DeviceState, charger_behaviour
 from .._homeassistant.client import HAClientProtocol
 
 _log = logging.getLogger(__name__)
 
-_MODE_THRESHOLD_W = 500.0
 
 
 def _to_float(value: Any) -> float | None:
@@ -145,17 +144,15 @@ class OpenWBDevice:
             return DeviceState(device_id=self._device_id, available=False)
 
     async def send_command(self, command: DeviceCommand) -> None:
-        """Translate a ``set_power_w`` sentinel into an openWB mode selection."""
+        """Translate a ``set_power_w`` command's behaviour into an openWB mode selection."""
         if command.command != "set_power_w":
             return
 
         value = float(command.value) if command.value is not None else 0.0
-        if value > _MODE_THRESHOLD_W:
-            mode = self._mode_instant
-        elif value > 0.0:
-            mode = self._mode_pv
-        else:
-            mode = self._mode_stop
+        mode = {
+            Behaviour.CHARGE: self._mode_instant,
+            Behaviour.ABSORB_SURPLUS: self._mode_pv,
+        }.get(charger_behaviour(command), self._mode_stop)
 
         # Reconcile: read the current mode first and only write on mismatch.
         # If the read fails, fall through and write unconditionally.
