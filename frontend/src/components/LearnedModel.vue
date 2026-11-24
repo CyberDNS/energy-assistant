@@ -68,6 +68,7 @@ export default defineComponent({
     const isTemp = computed(() => model.value?.mode === 'temperature')
     const isThermal = computed(() => item.value?.kind === 'thermal')
     const isEfficiency = computed(() => item.value?.kind === 'efficiency')
+    const isPv = computed(() => item.value?.kind === 'pv')
 
     async function refit() {
       if (busy.value) return
@@ -169,7 +170,7 @@ export default defineComponent({
       let days = item.value?.days ?? []
       if (!days.length) return []
       if (rangeDays.value) days = days.slice(-rangeDays.value)
-      const trained = days.filter(d => d.status === 'used' || d.status === 'no_temp')
+      const trained = days.filter(d => d.status === 'used' || d.status === 'no_temp' || d.status === 'suspect')
       const mark = (status, name, marker) => {
         const rows = days.filter(d => d.status === status)
         return {
@@ -192,6 +193,7 @@ export default defineComponent({
         },
         mark('excluded', 'Excluded', { color: C.excluded, size: 7, symbol: 'x-thin-open', line: { width: 1.5 } }),
         mark('outlier', 'Dropped as outlier', { color: C.outlier, size: 9, symbol: 'diamond-open', line: { width: 2 } }),
+        mark('suspect', 'Snow or fog on the panels', { color: C.excluded, size: 7, symbol: 'x-thin-open', line: { width: 1.5 } }),
       ].filter(t => t.x.length)
     })
 
@@ -343,11 +345,40 @@ export default defineComponent({
       }
     })
 
+    // ── PV: learned from the measured production ────────────────────────
+    const pvForecastTraces = computed(() => {
+      const pts = item.value?.forecast?.points ?? []
+      if (!pts.length) return []
+      const x = pts.map(p => toPlotlyDate(p.t))
+      const traces = [
+        {
+          name: 'Cloud cover', type: 'bar', yaxis: 'y2', marker: { color: 'rgba(141,152,145,.18)' },
+          x, y: pts.map(p => p.cloud), hovertemplate: '%{x|%a %H:%M} · %{y:.0f} %<extra>Cloud cover</extra>',
+        },
+        {
+          name: 'Forecast', type: 'scatter', mode: 'lines', line: { color: C.model, width: 2, shape: 'hv' },
+          x, y: pts.map(p => p.kw), hovertemplate: '%{x|%a %H:%M} · %{y:.2f} kW<extra>Forecast</extra>',
+        },
+      ]
+      if (pts.some(p => Math.abs(p.kw - p.model_kw) > 0.01)) {
+        traces.push({
+          name: 'Before the correction', type: 'scatter', mode: 'lines',
+          line: { color: C.model, width: 1.5, dash: 'dot', shape: 'hv' },
+          x, y: pts.map(p => p.model_kw), hovertemplate: '%{x|%a %H:%M} · %{y:.2f} kW<extra>Before the correction</extra>',
+        })
+      }
+      return traces
+    })
+    const azimuthText = az => (az == null ? '—' : az === 0 ? 'south'
+      : `${fmt(Math.abs(az), 0)}° ${az < 0 ? 'east' : 'west'} of south`)
+    const shadedBins = computed(() => Object.values(model.value?.shading ?? {}).filter(v => v < 0.9).length)
+
     const excludedDays = computed(() =>
       (item.value?.days ?? []).filter(d => d.status === 'excluded' || d.status === 'outlier').reverse())
 
     return {
-      item, model, isTemp, isThermal, isEfficiency, error, busy, refit,
+      item, model, isTemp, isThermal, isEfficiency, isPv, error, busy, refit,
+      pvForecastTraces, azimuthText, shadedBins,
       pct, est, cyclesNewestFirst, cycleTraces, cycleLayout, socTraces, socLayout,
       tUnit, rate, thermalModes, modeName, thermalForm, thermalTraces, thermalLayout,
       counts, formula, fittedAt, statusPill, fmt,
@@ -512,6 +543,117 @@ export default defineComponent({
           and <code>{{ Object.values(item.entities.modes).join(', ') }}</code>
           <template v-if="item.entities.ambient"> with ambient <code>{{ item.entities.ambient }}</code></template>.
           The planner uses these rates; until a model is learned it uses the configured ones.
+        </div>
+      </details>
+    </template>
+
+    <!-- ── PV: learned from the measured production ── -->
+    <template v-else-if="isPv">
+      <div class="row2">
+        <div class="subpanel">
+          <h3>Forecast for the next days</h3>
+          <PlotlyChart :traces="pvForecastTraces"
+            :layout="{ xaxis: { type: 'date', tickformat: '%H' }, yaxis: { title: 'kW', rangemode: 'tozero' },
+                       yaxis2: { overlaying: 'y', side: 'right', range: [0, 100], showgrid: false, title: 'cloud %' },
+                       legend: { orientation: 'h', y: -0.2 } }"
+            height="260px" />
+          <div v-if="item.intraday" class="footnote">
+            Last hour: measured {{ fmt(item.intraday.measured_kw, 2) }} kW, model {{ fmt(item.intraday.model_kw, 2) }} kW.
+            The coming hours are corrected by {{ item.intraday.delta_kw >= 0 ? '+' : '−' }}{{ fmt(Math.abs(item.intraday.delta_kw), 2) }} kW,
+            fading within about three hours.
+          </div>
+        </div>
+        <div class="subpanel">
+          <h3>Forecast per day</h3>
+          <table>
+            <thead><tr><th>Day</th><th>Energy</th></tr></thead>
+            <tbody>
+              <tr v-for="d in forecastDays" :key="d.date">
+                <td>{{ d.date }}</td>
+                <td>{{ fmt(d.kwh) }} kWh</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="footnote">The first and last day are only partly inside the planning horizon.</div>
+        </div>
+      </div>
+
+      <div class="subpanel">
+        <div class="panel-head">
+          <h3>Measured and model, per day</h3>
+          <span class="learn-spacer"></span>
+          <div class="range-btns">
+            <button v-for="r in RANGES" :key="r.days"
+              :class="['range-btn', rangeDays === r.days ? 'active' : '']"
+              @click="rangeDays = r.days">{{ r.label }}</button>
+          </div>
+        </div>
+        <PlotlyChart :traces="seriesTraces"
+          :layout="{ xaxis: { type: 'date', tickformat: '%d.%m.%y' }, yaxis: { title: 'kWh/day', rangemode: 'tozero' } }"
+          height="300px" />
+        <div class="footnote">
+          The model line is what the archived weather forecast of each day gave, without the correction by the
+          last hour. Most of the difference is the weather forecast itself.
+        </div>
+      </div>
+
+      <div v-if="model" class="subpanel">
+        <h3>What it learned about the PV system</h3>
+        <div class="kpis" style="margin-bottom:0">
+          <div class="card">
+            <div class="k">Orientation</div>
+            <div class="v">{{ azimuthText(model.azimuth) }}</div>
+          </div>
+          <div class="card">
+            <div class="k">Tilt</div>
+            <div class="v">{{ fmt(model.tilt, 0) }}°</div>
+          </div>
+          <div class="card">
+            <div class="k">Power at 1000 W/m²</div>
+            <div class="v">{{ fmt(model.k * 1000, 1) }} kW</div>
+          </div>
+          <div class="card">
+            <div class="k">Inverter limit</div>
+            <div class="v">{{ fmt(model.cap_kw, 1) }} kW</div>
+          </div>
+          <div class="card">
+            <div class="k">Typical error</div>
+            <div class="v">{{ fmt(model.mae_kwh) }} kWh/day</div>
+            <div class="savings-sub">of {{ fmt(model.mean_kwh) }} kWh/day, last 60 days</div>
+          </div>
+          <div class="card">
+            <div class="k">Days used</div>
+            <div class="v">{{ model.n_days }}</div>
+          </div>
+        </div>
+      </div>
+
+      <details class="learn-details">
+        <summary>How the model works</summary>
+        <div v-if="model" class="kpis">
+          <div class="card">
+            <div class="k">Shaded sun positions</div>
+            <div class="v">{{ shadedBins }}</div>
+          </div>
+          <div class="card">
+            <div class="k">With snow on the ground</div>
+            <div class="v">{{ fmt(model.snow_factor * 100, 0) }} %</div>
+            <div class="savings-sub">{{ model.n_snow_hours }} hours seen</div>
+          </div>
+          <div class="card">
+            <div class="k">Snow or fog on the panels</div>
+            <div class="v">{{ model.suspect_days.length }} days</div>
+          </div>
+        </div>
+        <div class="footnote">
+          Hour by hour, the measured production of <code>{{ item.history_entity }}</code> is compared with
+          what Open-Meteo's forecast for that hour said (direct and diffuse irradiance). From that the model
+          learns the orientation, tilt and power of the panels, the inverter limit, a shading factor per sun
+          position (what the best clear hours reach there), how far the weather forecast is off per type of sky,
+          and how much the panels deliver while snow lies. Hours with snow and days that were forecast clear but
+          stayed dark on cold days (snow or fog on the panels) are left out of the training. The forecast applies
+          this to Open-Meteo's current forecast and corrects the next hours by the deviation of the last hour.
+          Refitted every {{ fmt(item.refit_interval_h, 0) }} h.
         </div>
       </details>
     </template>
