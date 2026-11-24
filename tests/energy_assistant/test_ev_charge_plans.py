@@ -20,7 +20,7 @@ from energy_assistant.assets.ev import (
 )
 from energy_assistant.assets.loader import resolve_active_goals, upcoming_days
 from energy_assistant.core.control import LiveSituation
-from energy_assistant.core.models import DeviceState
+from energy_assistant.core.models import Behaviour, DeviceState
 from energy_assistant.storage.sqlite import SqliteStorageBackend
 
 TZ = ZoneInfo("Europe/Berlin")
@@ -478,9 +478,9 @@ def test_force_charge_cleared_returns_to_normal() -> None:
     contrib.set_force_charge(100.0)
     contrib.set_force_charge(None)
     live = _live({"wallbox": _state(soc=40.0)})
-    # No goal → opportunistic PV sentinel
+    # No goal → opportunistic PV charging
     setpoint = contrib.desired_setpoint_w(None, live)
-    assert setpoint is not None and 0.0 < setpoint <= 500.0
+    assert contrib.behaviour_for(setpoint, None, live) is Behaviour.ABSORB_SURPLUS
 
 
 def test_force_charge_disabled_chargepoint_still_hands_off() -> None:

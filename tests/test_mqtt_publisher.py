@@ -26,7 +26,7 @@ from energy_assistant.plugins.mqtt_publisher import (
     _stale_vehicle_topics,
     _weekly_discovery_configs,
     _weekly_state_messages,
-    charging_mode_from_setpoint,
+    charging_mode_from_behaviour,
     select_discovery_devices,
 )
 
@@ -209,12 +209,14 @@ def test_charging_sensors_are_enums_with_documented_options() -> None:
     assert mode["options"] == list(CHARGING_MODES)
 
 
-def test_charging_mode_from_setpoint() -> None:
-    assert charging_mode_from_setpoint(11_000.0, disabled=False) == "instant_charging"
-    assert charging_mode_from_setpoint(1.0, disabled=False) == "pv_charging"
-    assert charging_mode_from_setpoint(0.0, disabled=False) == "stop"
-    assert charging_mode_from_setpoint(None, disabled=False) == "disconnected"
-    assert charging_mode_from_setpoint(None, disabled=True) == "disabled"
+def test_charging_mode_from_behaviour() -> None:
+    from energy_assistant.core.models import Behaviour
+
+    assert charging_mode_from_behaviour(Behaviour.CHARGE, disabled=False) == "instant_charging"
+    assert charging_mode_from_behaviour(Behaviour.ABSORB_SURPLUS, disabled=False) == "pv_charging"
+    assert charging_mode_from_behaviour(Behaviour.STOP, disabled=False) == "stop"
+    assert charging_mode_from_behaviour(None, disabled=False) == "disconnected"
+    assert charging_mode_from_behaviour(None, disabled=True) == "disabled"
 
 
 def _intent(ts, kw, grid):
