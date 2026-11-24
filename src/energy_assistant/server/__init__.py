@@ -934,6 +934,7 @@ class Application:
         if self.tasks:
             await asyncio.gather(*self.tasks, return_exceptions=True)
         self.tasks = []
+        await self._release_devices()
         if self._mqtt_publisher is not None:
             await self._mqtt_publisher.stop()
         if hasattr(self, "_storage"):
@@ -1043,7 +1044,24 @@ class Application:
         if self._mqtt_publisher is not None:
             await self._mqtt_publisher.stop()
             self._mqtt_publisher = None
+        await self._release_devices()
         await self._close_devices()
+
+    async def _release_devices(self) -> None:
+        """Hand devices that Energy Assistant drives through persistent
+        settings (e.g. the SMA's battery management) back to their own
+        operation — at start, reload and stop, so a forced charge never
+        outlives the process that commanded it.  Not in dry-run."""
+        if getattr(self, "_dry_run", True) or not hasattr(self, "_registry"):
+            return
+        for device in self._registry.all():
+            release = getattr(device, "release", None)
+            if release is None:
+                continue
+            try:
+                await release()
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("Could not release device %r: %s", device.device_id, exc)
 
     async def _close_devices(self) -> None:
         """Stop the background work of devices that own some (pollers)."""
@@ -1757,6 +1775,9 @@ class Application:
     async def _control_task(self) -> None:
         """Send setpoints on every control tick based on the active plan."""
         await self._first_poll_done.wait()  # ensure registry and plan are ready
+        # Whatever a previous run left behind (a crash during a forced charge)
+        # ends here; the first control tick commands the devices again.
+        await self._release_devices()
 
         last = time.monotonic()
         while True:
@@ -1916,11 +1937,11 @@ class Application:
             # when nothing changed.
             changed_rows: list[tuple[str, int]] = []
             for device_id, setpoint_w, mode in self._control_loop.describe_setpoints(live):
-                # Some hardware (e.g. the SMA SBS) has no register to command
-                # charge power — only discharge is ever actively written, and
-                # charge/idle both collapse to the same "clear discharge
-                # limit" no-op. Reflect that instead of implying a specific
-                # charge wattage actually reaches the device.
+                # Some hardware has no register to command charge power —
+                # only discharge is ever actively written, and charge/idle
+                # both collapse to the same "clear discharge limit" no-op.
+                # Reflect that instead of implying a specific charge wattage
+                # actually reaches the device.
                 device = self._registry.get(device_id)
                 controls_charge = getattr(device, "controls_charge", True)
 

@@ -12,6 +12,7 @@ Config::
         # unit_id: 3       # optional, default from the profile
         # timeout_s: 3
         # read_only: true  # optional: never write, even if the profile can
+        max_charge_kw: 3.0      # needed by the SMA control strategy
         max_discharge_kw: 3.7   # needed by the SMA control strategy
         # ...plus the usual storage keys (capacity_kwh, min_soc_pct, …)
 
