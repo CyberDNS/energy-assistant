@@ -163,3 +163,46 @@ async def test_close_stops_the_connection() -> None:
         await client.close()
         assert not ws.connected and not ws.ready.is_set()
         assert ws._task is None
+
+
+async def test_entity_catalog_for_the_config_ui() -> None:
+    states = {
+        "select.bat_mode": {"s": "Self", "lc": T0, "a": {
+            "friendly_name": "Battery mode", "options": ["Self", "Charge"], "icon": "mdi:x"}},
+        "climate.office": {"s": "heat", "lc": T0, "a": {
+            "friendly_name": "Office", "hvac_modes": ["off", "heat"], "preset_modes": ["eco"],
+            "current_temperature": 21.5, "temperature": 21}},
+        "sensor.power": {"s": "512", "lc": T0, "a": {
+            "friendly_name": "Power", "unit_of_measurement": "W", "device_class": "power"}},
+    }
+    async with FakeHAWebSocketServer(states) as server:
+        server.entity_registry = [{"ei": "climate.office", "ai": "office"},
+                                  {"ei": "sensor.power", "di": "dev1"}]
+        server.device_registry = [{"id": "dev1", "area_id": "garage"}]
+        server.area_registry = [{"area_id": "office", "name": "Office"},
+                                {"area_id": "garage", "name": "Garage"}]
+        client = _client(server.url)
+        try:
+            catalog = {e["entity_id"]: e for e in await client.entity_catalog()}
+        finally:
+            await client.close()
+    assert catalog["select.bat_mode"]["options"] == {"options": ["Self", "Charge"]}
+    assert catalog["select.bat_mode"]["area"] is None
+    office = catalog["climate.office"]
+    assert office["area"] == "Office"
+    assert office["options"] == {"hvac_modes": ["off", "heat"], "preset_modes": ["eco"]}
+    assert "current_temperature" in office["attributes"]
+    assert "friendly_name" not in office["attributes"]
+    power = catalog["sensor.power"]
+    assert (power["area"], power["state"], power["unit"], power["device_class"]) == (
+        "Garage", "512", "W", "power")
+
+
+async def test_entity_catalog_without_registry_access() -> None:
+    async with FakeHAWebSocketServer({"sensor.p": {"s": "1", "lc": T0, "a": {}}}) as server:
+        client = _client(server.url)
+        try:
+            (entry,) = await client.entity_catalog()
+        finally:
+            await client.close()
+    assert entry["entity_id"] == "sensor.p" and entry["area"] is None

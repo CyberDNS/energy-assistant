@@ -1,0 +1,30 @@
+title: openWB chargepoint (openWB 2 integration)
+category: charger
+integration: openWB 2 (MQTT) for Home Assistant
+url: https://github.com/a-reinhard/openwb2mqtt
+verified: true
+description: >-
+  Charge modes of the openWB: it follows the PV surplus itself in PV Charging.
+  Entity names as created by a Home Assistant set to German; with another
+  language the object ids differ (check them under Settings → Entities).
+  Set params.default_vehicle and the cars' charger_ids as for openwb_mqtt.
+variables:
+  prefix:
+    label: Chargepoint entity prefix
+    example: openwbmaster_chargepoint_5
+device:
+  type: homeassistant_charger
+  settings: { phases: 3 }
+  capabilities:
+    power_w: { entity: "sensor.{prefix}_ladeleistung" }
+    plugged: { entity: "binary_sensor.{prefix}_ladekabel" }
+    power_setpoint:
+      control: modes
+      mode: "select.{prefix}_lademodus"
+      modes:
+        charge: { option: Instant Charging, current: "number.{prefix}_soll_ladestrom_sofortladen" }
+        absorb_surplus: { option: PV Charging }
+        stop: { option: Stop }
+      soc_limit: "number.{prefix}_soc_limit_sofortladen"
+      max_current_a: 16
+  params: { min_power_kw: 4.14, max_power_kw: 11 }

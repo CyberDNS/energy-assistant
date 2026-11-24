@@ -61,6 +61,7 @@ from ..core.device_model import (
     ParamSpec,
     specs_to_dict,
 )
+from ..core.presets import presets_json
 from ..loader.config_validation import learning_options
 from ..plugins import registry as plugin_registry
 
@@ -216,6 +217,7 @@ def mount_config_api(api: FastAPI, app: Application) -> None:
             },
             "learning_kinds": {cat.value: kind for cat, kind in LEARNING_KINDS.items()},
             "model_keys": sorted(MODEL_KEYS),
+            "presets": presets_json(),
         }
 
     @api.get("/api/config/file")
@@ -291,13 +293,14 @@ def mount_config_api(api: FastAPI, app: Application) -> None:
 
     @api.get("/api/config/entities")
     async def get_config_entities() -> list[dict]:
-        """Home Assistant entities (id + name) for the entity pickers; empty
+        """Home Assistant entities for the entity selectors (id, name, state,
+        unit, area, options, attributes — ``HAClient.entity_catalog``); empty
         without a Home Assistant backend or when it cannot be reached."""
         client = app.ha_client()
         if client is None:
             return []
         try:
-            return await client.list_entities()
+            return await client.entity_catalog()
         except Exception as exc:  # noqa: BLE001
             _log.info("Could not list Home Assistant entities: %s", exc)
             return []

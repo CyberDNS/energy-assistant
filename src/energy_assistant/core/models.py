@@ -70,6 +70,17 @@ class Behaviour(str, Enum):
     STOP = "stop"
 
 
+#: Readable names of the behaviours (config UI).
+BEHAVIOUR_LABELS: dict[str, str] = {
+    "charge": "Charge (forced)",
+    "discharge": "Discharge (forced)",
+    "hold": "Hold (neither charge nor discharge)",
+    "absorb_surplus": "Store PV surplus only",
+    "self_consumption": "Self-consumption (cover the load)",
+    "stop": "Stop",
+}
+
+
 def resolve_behaviour(
     behaviour: Behaviour | None, value_w: float | None, supported: frozenset[Behaviour] | None,
 ) -> Behaviour | None:

@@ -23,6 +23,10 @@ class FakeHAWebSocketServer:
         self.service_calls: list[dict[str, Any]] = []
         self.service_error: dict[str, str] | None = None
         self.energy_prefs: dict[str, Any] = {}
+        # Registries (config/*_registry/*): None → the command fails (non-admin token).
+        self.entity_registry: list[dict[str, Any]] | None = None
+        self.device_registry: list[dict[str, Any]] = []
+        self.area_registry: list[dict[str, Any]] = []
         self.connections = 0
         self._subscribers: list[tuple[ServerConnection, int]] = []
         self._server: Any = None
@@ -82,6 +86,15 @@ class FakeHAWebSocketServer:
             else:
                 await ws.send(json.dumps({"id": msg_id, "type": "result", "success": True,
                                           "result": {"context": {"id": "x"}}}))
+        elif kind == "config/entity_registry/list_for_display" and self.entity_registry is not None:
+            await ws.send(json.dumps({"id": msg_id, "type": "result", "success": True,
+                                      "result": {"entities": self.entity_registry}}))
+        elif kind == "config/device_registry/list" and self.entity_registry is not None:
+            await ws.send(json.dumps({"id": msg_id, "type": "result", "success": True,
+                                      "result": self.device_registry}))
+        elif kind == "config/area_registry/list" and self.entity_registry is not None:
+            await ws.send(json.dumps({"id": msg_id, "type": "result", "success": True,
+                                      "result": self.area_registry}))
         elif kind == "energy/get_prefs":
             await ws.send(json.dumps({"id": msg_id, "type": "result", "success": True,
                                       "result": self.energy_prefs}))

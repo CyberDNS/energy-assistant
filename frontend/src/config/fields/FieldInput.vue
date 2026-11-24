@@ -23,6 +23,7 @@ export function editorFor(spec, value) {
     return 'json'
   }
   if (spec.entity) return 'entity'
+  if (spec.options_from || spec.attribute_of) return 'entity-value'
   return 'scalar'
 }
 
@@ -64,9 +65,11 @@ export default defineComponent({
   <OptionSelect v-else-if="editor === 'tariff'" :options="tariffOptions" :default-value="cfg.defaultTariff.value" :model-value="modelValue" :aria-label="ariaLabel" @update:model-value="set" />
   <TableEditor v-else-if="editor === 'table'" :fields="spec.items.fields" :model-value="modelValue" :self-id="selfId" @update:model-value="set" />
   <ListEditor v-else-if="editor === 'list'" :item="spec.items" :model-value="modelValue" :self-id="selfId" @update:model-value="set" />
-  <MapEditor v-else-if="editor === 'map'" :value-spec="spec.values" :model-value="modelValue" @update:model-value="set" />
+  <MapEditor v-else-if="editor === 'map'" :value-spec="spec.values" :key-spec="spec.keys ?? null" :model-value="modelValue" @update:model-value="set" />
   <SchemaForm v-else-if="editor === 'object'" class="cfg-nested" :specs="spec.fields" :model-value="modelValue" :self-id="selfId" @update:model-value="set" />
   <JsonEditor v-else-if="editor === 'json'" :kind="spec.kind" :model-value="modelValue" :aria-label="ariaLabel" @update:model-value="set" />
-  <EntityPicker v-else-if="editor === 'entity'" :model-value="modelValue" :domains="spec.domains ?? []" :aria-label="ariaLabel" @update:model-value="set" />
+  <EntityValueInput v-else-if="editor === 'entity-value'" :spec="spec" :model-value="modelValue" :aria-label="ariaLabel" @update:model-value="set" />
+  <EntityPicker v-else-if="editor === 'entity'" :model-value="modelValue" :domains="spec.domains ?? []"
+                :units="spec.units ?? []" :unit-free-domains="spec.unit_free_domains ?? []" :aria-label="ariaLabel" @update:model-value="set" />
   <ScalarInput v-else :spec="spec" :model-value="modelValue" :aria-label="ariaLabel" @update:model-value="set" />
 </template>

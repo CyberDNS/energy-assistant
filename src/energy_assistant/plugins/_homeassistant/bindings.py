@@ -255,6 +255,20 @@ def _oldest(states: list[EntityState | None]) -> datetime | None:
 # Binding specs (validation and config UI)
 # ---------------------------------------------------------------------------
 
+#: Units of a fitting entity per value kind (config UI suggestions).
+UNITS: dict[ValueKind, tuple[str, ...]] = {
+    ValueKind.POWER: ("W", "kW", "MW"),
+    ValueKind.ENERGY: ("Wh", "kWh", "MWh"),
+    ValueKind.PERCENT: ("%",),
+    ValueKind.DISTANCE: ("km", "m", "mi"),
+    ValueKind.TEMPERATURE: ("°C", "°F", "K"),
+}
+#: Domains whose value of a kind is an attribute (no unit to match).
+UNIT_FREE: dict[ValueKind, tuple[str, ...]] = {
+    ValueKind.TEMPERATURE: ("climate", "water_heater", "weather"),
+}
+
+
 def binding_specs(capability: Capability) -> dict[str, ParamSpec]:
     """The keys a binding of *capability* accepts, as ``ParamSpec``s."""
     kind = CAPABILITY_KINDS[capability]
@@ -265,38 +279,40 @@ def binding_specs(capability: Capability) -> dict[str, ParamSpec]:
             "on": ParamSpec(list, advanced=True, items=ParamSpec(str), label="Counts as on",
                             description="States that count as on (default: on, true, home, "
                                         "connected, plugged, …)"),
-            "attribute": ParamSpec(str, advanced=True, label="Attribute",
+            "attribute": ParamSpec(str, advanced=True, label="Attribute", attribute_of="entity",
                                    description="Read this attribute instead of the state"),
         }
     if capability is Capability.PHASE_POWER_W:
         return {
             "entities": ParamSpec(list, required=True, label="Power per phase",
-                                  items=ParamSpec(str, entity=True, domains=NUMERIC_DOMAINS),
+                                  items=ParamSpec(str, entity=True, domains=NUMERIC_DOMAINS,
+                                                  units=UNITS[ValueKind.POWER]),
                                   description="One power sensor per phase (L1, L2, L3)"),
             "scale": _scale(),
         }
+    fit = {"units": UNITS.get(kind, ()), "unit_free_domains": UNIT_FREE.get(kind, ())}
     specs: dict[str, ParamSpec] = {
         "entity": ParamSpec(str, required=True, entity=True, domains=NUMERIC_DOMAINS,
-                            label="Entity", description=_KIND_HINT[kind]),
+                            label="Entity", description=_KIND_HINT[kind], **fit),
     }
     if kind in (ValueKind.POWER, ValueKind.ENERGY):
         specs["entity"] = ParamSpec(str, required=True, entity=True, domains=NUMERIC_DOMAINS,
                                     label="Entity", description=_KIND_HINT[kind],
-                                    when={"import_entity": None})
+                                    when={"import_entity": None}, **fit)
         what = "power" if kind is ValueKind.POWER else "energy"
         specs["import_entity"] = ParamSpec(
             str, advanced=True, entity=True, domains=NUMERIC_DOMAINS, when={"entity": None},
             label=f"Import {what} entity",
-            description="Separate import and export sensors instead of one entity")
+            description="Separate import and export sensors instead of one entity", **fit)
         specs["export_entity"] = ParamSpec(
             str, entity=True, domains=NUMERIC_DOMAINS, required=True,
             when={"import_entity": "*"}, label=f"Export {what} entity",
-            description=f"Export {what} sensor")
+            description=f"Export {what} sensor", **fit)
     if kind is ValueKind.POWER:
         specs["invert_sign"] = ParamSpec(bool, default=False, label="Invert sign",
                                          description="The sensor counts the other direction "
                                                      "as positive")
-    specs["attribute"] = ParamSpec(str, advanced=True, label="Attribute",
+    specs["attribute"] = ParamSpec(str, advanced=True, label="Attribute", attribute_of="entity",
                                    description="Read this attribute of the entity instead of "
                                                "its state")
     specs["scale"] = _scale()

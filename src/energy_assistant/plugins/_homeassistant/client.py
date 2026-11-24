@@ -35,6 +35,14 @@ _STARTUP_WAIT_S = 5.0
 
 _parse_ts = parse_ts  # kept for callers of the old private name
 
+#: Attributes that list what an entity can be set to (entity selector).
+_OPTION_ATTRIBUTES = ("options", "hvac_modes", "preset_modes", "operation_list",
+                      "fan_modes", "swing_modes")
+#: Attributes not offered for an attribute binding.
+_HIDDEN_ATTRIBUTES = frozenset({"friendly_name", "icon", "entity_picture", "supported_features",
+                                "attribution", "unit_of_measurement", "device_class",
+                                "state_class", "editable", "id", "restored"})
+
 
 @runtime_checkable
 class HAClientProtocol(Protocol):
@@ -180,6 +188,60 @@ class HAClient:
             ),
             key=lambda e: e["entity_id"],
         )
+
+    async def entity_catalog(self) -> list[dict[str, Any]]:
+        """Every entity with what the config UI's entity selector shows and
+        offers, sorted by id: ``entity_id``, ``name``, ``state``, ``unit``,
+        ``device_class``, ``area`` (from HA's registries, when they can be
+        read), ``options`` (a select's options, a climate's HVAC modes, …, per
+        attribute) and ``attributes`` (the attribute names)."""
+        cache = await self._cache()
+        if cache is not None:
+            states = cache.entities()
+        else:
+            resp = await self._client.get("/api/states")
+            resp.raise_for_status()
+            states = {str(item["entity_id"]): EntityState.from_api(item)
+                      for item in resp.json() if item.get("entity_id")}
+        areas = await self._entity_areas()
+        out = []
+        for eid, entity in states.items():
+            attrs = entity.attributes
+            options = {key: [str(o) for o in attrs[key]]
+                       for key in _OPTION_ATTRIBUTES if isinstance(attrs.get(key), list)}
+            out.append({
+                "entity_id": eid,
+                "name": str(attrs.get("friendly_name") or ""),
+                "state": entity.state,
+                "unit": attrs.get("unit_of_measurement"),
+                "device_class": attrs.get("device_class"),
+                "area": areas.get(eid),
+                "options": options,
+                "attributes": sorted(k for k in attrs if k not in _HIDDEN_ATTRIBUTES),
+            })
+        return sorted(out, key=lambda e: e["entity_id"])
+
+    async def _entity_areas(self) -> dict[str, str]:
+        """entity_id → area name, from the entity, device and area registries
+        (websocket; empty when they cannot be read, e.g. a non-admin token)."""
+        ws = self._websocket()
+        if not ws.connected:
+            return {}
+        try:
+            entities = await ws.command({"type": "config/entity_registry/list_for_display"})
+            devices = await ws.command({"type": "config/device_registry/list"})
+            area_list = await ws.command({"type": "config/area_registry/list"})
+        except Exception as exc:  # noqa: BLE001 — areas are a nice-to-have
+            _log.debug("Home Assistant registries not readable: %s", exc)
+            return {}
+        names = {a["area_id"]: a["name"] for a in area_list or [] if a.get("area_id")}
+        device_area = {d["id"]: d.get("area_id") for d in devices or [] if d.get("id")}
+        out: dict[str, str] = {}
+        for e in (entities or {}).get("entities", []):
+            area_id = e.get("ai") or device_area.get(e.get("di"))
+            if area_id in names:
+                out[e["ei"]] = names[area_id]
+        return out
 
     async def get_entity(self, entity_id: str) -> EntityState | None:
         """Return state, attributes and timestamps of *entity_id* (None if unknown)."""

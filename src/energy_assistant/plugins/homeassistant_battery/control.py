@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ...core.device_model import DeviceConfigError, ParamSpec
-from ...core.models import Behaviour
+from ...core.models import BEHAVIOUR_LABELS, Behaviour
 from .._homeassistant.actuators import (
     NUMBER_DOMAINS,
     SELECT_DOMAINS,
@@ -53,6 +53,14 @@ from .._homeassistant.actuators import (
 _log = logging.getLogger(__name__)
 
 CONTROLS = ("number", "charge_discharge", "mode_power", "action", "modes")
+_POWER = ("W", "kW")
+CONTROL_LABELS = {
+    "number": "One power setpoint (+ charge / − discharge)",
+    "charge_discharge": "Separate charge and discharge power",
+    "mode_power": "Working mode + one power",
+    "action": "A script or action",
+    "modes": "The battery's own modes, per behaviour",
+}
 
 #: Mode control: the modes tried, in order, for a behaviour without one.
 _FALLBACK: dict[Behaviour, tuple[Behaviour, ...]] = {
@@ -70,25 +78,26 @@ def _when(*controls: str) -> dict[str, Any]:
 
 
 def _number(label: str, description: str, *controls: str, required: bool = True) -> ParamSpec:
-    return ParamSpec(str, required=required, entity=True, domains=NUMBER_DOMAINS,
+    return ParamSpec(str, required=required, entity=True, domains=NUMBER_DOMAINS, units=_POWER,
                      label=label, description=description, when=_when(*controls))
 
 
 _MODE_ENTRY = ParamSpec(dict, fields={
-    "option": ParamSpec(str, required=True, label="Option",
+    "option": ParamSpec(str, required=True, label="Option", options_from=("mode", "options"), 
                         description="Option of the mode select"),
-    "power": ParamSpec(str, entity=True, domains=NUMBER_DOMAINS, label="Power number",
+    "power": ParamSpec(str, entity=True, domains=NUMBER_DOMAINS, units=_POWER,
+                       label="Power number",
                        description="Gets the commanded power (W or kW, without sign)"),
     "set": ParamSpec(dict, values=ParamSpec(object), label="Also set",
+                     keys=ParamSpec(str, entity=True, domains=NUMBER_DOMAINS + SELECT_DOMAINS),
                      description="Fixed values written with the mode: {entity: value}"),
 })
 
 #: Keys of the ``power_setpoint`` binding (validation and config UI).
 POWER_SETPOINT_BINDING: dict[str, ParamSpec] = {
-    "control": ParamSpec(str, required=True, choices=CONTROLS, label="Controlled through",
-                         description="number: one signed power · charge_discharge: two "
-                                     "powers · mode_power: mode + power · action: a script · "
-                                     "modes: the battery's own modes per behaviour"),
+    "control": ParamSpec(str, required=True, choices=CONTROLS, choice_labels=CONTROL_LABELS,
+                         label="Controlled through",
+                         description="How Energy Assistant tells the battery what to do"),
     "number": _number("Power number", "Signed power setpoint (+ charge, − discharge)",
                       "number"),
     "invert_sign": ParamSpec(bool, default=False, label="Invert sign", when=_when("number"),
@@ -101,14 +110,14 @@ POWER_SETPOINT_BINDING: dict[str, ParamSpec] = {
                       when=_when("mode_power", "modes")),
     "power": _number("Power number", "Power for charging and discharging (no sign)",
                      "mode_power"),
-    "charge_option": ParamSpec(str, required=True, label="Charge option",
+    "charge_option": ParamSpec(str, required=True, label="Charge option", options_from=("mode", "options"), 
                                when=_when("mode_power"), description="Forced charge mode"),
-    "discharge_option": ParamSpec(str, required=True, label="Discharge option",
+    "discharge_option": ParamSpec(str, required=True, label="Discharge option", options_from=("mode", "options"), 
                                   when=_when("mode_power"),
                                   description="Forced discharge mode"),
-    "hold_option": ParamSpec(str, required=True, label="Hold option", when=_when("mode_power"),
+    "hold_option": ParamSpec(str, required=True, label="Hold option", options_from=("mode", "options"), when=_when("mode_power"),
                              description="Mode that neither charges nor discharges"),
-    "release_option": ParamSpec(str, label="Release option", when=_when("mode_power"),
+    "release_option": ParamSpec(str, label="Release option", options_from=("mode", "options"), when=_when("mode_power"),
                                 description="Mode set when Energy Assistant stops (its own "
                                             "self-consumption)"),
     "action": ParamSpec(str, required=True, label="Action", when=_when("action"),
@@ -121,9 +130,11 @@ POWER_SETPOINT_BINDING: dict[str, ParamSpec] = {
                            description="Data key that gets the power in W"),
     "modes": ParamSpec(dict, required=True, label="Modes", when=_when("modes"),
                        values=_MODE_ENTRY,
+                       keys=ParamSpec(str, choices=_BEHAVIOURS, choice_labels=BEHAVIOUR_LABELS),
                        description="Per behaviour (charge, discharge, hold, absorb_surplus, "
                                    "self_consumption): option, power, set"),
-    "release": ParamSpec(str, label="On stop", choices=_BEHAVIOURS, when=_when("modes"),
+    "release": ParamSpec(str, label="On stop", choices=_BEHAVIOURS,
+                         choice_labels=BEHAVIOUR_LABELS, when=_when("modes"),
                          description="Mode set when Energy Assistant stops (default "
                                      "self_consumption, if configured)"),
     "deadband_w": ParamSpec(float, default=25.0, minimum=0, advanced=True,

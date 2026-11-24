@@ -397,6 +397,21 @@ th.num, td.num { text-align:right; font-variant-numeric:tabular-nums; }
 .cfg-plugin { display:flex; flex-direction:column; gap:10px; }
 .cfg-entity { display:flex; flex-direction:column; gap:2px; min-width:0; }
 .cfg-entity-name { font-size:.72rem; color:var(--muted-foreground); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.cfg-entity-all { align-self:flex-start; background:none; border:0; padding:0; font-size:.72rem;
+  color:var(--primary); cursor:pointer; text-decoration:underline; }
+.cfg-combo { position:relative; min-width:0; }
+.cfg-combo > input { width:100%; }
+.cfg-combo-list { position:absolute; z-index:40; left:0; right:0; top:calc(100% + 2px); margin:0; padding:4px 0;
+  list-style:none; max-height:min(320px, 50vh); overflow-y:auto; background:var(--card, var(--background));
+  border:1px solid var(--border); border-radius:8px; box-shadow:0 8px 24px rgb(0 0 0 / .14); }
+.cfg-combo-list li { display:flex; flex-direction:column; gap:1px; padding:6px 10px; cursor:pointer; min-width:0; }
+.cfg-combo-list li.active, .cfg-combo-list li:hover { background:var(--accent, var(--muted)); }
+.cfg-combo-list li.chosen .cfg-combo-label { font-weight:600; }
+.cfg-combo-main { display:flex; justify-content:space-between; gap:8px; min-width:0; }
+.cfg-combo-label { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.cfg-combo-meta { flex:none; font-size:.78rem; color:var(--muted-foreground); font-variant-numeric:tabular-nums; }
+.cfg-combo-detail { font-size:.72rem; color:var(--muted-foreground); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.cfg-combo-list li.cfg-combo-empty { cursor:default; color:var(--muted-foreground); font-size:.8rem; }
 .cfg-secret { display:flex; flex-direction:column; gap:6px; }
 .cfg-secret-row { display:flex; align-items:center; gap:6px; }
 .cfg-secret-row .btn { flex:none; }
