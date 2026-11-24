@@ -29,6 +29,7 @@ from energy_assistant.core.savings import (
     SavingsTracker,
     SlotCorrection,
     day_ahead_window_end,
+    fill_stored_values,
     reference_prices,
     settle,
     stored_position,
@@ -703,6 +704,21 @@ class TestStoredPosition:
         assert stored_position(None, {"bat": BAT}, 0.3) is None
         full = {"real": {}, "uncontrolled": {}, "real_value": {}, "uncontrolled_value": {}}
         assert stored_position(full, {"bat": BAT}, None) is None
+
+    def test_old_slots_take_the_cost_per_kwh_of_the_nearest_slot(self) -> None:
+        old = {"real": {"bat": 4.0}, "uncontrolled": {"bat": 2.0}}
+        new = {"real": {"bat": 2.0}, "real_value": {"bat": 0.40},           # 0.20 €/kWh
+               "uncontrolled": {"bat": 1.0}, "uncontrolled_value": {"bat": 0.10}}
+        later_old = {"real": {"bat": 3.0}, "uncontrolled": {"bat": 1.0}}
+        first, second, third = fill_stored_values([old, new, later_old])
+        # Before any slot with values: the first one's cost; after: the latest.
+        assert first["real_value"] == {"bat": pytest.approx(0.80)}
+        assert first["uncontrolled_value"] == {"bat": pytest.approx(0.20)}
+        assert second == new
+        assert third["real_value"] == {"bat": pytest.approx(0.60)}
+        assert stored_position(first, {"bat": BAT}, 0.3) is not None
+        # Nothing known at all: left as it is.
+        assert fill_stored_values([old, None]) == [old, None]
 
     def test_reference_price_is_the_trailing_time_weighted_mean(self) -> None:
         slots = [(T0 + timedelta(hours=h), 1.0, p) for h, p in enumerate((0.2, 0.4, None, 0.6))]

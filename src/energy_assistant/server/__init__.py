@@ -122,6 +122,7 @@ from ..core.savings import (
     SavingsState,
     SavingsTracker,
     day_ahead_window_end,
+    fill_stored_values,
     reference_prices,
     stored_position,
 )
@@ -211,13 +212,15 @@ def _stored_positions(
 ) -> tuple[list[float | None], list[float | None]]:
     """Per slot: the reference price and the saving still stored in the real
     house's batteries beyond the uncontrolled one's (``stored_position``
-    difference, € at the slot's end; None for slots without ledger values).
-    *rows*: every slot up to the window's end, oldest first."""
+    difference, € at the slot's end).  Slots recorded before the ledger
+    values were stored use the nearest slot's cost per kWh; None only
+    without any.  *rows*: every slot up to the window's end, oldest first."""
     by_id = {sc.device_id: sc for sc in batteries}
     prices = reference_prices([(r["slot_start"], r["hours"], r["import_price"]) for r in rows])
+    details = fill_stored_values([r.get("stored_detail") for r in rows])
     positions: list[float | None] = []
-    for row, price in zip(rows, prices):
-        pos = stored_position(row.get("stored_detail"), by_id, price)
+    for detail, price in zip(details, prices):
+        pos = stored_position(detail, by_id, price)
         positions.append(pos["difference"] if pos is not None else None)
     return prices, positions
 
