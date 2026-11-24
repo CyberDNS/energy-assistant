@@ -130,6 +130,9 @@ class ServicePluginInfo:
     description: str = ""
     scopes: tuple[str, ...] = ()
     title: str = ""
+    validator: Callable[[Mapping[str, Any]], list[str]] | None = None
+    """Checks of the whole entry beyond its single settings (e.g. overlapping
+    time windows); returns the problems.  Only run when the settings are valid."""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -196,6 +199,8 @@ class BuildContext:
     modbus_pool: Any = None      # ModbusConnectionPool | None (created lazily)
     device_registry: Any = None  # DeviceRegistry | None  (deferred pass only)
     data_dir: Path | None = None  # writable directory for plugin state (or None)
+    tariffs: dict[str, Any] = field(default_factory=dict)
+    """Tariffs built so far (a tariff built on another one finds it here)."""
 
 
 class PluginRegistry:
@@ -274,11 +279,12 @@ class PluginRegistry:
         settings: Mapping[str, ParamSpec] | None = None,
         description: str = "",
         title: str = "",
+        validator: Callable[[Mapping[str, Any]], list[str]] | None = None,
     ) -> None:
         """Register *factory* for tariffs with ``type: <type_name>``."""
         self._tariff[type_name] = factory
         self._tariff_info[type_name] = ServicePluginInfo(
-            type_name, settings, description, title=title
+            type_name, settings, description, title=title, validator=validator
         )
 
     def register_forecast(

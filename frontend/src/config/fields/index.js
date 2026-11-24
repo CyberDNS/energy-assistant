@@ -13,6 +13,7 @@
 //   LoadProfileEditor  static load profile per day type
 //   PluginEditor       type + that plugin's settings (tariff, forecast)
 //   LearningEditor     on / off / on with options
+//   WeekdaysEditor     weekdays of a time window (Mo … Su toggles)
 //   FieldInput         picks the editor for a spec
 //   SchemaField        label + FieldInput + hint
 //   SchemaForm         grid of SchemaFields for a mapping
@@ -32,13 +33,14 @@ import JsonEditor from './JsonEditor.vue'
 import LoadProfileEditor from './LoadProfileEditor.vue'
 import PluginEditor from './PluginEditor.vue'
 import LearningEditor from './LearningEditor.vue'
+import WeekdaysEditor from './WeekdaysEditor.vue'
 import FieldInput from './FieldInput.vue'
 import SchemaField from './SchemaField.vue'
 import SchemaForm from './SchemaForm.vue'
 
 const COMPONENTS = {
   ScalarInput, OptionSelect, Combobox, EntityPicker, EntityValueInput, SecretPicker, ListEditor, TableEditor, MapEditor,
-  JsonEditor, LoadProfileEditor, PluginEditor, LearningEditor, FieldInput, SchemaField, SchemaForm,
+  JsonEditor, LoadProfileEditor, PluginEditor, LearningEditor, WeekdaysEditor, FieldInput, SchemaField, SchemaForm,
 }
 
 export function registerFieldComponents(app) {
