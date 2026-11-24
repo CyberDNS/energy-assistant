@@ -2205,6 +2205,17 @@ class Application:
             _log.info("Savings: saved state has an older format — starting fresh")
         return state
 
+    def _pv_device_for(self, entity: str | None) -> str | None:
+        """The PV device a learned PV forecast belongs to: the one whose
+        configuration reads *entity*, else the only PV device."""
+        pv_ids = [d.device_id for d in self._registry.by_category(DeviceCategory.PV)]
+        if entity:
+            for device_id in pv_ids:
+                spec = self._cfg.devices.get(device_id)
+                if spec is not None and entity in repr(spec):
+                    return device_id
+        return pv_ids[0] if len(pv_ids) == 1 else None
+
     def _secondary_consumers(self) -> dict[str, list[str]]:
         """Measured consumers billed on a tariff other than the default one,
         keyed by tariff id (e.g. the heat pump on its own tariff)."""
@@ -2996,6 +3007,8 @@ class Application:
                 out.append(await learner.diagnostics())
             for item in out:
                 item.setdefault("category", _learning_category(item))
+                if item.get("kind") == "pv" and not item.get("device_id"):
+                    item["device_id"] = self._pv_device_for(item.get("history_entity"))
             return out
 
         @api.post("/api/learned/{forecast_id}/refit")
