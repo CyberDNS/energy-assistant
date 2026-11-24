@@ -499,6 +499,9 @@ _THERMAL_PARAMS = {
                                   description="Drift per hour while off (fallback model)"),
     "min_runtime_h": ParamSpec(float, default=0, label="Minimum run time (h)", minimum=0, description="Minimum on-time (compressor)"),
     "min_offtime_h": ParamSpec(float, default=0, label="Minimum off time (h)", minimum=0, description="Minimum off-time (compressor)"),
+    "rated_power_w": ParamSpec(float, label="Power while running (W)", minimum=0, exclusive_minimum=True,
+                               description="For a device that switches itself (a thermostat); "
+                                           "with controlled_by the switch's rated power is used"),
 }
 
 #: Params of the grid connection meter (the meter without ``metered_by``).
@@ -567,9 +570,10 @@ CATEGORY_SCHEMAS: dict[DeviceCategory, CategorySchema] = {
         CategorySchema(
             _K.THERMAL_LOAD,
             "Load kept between two thresholds (aquarium cooler, fridge, heater); "
-            "switched by the switch it is controlled_by.",
+            "switched by the switch it is controlled_by, or by itself (a thermostat).",
             title="Thermal load",
             required_capabilities=_caps(_C.TEMPERATURE_C),
+            optional_capabilities=_caps(_C.POWER_W, _C.POWER_SETPOINT),
             params=_THERMAL_PARAMS,
             connections={**_METERED, ConnectionType.CONTROLLED_BY: frozenset({_K.SWITCH})},
         ),
@@ -863,7 +867,8 @@ def parse_devices(raw: Mapping[str, Mapping[str, Any]]) -> dict[str, DeviceSpec]
 
 
 def _thermal_load_errors(spec: DeviceSpec, specs: Mapping[str, DeviceSpec]) -> list[str]:
-    """A thermal load needs a switch with a rated power, and a valid range."""
+    """A thermal load needs a switch with a rated power (or its own rated
+    power when it switches itself), and a valid range."""
     errors: list[str] = []
     where = f"device {spec.id!r}"
     bottom, top = spec.params.get("bottom_threshold"), spec.params.get("top_threshold")
@@ -871,7 +876,10 @@ def _thermal_load_errors(spec: DeviceSpec, specs: Mapping[str, DeviceSpec]) -> l
         errors.append(f"{where}: params.bottom_threshold ({bottom:g}) must be below "
                       f"top_threshold ({top:g})")
     if not spec.controlled_by:
-        errors.append(f"{where}: a thermal_load needs 'controlled_by: <switch device>'")
+        if spec.params.get("rated_power_w") is None:
+            errors.append(f"{where}: a thermal_load needs 'controlled_by: <switch device>', "
+                          "or 'params: {rated_power_w: …}' when it switches itself "
+                          "(a thermostat)")
         return errors
     switch = specs.get(spec.controlled_by)
     if (switch is not None and switch.category is DeviceCategory.SWITCH

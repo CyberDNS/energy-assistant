@@ -184,10 +184,14 @@ PLUG = {"category": "switch", "type": "homeassistant_switch",
 
 
 def test_thermal_load_needs_a_switch() -> None:
-    assert _errors({"aq": THERMAL}) == [
-        "device 'aq': a thermal_load needs 'controlled_by: <switch device>'"
-    ]
+    assert _errors({"aq": THERMAL}) == [(
+        "device 'aq': a thermal_load needs 'controlled_by: <switch device>', or "
+        "'params: {rated_power_w: …}' when it switches itself (a thermostat)"
+    )]
     assert parse_devices({"aq": {**THERMAL, "controlled_by": "plug"}, "plug": PLUG})
+    # A thermostat switches itself: its own rated power instead of a switch.
+    assert parse_devices({"aq": {**THERMAL, "params": {**THERMAL["params"],
+                                                       "rated_power_w": 2000}}})
     assert "controlled_by 'grid' is a 'meter', expected switch" in _errors(
         {"aq": {**THERMAL, "controlled_by": "grid"}, "grid": GRID}
     )[0]
