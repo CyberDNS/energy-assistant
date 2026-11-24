@@ -43,6 +43,10 @@ surplus only, discharges them to cover load, and charges cars as late as
 possible to reach their charge plan. Battery energy is costed when used, at
 its own house's ledger cost (charging moves the cost into the ledger), so
 charging slots save nothing and the saving shows when stored energy is used.
+So a house holding more stored energy looks worse until it uses it:
+'real_with_stored' adds the change of 'stored_position' (usable stored energy
+valued at the mean import price of the last 24 h minus its ledger cost, real
+minus uncontrolled) over the window.
 """
 
 
@@ -83,15 +87,18 @@ def build_mcp_server(api: FastAPI) -> MCPServer:
         """Savings over the rolling window of the last *hours*: totals, one row
         per *bucket* ('hour', 'day' or 'week', local time; default by window
         length), energy still stored in both houses and all-time totals.
-        'real' is the saving (uncontrolled cost - real cost)."""
+        'real' is the saving (uncontrolled cost - real cost); 'real_with_stored'
+        also counts the change of the saving still stored in the batteries."""
         return await get("/api/savings", hours=hours, bucket=bucket)
 
     @mcp.tool(annotations=_READ_ONLY)
     async def get_savings_slots(start: str, end: str | None = None) -> dict[str, Any]:
         """Per accounting slot in [start, end) (max 31 days): ledger-based
         cost of the real and the uncontrolled house, both plain grid bills,
-        the saving and the part booked for cars. Use it to find *when*
-        savings were made or lost."""
+        the saving and the part booked for cars, and per slot the saving
+        still stored in the batteries ('stored_position', real minus
+        uncontrolled, at 'reference_price'). Use it to find *when* savings
+        were made or lost."""
         return await get("/api/savings/slots", start=start, end=end)
 
     @mcp.tool(annotations=_READ_ONLY)

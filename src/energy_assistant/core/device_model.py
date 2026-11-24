@@ -395,6 +395,9 @@ _BATTERY_PARAMS = {
     "purchase_price_eur": ParamSpec(float, label="Purchase price (€)", minimum=0, description="Hardware price, for wear cost"),
     "cycle_life": ParamSpec(int, label="Cycle life (full cycles)", minimum=1, description="Rated full cycles, for wear cost"),
     "no_grid_charge": ParamSpec(bool, default=False, label="Charge from PV only", description="Charge from PV surplus only"),
+    "own_meter": ParamSpec(str, default="zone", advanced=True, label="Follows on its own",
+                           choices=("zone", "grid_connection"),
+                           description="Meter the battery regulates on without Energy Assistant: its zone's, or the grid connection point's (then PV a separately billed load uses is not available to it)"),
     "standby_w": ParamSpec(float, default=50, advanced=True, label="Standby threshold (W)", minimum=0, description="Power treated as standby/noise (W)"),
 }
 
