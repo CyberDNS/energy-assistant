@@ -28,6 +28,8 @@ const MODE_COLOR = {
   'standby':          'rgba(130,130,130,0.18)',
 }
 
+const SOC_COLOR = '#6250d6'
+
 function buildPowerTraces(device) {
   const steps = device.plan?.steps ?? []
   if (!steps.length) return { traces: [] }
@@ -36,15 +38,34 @@ function buildPowerTraces(device) {
   const ys     = steps.map(s => s.planned_kw ?? 0)
   const colors = steps.map(s => MODE_COLOR[s.mode] ?? 'rgba(130,130,130,0.18)')
 
-  return {
-    traces: [{
-      type: 'bar',
-      x: xs,
-      y: ys,
-      marker: { color: colors },
-      hovertemplate: '%{x|%H:%M}  %{y:.3f} kW<extra></extra>',
-    }],
+  const traces = [{
+    type: 'bar',
+    x: xs,
+    y: ys,
+    marker: { color: colors },
+    hovertemplate: '%{x|%H:%M}  %{y:.3f} kW<extra></extra>',
+  }]
+
+  // Planned state of charge: each step's value is the level at its end;
+  // the line starts at the measured level.
+  const socSteps = steps.filter(s => s.soc_pct != null)
+  if (socSteps.length) {
+    const end = i => (i + 1 < steps.length ? steps[i + 1].ts
+      : new Date(new Date(steps[i].ts).getTime() + 15 * 60000).toISOString())
+    const x = [], y = []
+    if (device.soc_pct != null) { x.push(xs[0]); y.push(device.soc_pct) }
+    steps.forEach((s, i) => {
+      if (s.soc_pct == null) return
+      x.push(toPlotlyDate(end(i)))
+      y.push(s.soc_pct)
+    })
+    traces.push({
+      type: 'scatter', mode: 'lines', yaxis: 'y2', x, y,
+      line: { color: SOC_COLOR, width: 1.8 },
+      hovertemplate: '%{x|%H:%M}  %{y:.0f} %<extra>State of charge</extra>',
+    })
   }
+  return { traces, hasSoc: socSteps.length > 0 }
 }
 
 function miniNticks(widthPx) {
@@ -124,6 +145,14 @@ export default defineComponent({
     const chartLayout = computed(() => ({
       yaxis: { title: 'kW' },
       bargap: 0.05,
+      ...(chart.value.hasSoc ? {
+        margin: { t: 4, r: 36, b: 36, l: 50 },
+        yaxis2: {
+          overlaying: 'y', side: 'right', range: [0, 100], fixedrange: true,
+          showgrid: false, ticksuffix: ' %', tickvals: [0, 50, 100],
+          tickfont: { color: SOC_COLOR },
+        },
+      } : {}),
     }))
 
     const modePillClass = computed(() => {
