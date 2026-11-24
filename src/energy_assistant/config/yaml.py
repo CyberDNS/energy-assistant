@@ -33,6 +33,7 @@ file without a restart.
 from __future__ import annotations
 
 import os
+import re
 import secrets as secrets_module
 from pathlib import Path
 from typing import Any
@@ -48,9 +49,15 @@ from ..core.config import (
 from ..core.device_model import DeviceConfigError, parse_devices
 from ..secrets import SecretNotFoundError, SecretsManager
 
+#: ``17:00`` and the like.  YAML 1.1 (PyYAML) reads them as base-60 numbers
+#: (17:00 → 1020); YAML 1.2 — and ruamel, which writes the file from the
+#: config UI without quotes — as strings.  The config means clock times.
+_CLOCK_TIME = re.compile(r"^[0-9]+(?::[0-5]?[0-9])+$")
+
 
 def _make_loader(secrets: SecretsManager | None, missing: list[str]) -> type[yaml.SafeLoader]:
-    """Return a SafeLoader subclass that resolves ``!secret`` tags.
+    """Return a SafeLoader subclass that resolves ``!secret`` tags and reads
+    ``HH:MM`` as a string, not as a base-60 number.
 
     A secret that is not defined resolves to ``""`` and its name is added to
     *missing*, so every missing secret is reported, not only the first.
@@ -59,6 +66,15 @@ def _make_loader(secrets: SecretsManager | None, missing: list[str]) -> type[yam
 
     class _SecretLoader(yaml.SafeLoader):
         pass
+
+    _SecretLoader.yaml_implicit_resolvers = {
+        first: list(resolvers)
+        for first, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+    }
+    for digit in "0123456789":
+        _SecretLoader.yaml_implicit_resolvers.setdefault(digit, []).insert(
+            0, ("tag:yaml.org,2002:str", _CLOCK_TIME)
+        )
 
     def _secret_constructor(loader: yaml.SafeLoader, node: yaml.ScalarNode) -> str:
         name = str(loader.construct_scalar(node))

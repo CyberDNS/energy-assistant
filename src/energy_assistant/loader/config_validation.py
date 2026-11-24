@@ -67,6 +67,8 @@ def plugin_entry_errors(
     specs = {**info.settings, **(common or {})}
     values = {k: v for k, v in cfg.items() if k != "type"}
     errors = [f"{where}: {p}" for p in check_fields(values, specs, what="setting")]
+    if not errors and info.validator is not None:
+        errors.extend(f"{where}: {p}" for p in info.validator(values))
     # Nested plugin configurations (a learned forecast's fallback).
     for name, spec in specs.items():
         if spec.plugin and isinstance(values.get(name), Mapping):
@@ -132,11 +134,54 @@ def validate_sections(raw: Mapping[str, Any]) -> list[str]:
     defaults = [t for t, cfg in tariffs.items() if isinstance(cfg, Mapping) and cfg.get("default")]
     if len(defaults) > 1:
         errors.append(f"tariffs: only one tariff can be the default, found: {', '.join(defaults)}")
+    errors.extend(_base_tariff_errors(tariffs))
     dashboard_tariff = (raw.get("energy_dashboard") or {}).get("tariff") \
         if isinstance(raw.get("energy_dashboard"), Mapping) else None
     if dashboard_tariff and dashboard_tariff not in tariffs:
         errors.append(f"energy_dashboard: tariff {dashboard_tariff!r} is not a configured tariff")
     return errors
+
+
+def _base_tariff_errors(tariffs: Mapping[str, Any]) -> list[str]:
+    """A tariff's ``base`` must name another tariff, without a cycle."""
+    bases = {t: cfg.get("base") for t, cfg in tariffs.items()
+             if isinstance(cfg, Mapping) and cfg.get("base")}
+    errors: list[str] = []
+    for tariff_id, base in bases.items():
+        if base not in tariffs:
+            errors.append(f"tariffs: {tariff_id}: base tariff {base!r} is not a configured tariff")
+            continue
+        seen = [tariff_id]
+        cur = base
+        while cur in bases and cur not in seen:
+            seen.append(cur)
+            cur = bases[cur]
+        if cur == tariff_id:
+            errors.append(f"tariffs: {tariff_id}: base tariffs form a cycle "
+                          f"({' → '.join([*seen, tariff_id])})")
+    return errors
+
+
+def tariff_build_order(tariffs: Mapping[str, Any]) -> list[str]:
+    """Tariff ids with every ``base`` tariff before the tariffs built on it
+    (otherwise config order; ids in a cycle come last and fail to build)."""
+    order: list[str] = []
+    visiting: set[str] = set()
+
+    def visit(tariff_id: str) -> None:
+        if tariff_id in order or tariff_id in visiting:
+            return
+        visiting.add(tariff_id)
+        cfg = tariffs.get(tariff_id)
+        base = cfg.get("base") if isinstance(cfg, Mapping) else None
+        if isinstance(base, str) and base in tariffs:
+            visit(base)
+        visiting.discard(tariff_id)
+        order.append(tariff_id)
+
+    for tariff_id in tariffs:
+        visit(tariff_id)
+    return order
 
 
 def _entries(section: Any) -> dict[str, Any] | None:

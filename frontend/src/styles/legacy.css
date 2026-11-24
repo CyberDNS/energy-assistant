@@ -419,6 +419,12 @@ th.num, td.num { text-align:right; font-variant-numeric:tabular-nums; }
 .cfg-secret-new { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
 .cfg-secret-new input { flex:1 1 150px; width:auto; }
 .cfg-secret-form { display:flex; flex-direction:column; gap:8px; }
+.cfg-weekdays { display:flex; flex-wrap:wrap; gap:3px; align-items:center; }
+.cfg-weekday { min-width:2.2em; padding:5px 4px; font-size:.8rem; border-radius:6px; border:1px solid var(--border);
+  background:var(--card); color:var(--muted-foreground); cursor:pointer; }
+.cfg-weekday:hover { border-color:var(--primary); }
+.cfg-weekday.is-on { background:var(--primary); border-color:var(--primary); color:var(--primary-foreground); }
+.cfg-weekdays-bad { font-size:.75rem; color:var(--destructive); }
 .cfg-list-editor { display:flex; flex-direction:column; gap:6px; align-items:flex-start; }
 .cfg-list-row { display:flex; align-items:center; gap:6px; width:100%; max-width:560px; }
 .cfg-list-row > :not(.btn):not(.cfg-list-no):not(.cfg-map-arrow) { flex:1 1 0; min-width:0; }
