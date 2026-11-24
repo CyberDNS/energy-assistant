@@ -61,7 +61,7 @@ function storedTotals(house) {
 // charts of the whole house, and one panel per controlled group (the
 // batteries together, each car, each controlled device).  Used by the Savings
 // page and by the "What it saved" section of a device page.
-export function useSavings(initial = RANGES[2]) {
+export function useSavings(initial = RANGES[0]) {
   const range  = ref(initial)
   const data   = ref(null)
   const loaded = ref(false)
