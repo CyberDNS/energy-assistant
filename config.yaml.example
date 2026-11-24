@@ -261,6 +261,8 @@ devices:
       # purchase_price_eur: 3500      # with cycle_life: wear cost per kWh cycled
       # cycle_life: 6000
       # no_grid_charge: true          # charge from PV surplus only
+      # own_meter: grid_connection    # its own Energy Meter sits at the grid connection
+      #                               # (savings: how it would run without Energy Assistant)
 
   # --- EV charger (openWB, MQTT simpleAPI on backends.mqtt) ---
   # A charging session starts when a car is plugged in: the default vehicle,

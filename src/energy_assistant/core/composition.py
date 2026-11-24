@@ -71,6 +71,7 @@ def _storage_constraint(spec: DeviceSpec) -> StorageConstraints:
         purchase_price_eur=float(purchase_price) if purchase_price is not None else None,
         cycle_life=int(cycle_life) if cycle_life is not None else None,
         no_grid_charge=bool(p.get("no_grid_charge", False)),
+        own_meter=str(p.get("own_meter", "zone")),
         standby_w=float(p.get("standby_w", 50.0)),
     )
 

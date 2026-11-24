@@ -10,7 +10,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-from energy_assistant.core.savings import SavingsSlot
+from energy_assistant.core.savings import SavingsSlot, SavingsTracker
 from energy_assistant.server.remote_access import HA_INGRESS_PROXY, ApiAccessMiddleware
 from energy_assistant.storage.sqlite import SqliteStorageBackend
 
@@ -89,6 +89,7 @@ class TestMcpEndpoint:
         app = Application.__new__(Application)
         app._cfg = AppConfig(server={"api_token": TOKEN})
         app._storage = SqliteStorageBackend(tmp_path / "h.db")
+        app._savings = SavingsTracker([], step_minutes=15)
         await app._storage.start()
         await app._storage.save_savings_slot(
             SavingsSlot(T0, 0.25, real_cost=0.35, uncontrolled_cost=0.40,

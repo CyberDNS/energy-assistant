@@ -19,10 +19,10 @@ the controller's own measurement history (``core/battery_efficiency``) and
 are kept in ``learned_models/efficiency_<id>.json``, so the estimate can
 look back further than the measurement history is kept.
 
-Only the **plan** uses the learned value.  The savings accounting keeps the
-configured values: both of its houses run on the same battery, and a
-battery doing worse than configured should show as lower savings, not be
-hidden by them.
+Once in use, the learned value is used by the **plan** and by the savings
+accounting's uncontrolled house: the real house's losses are what the SoC
+readings show, so the uncontrolled house, which would have the same battery,
+must not run on the configured (usually better) value.
 """
 
 from __future__ import annotations

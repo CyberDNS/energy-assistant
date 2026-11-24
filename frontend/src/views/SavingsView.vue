@@ -38,6 +38,10 @@ onMounted(() => load(range.value))
           <div class="k">Saving</div>
           <div class="v" :class="totals.real >= 0 ? 'ok' : 'bad'">{{ eur(totals.real) }}</div>
           <div v-if="pct != null" class="savings-sub">{{ pct.toFixed(1) }} % of uncontrolled cost</div>
+          <div v-if="totals.real_with_stored != null" class="savings-sub"
+               title="Counting the energy the real house still holds beyond the uncontrolled one, valued at the mean import price of the last 24 h minus what it cost to store">
+            incl. stored energy {{ eur(totals.real_with_stored) }}
+          </div>
         </div>
         <div class="card">
           <div class="k">Uncontrolled house</div>
@@ -58,6 +62,9 @@ onMounted(() => load(range.value))
           <div class="k">All time</div>
           <div class="v" :class="allTime.real >= 0 ? 'ok' : 'bad'">{{ eur(allTime.real) }}</div>
           <div class="savings-sub">over {{ (allTime.hours / 24).toFixed(1) }} days</div>
+          <div v-if="allTime.real_with_stored != null" class="savings-sub">
+            incl. stored energy {{ eur(allTime.real_with_stored) }}
+          </div>
         </div>
       </div>
 
@@ -93,7 +100,9 @@ onMounted(() => load(range.value))
         its batteries charge from PV surplus only and cover the household load, and cars charge
         as late as possible to reach their charge plan. Stored energy is costed when it is used,
         at what it cost to store it (ledger); charging saves nothing by itself, the saving shows
-        when the energy replaces grid power.
+        when the energy replaces grid power. "Incl. stored energy" also counts the energy one
+        house still holds beyond the other, valued at the mean import price of the last 24 h
+        minus what it cost to store.
       </p>
     </template>
   </div>

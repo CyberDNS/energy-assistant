@@ -253,12 +253,24 @@ export function useSavings(initial = RANGES[2]) {
              height: short ? (g.kind === 'car' ? '240px' : '280px') : '220px' }
   }))
 
-  const cumulativeTraces = computed(() => [{
-    name: 'Saving', mode: 'lines', x: x.value,
-    y: cumulative(buckets.value.map(b => b.real)),
-    line: { color: C_SAVING, width: 2.5, shape: 'hv' },
-    fill: 'tozeroy', fillcolor: 'rgba(76,175,125,.12)', hovertemplate: HOVER.value,
-  }])
+  // Booked saving, and the same counting the saving still stored in the
+  // batteries (real minus uncontrolled; gaps where older slots lack it).
+  const cumulativeTraces = computed(() => {
+    const booked = cumulative(buckets.value.map(b => b.real))
+    const start = totals.value?.stored_position_start
+    const withStored = buckets.value.map((b, i) =>
+      start == null || b.stored_position_end == null ? null : booked[i] + b.stored_position_end - start)
+    const traces = [{
+      name: 'Saving', mode: 'lines', x: x.value, y: booked,
+      line: { color: C_SAVING, width: 2.5, shape: 'hv' },
+      fill: 'tozeroy', fillcolor: 'rgba(76,175,125,.12)', hovertemplate: HOVER.value,
+    }]
+    if (withStored.some(v => v != null)) traces.push({
+      name: 'Incl. stored energy', mode: 'lines', x: x.value, y: withStored,
+      line: { color: C_SAVING, width: 1.5, shape: 'hv', dash: 'dot' }, hovertemplate: HOVER.value,
+    })
+    return traces
+  })
 
   const costTraces = computed(() => [
     { name: 'Uncontrolled house', type: 'bar', x: x.value,
@@ -280,7 +292,10 @@ export function useSavings(initial = RANGES[2]) {
     ...extra,
   })
   const savingLayout     = computed(() => layout({ showlegend: false }))
-  const cumulativeLayout = computed(() => layout({ showlegend: false }))
+  const cumulativeLayout = computed(() => layout({
+    showlegend: cumulativeTraces.value.length > 1,
+    legend: { orientation: 'h', y: -0.15, font: { size: 10 } },
+  }))
   const costLayout       = computed(() => layout())
   // Price on its own right axis, scaled to its range (not from 0) so the
   // variation over the window stays visible.
