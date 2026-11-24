@@ -15,6 +15,7 @@ import { pageNav } from '@/composables/usePageTitle'
 import { haState, toggleHAMenu } from '@/lib/homeassistant'
 import { visibleNav } from '@/nav'
 import { vehicles } from '@/stores/inventory'
+import { loadVersion, versionInfo, versionUrl } from '@/stores/version'
 
 const status = inject('status') as Ref<Status | null>
 const { categories } = usePowerFlow(status)
@@ -23,6 +24,8 @@ const { isMobile, setOpenMobile, toggleSidebar, state } = useSidebar()
 
 const groups = computed(() => visibleNav({ categories: categories.value, vehicleCount: vehicles.value.length }))
 const active = computed(() => pageNav.value ?? route.meta.nav)
+
+loadVersion()
 
 // On a phone the sidebar is a drawer: close it once a page is chosen.
 watch(() => route.fullPath, () => { if (isMobile.value) setOpenMobile(false) })
@@ -87,6 +90,14 @@ function openHomeAssistant() {
           </SidebarMenuButton>
         </SidebarMenuItem>
       </SidebarMenu>
+      <component
+        :is="versionUrl ? 'a' : 'span'" v-if="versionInfo"
+        :href="versionUrl ?? undefined" target="_blank" rel="noopener"
+        class="text-muted-foreground hover:text-foreground truncate px-2 text-xs tabular-nums group-data-[collapsible=icon]:hidden"
+        :title="`Energy Assistant ${versionInfo.version}`" data-testid="app-version"
+      >
+        v{{ versionInfo.version }}
+      </component>
     </SidebarFooter>
     <SidebarRail />
   </Sidebar>

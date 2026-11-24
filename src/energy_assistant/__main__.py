@@ -57,6 +57,7 @@ import sys
 from pathlib import Path
 
 from .server import Application
+from .version import version_label
 
 _DEFAULT_CONFIG = "config.yaml"
 _DEFAULT_DB = "data/history.db"
@@ -166,6 +167,7 @@ def main() -> None:
         print(_HELP, end="")
         return
     _configure_logging()
+    logging.getLogger(__name__).info("Energy Assistant %s", version_label())
     config_path, db_path = _parse_args()
     # A config mistake never ends the process: the app then starts in
     # "configuration needed" state and shows the problems in the web UI.

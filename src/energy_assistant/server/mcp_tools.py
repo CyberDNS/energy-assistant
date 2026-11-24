@@ -71,6 +71,12 @@ def build_mcp_server(api: FastAPI) -> MCPServer:
         return await get("/api/status")
 
     @mcp.tool(annotations=_READ_ONLY)
+    async def get_version() -> dict[str, Any]:
+        """Version of the running build: release, channel (``dev`` for builds
+        of main) and git commit."""
+        return await get("/api/version")
+
+    @mcp.tool(annotations=_READ_ONLY)
     async def get_plan() -> dict[str, Any]:
         """The active optimizer plan: per-slot flows (load, PV, storage, EV,
         stored energy, prices), predicted economics and the control intents."""

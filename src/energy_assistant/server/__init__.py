@@ -146,6 +146,7 @@ from ..plugins.mqtt_publisher import (
     select_discovery_devices,
 )
 from ..storage.sqlite import HISTORY_5M_RETENTION, SqliteStorageBackend
+from ..version import version_info, version_label
 from .config_api import mount_config_api
 from .mcp_tools import mount_mcp_server
 from .remote_access import DEFAULT_TRUSTED_HOSTS, ApiAccessMiddleware
@@ -2496,12 +2497,17 @@ class Application:
                     await stack.enter_async_context(mcp.session_manager.run())
                 yield
 
-        api = FastAPI(title="Energy Assistant", version="0.1", lifespan=lifespan)
+        api = FastAPI(title="Energy Assistant", version=version_label(), lifespan=lifespan)
 
         @api.get("/health")
         async def health() -> dict:
             """Liveness probe endpoint used by container health checks."""
             return {"status": "ok", "configuration": self.configuration_state()["state"]}
+
+        @api.get("/api/version")
+        async def get_version() -> dict:
+            """Version of the running build (shown in the UI, asked for in problem reports)."""
+            return version_info()
 
         async def _status_payload() -> dict:
             """Live snapshot: grid power, price, device states, setpoints, ledger.
