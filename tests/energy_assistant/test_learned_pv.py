@@ -293,3 +293,43 @@ def test_registry_builds_learned_pv_and_needs_home_assistant(tmp_path: Path) -> 
     provider = registry.build_forecast("pv", cfg, ctx)
     assert isinstance(provider, LearnedPvForecast)
     assert registry.build_forecast("pv", cfg, BuildContext(backends=None)) is None
+
+
+async def test_learned_endpoint_links_the_pv_forecast_to_its_device() -> None:
+    import types
+
+    import httpx
+
+    from energy_assistant.core.device_model import DeviceCategory
+    from energy_assistant.server import Application
+
+    class Provider:
+        forecast_id = "pv_learned"
+
+        async def diagnostics(self, horizon):
+            return {"id": "pv_learned", "kind": "pv", "device_id": None,
+                    "history_entity": "sensor.pv_power"}
+
+    class Registry:
+        def by_category(self, category):
+            assert category is DeviceCategory.PV
+            return [types.SimpleNamespace(device_id="roof_east"),
+                    types.SimpleNamespace(device_id="roof_south")]
+
+    app = Application.__new__(Application)
+    from energy_assistant.core.config import AppConfig
+
+    app._cfg = AppConfig()
+    object.__setattr__(app._cfg, "devices", {
+        "roof_east": {"power_w": {"entity": "sensor.east_power"}},
+        "roof_south": {"power_w": {"entity": "sensor.pv_power"}},
+    })
+    app._registry = Registry()
+    app._forecast_providers = [Provider()]
+    app._thermal_learners = {}
+    app._efficiency_learners = {}
+    app._horizon = timedelta(hours=24)
+    transport = httpx.ASGITransport(app=app._build_api(), client=("127.0.0.1", 1))
+    async with httpx.AsyncClient(transport=transport, base_url="http://ea") as c:
+        (item,) = (await c.get("/api/learned")).json()
+    assert item["device_id"] == "roof_south" and item["category"] == "pv"
