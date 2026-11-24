@@ -3,7 +3,7 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 export interface LearnedKind {
-  id: 'consumption' | 'thermal' | 'storage'
+  id: 'consumption' | 'pv' | 'thermal' | 'storage'
   title: string
   about: string
 }
@@ -11,6 +11,8 @@ export interface LearnedKind {
 export const LEARNED_KINDS: LearnedKind[] = [
   { id: 'consumption', title: 'Consumption forecasts',
     about: 'Daily energy per consumer, from the outdoor temperature and the kind of day, spread over the day with a learned hourly shape. Feeds the consumption forecast.' },
+  { id: 'pv', title: 'Solar forecast',
+    about: 'The PV system learned from its measured production against past weather forecasts: orientation, tilt, peak power, shading and snow. Applied to the current weather forecast and corrected by the last hour. Feeds the PV forecast.' },
   { id: 'thermal', title: 'Heating and cooling behaviour',
     about: 'Devices kept between a minimum and a maximum (aquarium, fridge, AC): how fast the value drifts while idle and moves while running. Lets the planner shift their runs.' },
   { id: 'storage', title: 'Battery efficiency',
@@ -18,7 +20,8 @@ export const LEARNED_KINDS: LearnedKind[] = [
 ]
 
 export function learnedKind(item: any): LearnedKind['id'] {
-  return item.category ?? (item.kind === 'thermal' ? 'thermal' : item.kind === 'efficiency' ? 'storage' : 'consumption')
+  return item.category ?? (item.kind === 'thermal' ? 'thermal' : item.kind === 'efficiency' ? 'storage'
+    : item.kind === 'pv' ? 'pv' : 'consumption')
 }
 
 /** The status pill: whether planning uses what was learned. */

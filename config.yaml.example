@@ -37,6 +37,17 @@ forecasts:
     azimuth: 0                    # 0 = south, -90 = east, 90 = west
     kwp: 7.4
     # api_key: !secret forecast_solar_key   # optional (personal plan)
+  # Or learn the PV system from its own history (no orientation, tilt or kWp
+  # needed): Home Assistant's PV statistics against Open-Meteo's weather
+  # forecasts (https://open-meteo.com, free for non-commercial use).  Use one
+  # of the two — several PV forecasts are added up.
+  # pv:
+  #   type: learned_pv
+  #   latitude: 49.8
+  #   longitude: 6.4
+  #   history_entity: sensor.pv_power   # PV power sensor with long-term statistics
+  #   device: pv                        # optional: show the model on the PV device page
+  #   fallback: { type: forecast_solar, latitude: 49.8, longitude: 6.4, declination: 20, azimuth: 0, kwp: 7.4 }
 
 # ---------------------------------------------------------------------------
 # Tariffs — pricing models, referenced by id from devices (tariff: <id>)
