@@ -26,7 +26,6 @@ from energy_assistant.core.models import (
     DeviceState,
     StorageConstraints,
 )
-from energy_assistant.plugins.openwb_homeassistant.device import OpenWBDevice
 
 
 def _asset(device_id: str = "wallbox") -> EvChargingAsset:
@@ -334,8 +333,20 @@ def test_grid_planned_ev_does_not_force_others_to_yield() -> None:
 
 
 # ---------------------------------------------------------------------------
-# OpenWBDevice — reconciliation (check current state before writing)
+# openwb_homeassistant (old form, built as a homeassistant_charger) —
+# reconciliation (check current state before writing)
 # ---------------------------------------------------------------------------
+
+
+def OpenWBDevice(device_id, client, **settings):  # noqa: N802 — keeps the tests' old shape
+    from energy_assistant.core.config import BackendsConfig
+    from energy_assistant.core.plugin_registry import BuildContext
+    from energy_assistant.plugins import registry
+
+    return registry.build_device(
+        device_id, {"type": "openwb_homeassistant", "category": "charger", **settings},
+        BuildContext(backends=BackendsConfig(), ha_client=client),
+    )
 
 
 @pytest.mark.asyncio
