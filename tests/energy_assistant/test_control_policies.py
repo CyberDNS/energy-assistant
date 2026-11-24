@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -851,3 +851,57 @@ def test_discharge_does_not_feed_another_batterys_grid_charging() -> None:
     sp = _setpoints(loop, _live(now, 500.0, 0.30, "dis", "chg"))
     assert sp["chg"] == 1500.0
     assert -500.0 - 1e-6 <= sp["dis"] <= 0.0
+
+
+class _FailingStorageDevice(_FakeStorageDevice):
+    def __init__(self, device_id: str) -> None:
+        super().__init__(device_id)
+        self.fail = True
+
+    async def send_command(self, command: DeviceCommand) -> None:
+        if self.fail:
+            raise RuntimeError("write holding 40793 rejected")
+        await super().send_command(command)
+
+
+@pytest.mark.asyncio
+async def test_a_failing_device_does_not_block_the_others(caplog) -> None:
+    import logging
+
+    now = datetime.now(UTC)
+    ledger = BatteryCostLedger()
+    loop = ControlLoop(ledger=ledger)
+    for device_id in ("bad", "good"):
+        loop.register_contributor(StorageControlContributor(_constraints(device_id)))
+    loop.update_plan(EnergyPlan(intents=[
+        ControlIntent(device_id=d, timestep=now, power_kw=1.0) for d in ("bad", "good")
+    ]))
+    registry = DeviceRegistry()
+    bad, good = _FailingStorageDevice("bad"), _FakeStorageDevice("good")
+    registry.register(bad)
+    registry.register(good)
+    live = LiveSituation(
+        timestamp=now,
+        grid_power_w=0.0,
+        dt_hours=1.0,
+        device_states={d: DeviceState(device_id=d, power_w=1000.0) for d in ("bad", "good")},
+        current_price_eur_per_kwh=0.25,
+        pv_opportunity_price_eur_per_kwh=0.08,
+    )
+
+    with caplog.at_level(logging.INFO, logger="energy_assistant.core.control"):
+        await loop.tick(live, registry)
+        await loop.tick(live, registry)
+        bad.fail = False
+        await loop.tick(live, registry)
+
+    # The device after the failing one is still commanded on every tick …
+    assert [c.value for c in good.commands] == [1000.0, 1000.0, 1000.0]
+    # … the failing one again on each tick, and it gets through once it works.
+    assert [c.value for c in bad.commands] == [1000.0]
+    # The ledger still follows both batteries' measured power.
+    assert ledger.stored_energy("bad") == pytest.approx(ledger.stored_energy("good"))
+    assert ledger.stored_energy("bad") > 0
+    messages = [r.getMessage() for r in caplog.records]
+    assert sum("command to 'bad' failed" in m for m in messages) == 1  # warned once
+    assert any("commands to 'bad' work again" in m for m in messages)

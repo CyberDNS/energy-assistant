@@ -75,10 +75,11 @@ rate and the tick duration.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from .grid_limit import GridLimit, GridLimitGuard
 from .ledger import BatteryCostLedger
@@ -565,6 +566,8 @@ class ControlLoop:
         # Energy delivered per storage device in the current charge slot
         # (see _slot_energy_target_w).
         self._slot_energy: dict[str, _SlotEnergy] = {}
+        # Devices whose last command failed (logged once until it works again).
+        self._failing: set[str] = set()
 
     # ------------------------------------------------------------------
     # Plan management
@@ -671,13 +674,7 @@ class ControlLoop:
             if setpoint_w is not None:
                 device = registry.get(contributor.device_id)
                 if device is not None:
-                    await device.send_command(
-                        DeviceCommand(
-                            device_id=contributor.device_id,
-                            command="set_power_w",
-                            value=round(setpoint_w, 1),
-                        )
-                    )
+                    await self._send(device, contributor.device_id, setpoint_w)
                 else:
                     _log.warning(
                         "ControlLoop: device %r not found in registry — skipping",
@@ -719,6 +716,28 @@ class ControlLoop:
                     max_charge_kw=contributor._constraints.max_charge_kw,
                     charge_efficiency=contributor._constraints.charge_efficiency,
                 )
+
+    async def _send(self, device: Any, device_id: str, setpoint_w: float) -> None:
+        """Command one device.  A failure is logged and does not stop the tick:
+        the other devices still get their commands, the ledger is still
+        updated, and the device is commanded again on the next tick."""
+        try:
+            await device.send_command(DeviceCommand(
+                device_id=device_id, command="set_power_w", value=round(setpoint_w, 1),
+            ))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — one device must not block the others
+            if device_id in self._failing:
+                _log.debug("ControlLoop: command to %r still failing: %s", device_id, exc)
+            else:
+                self._failing.add(device_id)
+                _log.warning("ControlLoop: command to %r failed, retrying every tick: %s",
+                             device_id, exc)
+            return
+        if device_id in self._failing:
+            self._failing.discard(device_id)
+            _log.info("ControlLoop: commands to %r work again", device_id)
 
     # ------------------------------------------------------------------
     # Dry-run helper
