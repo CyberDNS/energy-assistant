@@ -1097,6 +1097,55 @@ def stored_position(
     return result
 
 
+def fill_stored_values(
+    details: Sequence[Mapping[str, Mapping[str, float]] | None],
+) -> list[Mapping[str, Mapping[str, float]] | None]:
+    """Give slots recorded before the ledger values were stored an estimate
+    of them, so their stored energy can be valued too.
+
+    *details*: the slots' ``stored_detail``, oldest first.  A slot without
+    ``real_value`` / ``uncontrolled_value`` gets ``kWh × cost per kWh`` of the
+    same house and battery from the latest earlier slot that has it, else from
+    the first later one.  Without any such slot it stays as it is."""
+    houses = ("real", "uncontrolled")
+    # Cost per kWh per (house, device) of the first slot that has values.
+    first_known: dict[tuple[str, str], float] = {}
+    for detail in details:
+        for house in houses:
+            kwh_by = (detail or {}).get(house) or {}
+            for device_id, value in ((detail or {}).get(f"{house}_value") or {}).items():
+                kwh = kwh_by.get(device_id, 0.0)
+                if kwh > 1e-9:
+                    first_known.setdefault((house, device_id), value / kwh)
+    if not first_known:
+        return list(details)
+    known = dict(first_known)
+    out: list[Mapping[str, Mapping[str, float]] | None] = []
+    for detail in details:
+        if not detail:
+            out.append(detail)
+            continue
+        filled = dict(detail)
+        for house in houses:
+            kwh_by = detail.get(house)
+            if kwh_by is None:
+                continue
+            value_by = detail.get(f"{house}_value")
+            if value_by is not None:
+                for device_id, value in value_by.items():
+                    kwh = kwh_by.get(device_id, 0.0)
+                    if kwh > 1e-9:
+                        known[(house, device_id)] = value / kwh
+                continue
+            filled[f"{house}_value"] = {
+                device_id: kwh * known[(house, device_id)]
+                for device_id, kwh in kwh_by.items()
+                if (house, device_id) in known
+            }
+        out.append(filled)
+    return out
+
+
 def day_ahead_window_end(now: datetime, lead: timedelta) -> datetime:
     """End (exclusive) of the local day a plan made at *now* plans ahead for.
 
