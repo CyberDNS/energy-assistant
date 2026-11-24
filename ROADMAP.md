@@ -33,15 +33,23 @@ and what comes later. Open items link to their GitHub issue.
 - [x] Real-time control layer: follows the plan per slot, tracks slot energy for charge intents, shares PV by capability, grid connection limit (#75)
 - [x] PV surplus at the household meter valued at the secondary tariff when separately billed loads would use it (#78)
 - [x] Persisted plans, plan snapshots, control execution log and SoC corrections
+- [x] Explicit behaviours for batteries and chargers (`charge`, `discharge`, `hold`, `absorb_surplus`, `self_consumption`, `stop`) next to the watt value; devices declare what they support (#127)
+- [x] A failing device no longer aborts the control tick; the others still get their commands (#125)
 
 ### Devices and sources
-- [x] Tibber: prices and cloud live meter (native)
+- [x] Tibber: prices and cloud live meter (native; device plugin `tibber_cloud`)
 - [x] Tibber Pulse read locally from the bridge, SML decoding (#61)
 - [x] Tasmota: meters via IR heads (main grid meter) and energy plugs, read locally (#95)
-- [x] Modbus TCP, profile-driven, with SMA Sunny Boy Storage profile (native)
+- [x] Modbus TCP, profile-driven, with SMA Sunny Boy Storage profile (native); the SMA is commanded through its battery management, released when Energy Assistant stops (#123)
 - [x] Zendure via cloud or local MQTT (native)
 - [x] openWB via MQTT or Home Assistant; vehicle assigned to the chargepoint by Energy Assistant
-- [x] Generic Home Assistant devices, HA switches, HA threshold devices
+- [x] Home Assistant connection over one websocket with a state cache and service calls; REST only as fallback (#124)
+- [x] Home Assistant device types for every category, configured through entities only (#106):
+  - shared read bindings and actuators (switch, number, select) with write-on-mismatch, rate limit and read-back; `homeassistant_sensor` (#126)
+  - `homeassistant_battery`: signed power number, separate charge/discharge numbers, mode + power, action, or mode control (#128)
+  - `homeassistant_charger`: current, power or action control, optional phases (#129)
+  - `homeassistant_thermostat`: climate and water heater by target temperature, HVAC mode or preset, with safety fallback (#130)
+  - presets in the config UI (openWB, go-e, Wallbox, Huawei LUNA2000, SolarEdge, thermostats, hot-water tank) and an HA entity selector (#131)
 - [x] Consumers imported automatically from the HA Energy dashboard ("individual devices"), incl. nesting (#93)
 - [x] Forecast.Solar PV forecast (native)
 - [x] Flat-rate and static-profile tariffs/forecasts
@@ -59,29 +67,8 @@ and what comes later. Open items link to their GitHub issue.
 - [x] Learned thermal model for threshold devices, optional ambient temperature (#88)
 - [x] Battery round-trip efficiency learned from measurements (#58)
 
-### Savings and accounting
-- [x] Predicted (day-ahead) vs. real savings KPIs
-- [x] Comparison against a simulated uncontrolled house, with a ledger on both sides (#82)
-- [x] Battery standby, idle drift and forced recharge shared with the simulated house
-- [x] Uncontrolled car recalculated after an early unplug
-- [x] Threshold devices included; per-device savings panels (#89)
-
-### UI, integration and operations
-- [x] Built-in web UI: live state, plan, savings charts, per-vehicle plan views (embeddable)
-- [x] MQTT to Home Assistant: EV entities, charging state, range, price curve, savings KPIs, non-HA devices as sub-devices
-- [x] Read-only REST API and MCP endpoint with token
-- [x] Docker image (GHCR), HA add-on (stable / dev / edge), release promotion model
-- [x] UI refresh (#115): sidebar with Overview / Devices / Insights / System, status bar and attention notices, Settings area, pages for cars, batteries and loads, light and dark theme; takes over the screen inside Home Assistant (2026.2+)
-- [x] Device-centred UI (#117): a page per device with plan, history, savings and learned model; All devices; Home as a house overview (power flow, today's timeline, next actions)
-- [x] Compact history (#118): 5-minute and hourly roll-ups instead of every reading
-- [x] Logo, Home Assistant sidebar entry, time-only chart interaction (#119)
-- [x] Optional `api_url` for Tibber and Forecast.Solar to run against a local test server; isolated dev/test stacks per worktree
-
----
-
-## Next: finish the device model (#97)
-
-- [x] Phase 6: configuration UI on top of the category schemas — Devices tab with the device list by category, forms generated from the schemas, "metered by" / "controlled by" / default-vehicle dropdowns; writes `config.yaml` in place and applies it without a restart
+### Configuration (#97 phase 6, #114)
+- [x] Configuration UI on top of the category schemas — Devices tab with the device list by category, forms generated from the schemas, "metered by" / "controlled by" / default-vehicle dropdowns; writes `config.yaml` in place and applies it without a restart
 - [x] Changing a charger's default vehicle from the UI
 - [x] Plugin settings declared per plugin (typed, validated at startup)
 - [x] Configuration UI for the other sections (backends, tariffs, forecasts, optimizer, controller, server, logging, energy dashboard), with the whole file validated at startup
@@ -90,6 +77,27 @@ and what comes later. Open items link to their GitHub issue.
 - [x] One `meter` category: the meter without `metered_by` is the grid connection (`grid_meter` is gone)
 - [x] Device plugin `tibber` renamed to `tibber_cloud` (next to `tibber_local`); the tariff type stays `tibber`
 - [x] Friendly names for plugins, categories, capabilities and fields; defaults shown in the dropdowns; fields that depend on another choice only appear with it
+
+### Savings and accounting
+- [x] Predicted (day-ahead) vs. real savings KPIs
+- [x] Comparison against a simulated uncontrolled house, with a ledger on both sides (#82)
+- [x] Battery standby, idle drift and forced recharge shared with the simulated house
+- [x] Uncontrolled car recalculated after an early unplug
+- [x] Threshold devices included; per-device savings panels (#89)
+- [x] Stored energy counted ("incl. stored energy"), learned battery efficiency in the savings tracker, `own_meter` setting for batteries with their own meter (#122)
+
+### UI, integration and operations
+- [x] Built-in web UI: live state, plan, savings charts, per-vehicle plan views (embeddable)
+- [x] MQTT to Home Assistant: EV entities, charging state, range, price curve, savings KPIs, non-HA devices as sub-devices
+- [x] Read-only REST API and MCP endpoint with token
+- [x] Docker image (GHCR), HA add-on (stable / dev / edge), release promotion model
+- [x] UI refresh (#115): sidebar with Overview / Devices / Insights / System, status bar and attention notices, Settings area, pages for cars, batteries and loads, light and dark theme; takes over the screen inside Home Assistant (2026.2+) (#116)
+- [x] Device-centred UI (#117): a page per device with plan, history, savings and learned model; All devices; Home as a house overview (power flow, today's timeline, next actions) (#120)
+- [x] Compact history (#118): 5-minute and hourly roll-ups instead of every reading
+- [x] Logo, Home Assistant sidebar entry and logo button, time-only chart interaction (#119, #121)
+- [x] Optional `api_url` for Tibber and Forecast.Solar to run against a local test server; isolated dev/test stacks per worktree
+
+---
 
 ## Next: vehicles
 
@@ -113,14 +121,15 @@ and what comes later. Open items link to their GitHub issue.
 
 - [ ] Phase-aware EV charging: fuse limit, 1/3-phase switching; first check the openWB interface (#69)
 - [ ] Time-variable grid fees (§14a EnWG Modul 3), later §14a dimming (#71)
-- [ ] Heat pump as controllable load via SG-Ready / HA entities (#66)
+- [ ] Heat pump as controllable load via SG-Ready (#66); climate / water heater control via HA already possible with `homeassistant_thermostat` (#130)
 
 ## Community readiness
 
 - [ ] Issue forms for device requests and problem reports (#101)
 - [ ] Support page: anonymised, encrypted support bundle with replayable scenario, pre-filled issue (#102)
 - [ ] Tariffs: ENTSO-E day-ahead with fee/tax formula (#103), time-of-use (#104), power-dependent charges for Luxembourg and Flanders (#105)
-- [ ] Generic devices: controllable batteries and wallboxes via HA entities (#106), OCPP 1.6J (#107), Modbus SunSpec (#108)
+- [x] Generic devices via Home Assistant entities for all categories, with presets (#106); still open: presets marked "not yet" verified on real installations
+- [ ] Generic devices: OCPP 1.6J (#107), Modbus SunSpec (#108)
 
 ## Platform
 
@@ -131,8 +140,10 @@ and what comes later. Open items link to their GitHub issue.
 
 ## Housekeeping (outside the repo)
 
-- [ ] After a few quiet days without ioBroker: remove the stale HA leftovers (Zendure MQTT sensors and text entity, `tibber-adjusted-prices` sensor and its "Home Old" chart, the ioBroker restart automation), then remove the ioBroker container
-- [ ] `push_soc_to_charger: false` for both cars (openWB reads the SoC from Home Assistant directly)
+- [x] Home Assistant leftovers from ioBroker removed (2026-11-24): Zendure Solarflow MQTT sensors and charge-mode text entity, Tibber adjusted price list (its "Home Old" chart now uses Energy Assistant's price curve), Energy AI actions sensor, the ioBroker restart automation
+- [ ] Stop the ioBroker container on bear (David, in Unraid); keep it for now
+- [ ] Remove the ioBroker container and its appdata once nothing has been missed
+- [x] `push_soc_to_charger: false` for both cars (openWB reads the SoC from Home Assistant directly)
 
 ---
 
