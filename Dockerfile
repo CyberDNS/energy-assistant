@@ -87,6 +87,14 @@ USER energyassistant
 # Default environment
 ENV LOG_LEVEL=INFO
 
+# Build identity, shown in the UI as e.g. 0.1.3-dev+1a2b3c4 (see version.py).
+# Set by docker-publish.yml; declared last so a new commit doesn't invalidate
+# the cached layers above.
+ARG GIT_COMMIT=""
+ARG BUILD_CHANNEL=""
+ENV ENERGY_ASSISTANT_COMMIT=${GIT_COMMIT} \
+    ENERGY_ASSISTANT_CHANNEL=${BUILD_CHANNEL}
+
 # API port (default in application is 8088; override via config.yaml server.port)
 EXPOSE 8088
 

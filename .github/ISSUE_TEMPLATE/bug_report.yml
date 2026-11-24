@@ -1,0 +1,83 @@
+name: Problem report
+description: Something doesn't work as expected (plan, control, savings, a device, the UI, …).
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Please check the [open issues](https://github.com/CyberDNS/energy-assistant/issues?q=is%3Aissue+label%3Abug) first.
+
+        **Don't paste passwords, tokens, API keys, IP addresses or your Tibber home id.** Logs and config excerpts are public here.
+
+  - type: input
+    id: version
+    attributes:
+      label: Energy Assistant version
+      description: Shown at the bottom of the sidebar in the Energy Assistant web UI.
+      placeholder: e.g. 0.1.3 or 0.1.3-dev+1a2b3c4
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install_type
+    attributes:
+      label: Installation type
+      options:
+        - Home Assistant add-on
+        - Docker container
+        - Other (from source, …)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      description: Which part of Energy Assistant is affected?
+      options:
+        - Plan (optimizer)
+        - Control (setpoints sent to devices)
+        - Savings
+        - Device (reading or controlling a device)
+        - UI
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: time_window
+    attributes:
+      label: When did it happen?
+      description: Date, time and time zone, as exact as you can. Lets us find the right plan snapshots and log lines.
+      placeholder: e.g. 2026-11-24 17:00–19:30 CET
+    validations:
+      required: true
+
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: What happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+
+  - type: textarea
+    id: support_bundle
+    attributes:
+      label: Support bundle, logs or screenshots
+      description: |
+        Attach the support bundle (drag the file in here) or a link to it, or paste relevant log lines and screenshots.
+        Remove secrets and IP addresses from anything you paste yourself.
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Anything else?
+      description: Relevant config excerpts, devices involved, what you already tried.

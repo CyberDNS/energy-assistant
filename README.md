@@ -4,6 +4,17 @@ An open-source, vendor-neutral energy management platform for homeowners.
 
 See [VISION.md](VISION.md) for the project vision and [ARCHITECTURE.md](ARCHITECTURE.md) for the technical design.
 
+## Support
+
+- **Something doesn't work?** Open a [problem report](https://github.com/CyberDNS/energy-assistant/issues/new?template=bug_report.yml).
+  It asks for the version, installation type, time window and what happened.
+- **Your device isn't supported yet?** Open a [device request](https://github.com/CyberDNS/energy-assistant/issues/new?template=device_request.yml).
+  It asks for the interfaces the device offers, existing integrations and, if
+  it is in Home Assistant already, its entities.
+- **Questions and ideas:** [GitHub Discussions](https://github.com/CyberDNS/energy-assistant/discussions).
+
+Please don't post passwords, tokens or IP addresses in issues: they are public.
+
 ## Container images
 
 Pre-built multi-arch images are published to GHCR:
@@ -116,7 +127,7 @@ access: `GET` on the REST API and the MCP endpoint. Writes are refused (403);
 the web UI behind ingress keeps full control. `/health` stays open.
 
 The MCP endpoint is `http://<host>:<port>/mcp` (streamable HTTP, stateless).
-Its tools are read-only wrappers around the REST API: `get_status`,
+Its tools are read-only wrappers around the REST API: `get_status`, `get_version`,
 `get_plan` (full per-slot flows), `get_forecast`, `get_savings`,
 `get_savings_slots` (real vs. simulated uncontrolled house per accounting
 slot, with all cost components), `get_history`, `get_execution`,

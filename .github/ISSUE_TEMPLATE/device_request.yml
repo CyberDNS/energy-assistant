@@ -1,0 +1,140 @@
+name: Support for a new device
+description: Ask for Energy Assistant to read or control a device it doesn't support yet.
+title: "device: <manufacturer> <model>"
+labels: ["device-request"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for asking! The more of this you can fill in, the faster we can judge whether and how the device can be supported.
+        Please check the [open device requests](https://github.com/CyberDNS/energy-assistant/issues?q=is%3Aissue+label%3Adevice-request) first: if your device is already there, add a 👍 or a comment instead.
+
+        **Don't paste passwords, tokens, serial numbers or IP addresses.**
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      description: What kind of device is it?
+      options:
+        - Battery
+        - Inverter
+        - PV
+        - Wallbox / EV charger
+        - Meter
+        - Heat pump
+        - Switchable load
+        - Tariff / price source
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: manufacturer
+    attributes:
+      label: Manufacturer
+      placeholder: e.g. SMA
+    validations:
+      required: true
+
+  - type: input
+    id: model
+    attributes:
+      label: Model
+      placeholder: e.g. Sunny Boy Storage 3.7
+    validations:
+      required: true
+
+  - type: input
+    id: firmware
+    attributes:
+      label: Firmware version
+      description: If you know it. Leave empty otherwise.
+      placeholder: e.g. 3.10.12.R
+
+  - type: checkboxes
+    id: functions
+    attributes:
+      label: What should Energy Assistant do with it?
+      options:
+        - label: Read power
+        - label: Read state of charge (SoC)
+        - label: Read energy counters (kWh)
+        - label: Set power / setpoint
+        - label: Set mode
+        - label: Set charging current
+        - label: Switch on/off
+
+  - type: checkboxes
+    id: interfaces
+    attributes:
+      label: Interfaces the device offers
+      description: Check all that apply. The device's manual or app settings usually say.
+      options:
+        - label: Modbus TCP
+        - label: Modbus RTU
+        - label: SunSpec
+        - label: Local HTTP / REST API
+        - label: MQTT
+        - label: OCPP
+        - label: EEBus
+        - label: Cloud API only
+        - label: Unknown
+
+  - type: textarea
+    id: integrations
+    attributes:
+      label: Existing integrations
+      description: |
+        Links to code that already talks to this device: Home Assistant core or HACS integration, ioBroker adapter, evcc, openHAB binding, Python library, or anything else.
+      placeholder: |
+        - Home Assistant: https://www.home-assistant.io/integrations/...
+        - evcc: https://docs.evcc.io/...
+        - Python library: https://github.com/...
+
+  - type: dropdown
+    id: in_home_assistant
+    attributes:
+      label: Is the device already in your Home Assistant?
+      options:
+        - "Yes"
+        - "No"
+    validations:
+      required: true
+
+  - type: textarea
+    id: ha_entities
+    attributes:
+      label: Home Assistant integration and entities
+      description: |
+        If it is in Home Assistant: the integration's name and its entities with their units.
+        In Home Assistant go to *Developer tools → States*, filter by the device and paste the list here.
+      placeholder: |
+        Integration: SMA Solar (sma)
+        sensor.sbs_battery_soc_total  87  %
+        sensor.sbs_battery_power_charge_total  1200  W
+      render: text
+
+  - type: textarea
+    id: documentation
+    attributes:
+      label: Documentation / protocol description
+      description: Links to the Modbus register list, API docs or similar.
+      placeholder: https://...
+
+  - type: dropdown
+    id: can_test
+    attributes:
+      label: Can you test a development version?
+      description: Device support usually needs a few rounds of testing on a real device.
+      options:
+        - "Yes"
+        - "No"
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Anything else?
+      description: Other details, screenshots, special setups (e.g. several devices, cascades, a gateway in between).
