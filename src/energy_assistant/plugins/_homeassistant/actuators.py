@@ -5,6 +5,7 @@ One implementation for every Home Assistant device type:
 ``SwitchActuator``   on/off — ``switch``, ``input_boolean``, ``light``, ``fan``
 ``NumberActuator``   a number — ``number``, ``input_number``
 ``SelectActuator``   an option — ``select``, ``input_select``
+``ActionActuator``   any action (script, service) with the value as a variable
 
 Each ``apply(desired)``
 
@@ -177,24 +178,38 @@ class SwitchActuator(Actuator):
         await self._client.call_service("homeassistant", service, {"entity_id": self.entity_id})
 
 
+#: unit_of_measurement → W, for ``NumberActuator(power=True)``.
+_POWER_UNITS = {"w": 1.0, "kw": 1000.0, "mw": 1e6}
+
+
 class NumberActuator(Actuator):
-    """A number entity (``number.set_value``), clamped to its min / max and step."""
+    """A number entity (``number.set_value``), clamped to its min / max and step.
+
+    ``power=True``: ``apply`` takes watts and converts them to the entity's
+    unit (W or kW); the tolerance is in W too.
+    """
 
     domains = NUMBER_DOMAINS
 
     def __init__(
         self, where: str, client: Any, entity_id: str, *,
         tolerance: float = 0.5, minimum: float | None = None, maximum: float | None = None,
-        **kwargs: Any,
+        power: bool = False, **kwargs: Any,
     ) -> None:
         super().__init__(where, client, entity_id, **kwargs)
         self.tolerance = tolerance
         self.minimum = minimum
         self.maximum = maximum
+        self.power = power
+        self._factor = 1.0  # W per entity unit (power numbers)
 
     def _normalize(self, desired: Any, state: Any) -> float:
         value = float(desired)
         attrs = state.attributes if state is not None else {}
+        if self.power:
+            unit = str(attrs.get("unit_of_measurement") or "W").strip().lower()
+            self._factor = _POWER_UNITS.get(unit, 1.0)
+            value /= self._factor
         lo = _first_number(self.minimum, attrs.get("min"))
         hi = _first_number(self.maximum, attrs.get("max"))
         if lo is not None:
@@ -216,7 +231,7 @@ class NumberActuator(Actuator):
         return None if math.isnan(value) else value
 
     def _matches(self, desired: Any, current: Any) -> bool:
-        return abs(float(desired) - float(current)) <= self.tolerance
+        return abs(float(desired) - float(current)) * self._factor <= self.tolerance
 
     async def _write(self, value: float) -> None:
         await self._client.call_service(self.domain, "set_value",
@@ -249,6 +264,56 @@ class SelectActuator(Actuator):
     async def _write(self, value: str) -> None:
         await self._client.call_service(self.domain, "select_option",
                                         {"entity_id": self.entity_id, "option": value})
+
+
+class ActionActuator:
+    """Calls an action (``script.charge_battery``, ``modbus.write_register``,
+    …) with the value in its data.
+
+    An action has no state to read back: it is called when the value
+    differs from the last call by more than *tolerance*, and again every
+    *refresh_s* (the device or an integration restart may have lost it).
+    """
+
+    def __init__(
+        self, where: str, client: Any, action: str, *,
+        data: dict[str, Any] | None = None, value_key: str = "power_w",
+        tolerance: float = 25.0, refresh_s: float = 60.0,
+    ) -> None:
+        domain, dot, service = action.partition(".")
+        if not dot or not domain or not service:
+            raise DeviceConfigError([f"{where}: action must be like script.name, got {action!r}"])
+        self.where = where
+        self._client = client
+        self.domain, self.service = domain, service
+        self.data = dict(data or {})
+        self.value_key = value_key
+        self.tolerance = tolerance
+        self.refresh_s = refresh_s
+        self._last: float | None = None
+        self._last_at: float | None = None
+        self._clock = time.monotonic
+
+    @property
+    def entity_id(self) -> str:
+        return f"{self.domain}.{self.service}"
+
+    @property
+    def health(self) -> ActuatorHealth:
+        return ActuatorHealth(self.entity_id, self._last, None)
+
+    async def apply(self, desired: Any) -> bool:
+        value = float(desired)
+        now = self._clock()
+        fresh = self._last_at is not None and now - self._last_at < self.refresh_s
+        if fresh and self._last is not None and abs(value - self._last) <= self.tolerance:
+            return False
+        await self._client.call_service(self.domain, self.service,
+                                        {**self.data, self.value_key: value})
+        if self._last is None or abs(value - self._last) > self.tolerance:
+            _log.info("%s: %s(%s=%r)", self.where, self.entity_id, self.value_key, value)
+        self._last, self._last_at = value, now
+        return True
 
 
 def _first_number(*values: Any) -> float | None:
