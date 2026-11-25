@@ -172,7 +172,24 @@ class ParamSpec:
     label: str = ""
     """Short title for the config UI (default: the key)."""
     widget: str = ""
-    """Name of a dedicated editor in the config UI (e.g. ``load_profile``)."""
+    """Name of a dedicated editor in the config UI: ``load_profile``,
+    ``weekdays``, ``time`` / ``time_end`` (quarter hours; ``time_end`` also
+    offers 24:00), ``month_day`` (``MM-DD``), ``checkbox`` (a yes/no that is
+    off when unset), ``exclusive`` (a yes/no that only one item of the list
+    may have: picked in one dropdown for the whole list) …"""
+    item_label: str = ""
+    """``list`` / ``dict`` with free keys: what one item is called in the
+    config UI ("period" → "+ Add period", "Remove period")."""
+    summary: str = ""
+    """``dict`` item of a list: the title of its card in the config UI, with
+    ``{field}`` placeholders (e.g. ``"{name} · {price_eur_per_kwh} €/kWh"``)."""
+    choices_from: tuple[str, str] | None = None
+    """``(list key, field)``: the config UI offers the *field* values of the
+    items of the nearest list named *list key* (e.g. the names of the
+    periods).  Only a suggestion; not checked here."""
+    initial: Any = None
+    """Value a new entry starts with in the config UI (an example to adapt,
+    unlike ``default``, which applies when the key is left out)."""
     when: Mapping[str, Any] | None = None
     """The setting only applies while sibling settings have these values:
     ``{key: value}`` or ``{key: (value, …)}``; ``"*"`` = any value, ``None`` =
@@ -280,6 +297,14 @@ class ParamSpec:
             out["label"] = self.label
         if self.widget:
             out["widget"] = self.widget
+        if self.item_label:
+            out["item_label"] = self.item_label
+        if self.summary:
+            out["summary"] = self.summary
+        if self.choices_from:
+            out["choices_from"] = {"list": self.choices_from[0], "field": self.choices_from[1]}
+        if self.initial is not None:
+            out["initial"] = self.initial
         if self.when:
             out["when"] = {k: list(v) if isinstance(v, tuple) else v for k, v in self.when.items()}
         if self.advanced:
@@ -491,7 +516,7 @@ _VEHICLE_PARAMS = {
     "max_charge_kw": ParamSpec(float, minimum=0, exclusive_minimum=True,
                                description="On-board charger limit (kW); default: the charger's"),
     "charge_curve": ParamSpec(
-        list, label="Charge curve", validator=_check_charge_curve,
+        list, label="Charge curve", validator=_check_charge_curve, item_label="point",
         description="Charging efficiency up to each SoC, ascending (the taper near full)",
         items=ParamSpec(dict, fields={
             "soc_pct": ParamSpec(float, required=True, minimum=0, exclusive_minimum=True,
@@ -501,7 +526,7 @@ _VEHICLE_PARAMS = {
         }),
     ),
     "timezone": ParamSpec(str, advanced=True, default="Europe/Berlin", description="Time zone of the weekly plan (default Europe/Berlin)"),
-    "charger_ids": ParamSpec(dict, label="ID in the charger system", validator=_check_charger_ids, values=ParamSpec(object),
+    "charger_ids": ParamSpec(dict, label="ID in the charger system", item_label="charger system", validator=_check_charger_ids, values=ParamSpec(object),
                              description="This vehicle's id in a charger system, e.g. openwb_mqtt → 1"),
     "push_soc_to_charger": ParamSpec(bool, default=False, label="Send SoC to the charger", description="Publish the (estimated) SoC to the charger"),
     "refresh_after_min": ParamSpec(float, label="Refresh when SoC is older than (min)", minimum=1,
@@ -543,7 +568,7 @@ _GRID_PARAMS = {
     "max_import_kw": ParamSpec(float, minimum=0, exclusive_minimum=True, when=_GRID_ONLY,
                                label="Grid connection limit (kW)",
                                description="The plan and the control loop keep the import below it"),
-    "curtail_order": ParamSpec(list, items=ParamSpec(str, ref=("*",)), when=_GRID_ONLY,
+    "curtail_order": ParamSpec(list, items=ParamSpec(str, ref=("*",)), when=_GRID_ONLY, item_label="device to curtail",
                                label="Curtail order",
                                description="Devices reduced first → last when the limit is "
                                            "reached (default: batteries, then chargers)"),

@@ -207,7 +207,7 @@ def test_fresh_install_is_set_up_in_the_ui(fresh_app, fake_ha, page) -> None:
     entity.fill("grid_power")
     # Offered by Home Assistant through the new connection.
     page.get_by_role("option", name="sensor.grid_power").first.click()
-    page.get_by_role("button", name="Add device").click()
+    page.get_by_role("button", name="Add device", exact=True).click()
     expect(page.get_by_role("status")).to_contain_text("grid added and applied", timeout=20_000)
     assert "entity: sensor.grid_power" in config.read_text()
 

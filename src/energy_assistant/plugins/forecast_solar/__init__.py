@@ -60,7 +60,7 @@ def register(registry: PluginRegistry) -> None:
         settings={
             "latitude": ParamSpec(float, required=True, minimum=-90, maximum=90),
             "longitude": ParamSpec(float, required=True, minimum=-180, maximum=180),
-            "planes": ParamSpec(list, label="Roof planes",
+            "planes": ParamSpec(list, label="Roof planes", item_label="roof plane",
                                 description="One row per plane; the forecasts are summed",
                                 items=ParamSpec(dict, fields=_PLANE)),
             # A single plane may be written at the top level instead of 'planes'.

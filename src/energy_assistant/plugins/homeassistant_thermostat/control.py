@@ -93,7 +93,7 @@ POWER_SETPOINT_BINDING: dict[str, ParamSpec] = {
     "normal": ParamSpec(object, label="Normal operation",
                         description="Your own temperature / mode / preset, restored when "
                                     "Energy Assistant stops or its plan is stale"),
-    "running_states": ParamSpec(list, items=ParamSpec(str), advanced=True,
+    "running_states": ParamSpec(list, items=ParamSpec(str), advanced=True, item_label="state",
                                 label="Running hvac_action states",
                                 description="hvac_action values that mean it runs "
                                             "(default: heating, cooling, …)"),

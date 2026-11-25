@@ -55,26 +55,43 @@ _log = logging.getLogger(__name__)
 _WINDOW = ParamSpec(dict, fields={
     "days": ParamSpec(list, items=ParamSpec(str), label="Days", widget="weekdays",
                       description="e.g. mon-fri, sat, sun (default: every day)"),
-    "from": ParamSpec(str, label="From", description="HH:MM on a quarter hour"),
-    "to": ParamSpec(str, label="To", description="HH:MM, 24:00 = end of day; "
-                                                 "before 'from' = over midnight"),
-    "all_day": ParamSpec(bool, label="All day", description="The whole day (no from/to)"),
+    "all_day": ParamSpec(bool, label="All day", widget="checkbox",
+                         description="The whole day (no from/to)"),
+    "from": ParamSpec(str, label="From", widget="time", when={"all_day": None},
+                      description="On a quarter hour"),
+    "to": ParamSpec(str, label="To", widget="time_end", when={"all_day": None},
+                    description="24:00 = end of day; before 'from' = over midnight"),
 })
 
-_PERIOD = ParamSpec(dict, fields={
+_PERIOD = ParamSpec(dict, summary="{name} · {price_eur_per_kwh} €/kWh", fields={
     "name": ParamSpec(str, required=True, label="Name", description="e.g. day, night"),
     "price_eur_per_kwh": ParamSpec(float, required=True, label="Price (€/kWh)"),
-    "default": ParamSpec(bool, label="Default",
-                         description="Applies whenever no window covers the time"),
-    "windows": ParamSpec(list, items=_WINDOW, label="Windows"),
+    "default": ParamSpec(bool, label="All other times", widget="exclusive",
+                         description="Period whose price applies whenever no window covers "
+                                     "the time; none = the windows must cover the whole week"),
+    "windows": ParamSpec(list, items=_WINDOW, label="Time windows", item_label="time window",
+                         description="When this price applies"),
 })
 
-_SEASON = ParamSpec(dict, fields={
-    "from": ParamSpec(str, required=True, label="From", description="MM-DD, inclusive"),
-    "to": ParamSpec(str, required=True, label="To", description="MM-DD, inclusive"),
-    "periods": ParamSpec(dict, required=True, values=ParamSpec(float), label="Prices (€/kWh)",
-                         description="Price per period name in this season"),
+_SEASON = ParamSpec(dict, summary="{from} – {to}", fields={
+    "from": ParamSpec(str, required=True, label="From", widget="month_day",
+                      description="First day, inclusive"),
+    "to": ParamSpec(str, required=True, label="To", widget="month_day",
+                    description="Last day, inclusive (may be in the next year)"),
+    "periods": ParamSpec(dict, required=True, values=ParamSpec(float),
+                         keys=ParamSpec(str, label="Period", choices_from=("periods", "name")),
+                         label="Prices (€/kWh)", item_label="price",
+                         description="Price per period within this season"),
 })
+
+#: What a new time-of-use tariff starts with: day/night with cheap weekends.
+_EXAMPLE_PERIODS = [
+    {"name": "night", "price_eur_per_kwh": 0.24, "windows": [
+        {"days": ["mon-fri"], "from": "22:00", "to": "06:00"},
+        {"days": ["sat", "sun"], "all_day": True},
+    ]},
+    {"name": "day", "price_eur_per_kwh": 0.32, "default": True},
+]
 
 
 def validate(cfg: Mapping[str, Any]) -> list[str]:
@@ -90,8 +107,11 @@ def register(registry: PluginRegistry) -> None:
                     "optionally added on top of another tariff.",
         settings={
             "periods": ParamSpec(list, required=True, items=_PERIOD, label="Periods",
+                                 item_label="period", widget="tou_periods",
+                                 initial=_EXAMPLE_PERIODS,
                                  description="Named prices and the times they apply"),
             "seasons": ParamSpec(list, items=_SEASON, label="Seasons", advanced=True,
+                                 item_label="season",
                                  description="Other prices for some periods within a date range"),
             "timezone": ParamSpec(str, default="Europe/Berlin", label="Timezone",
                                   description="Timezone the window times are in"),

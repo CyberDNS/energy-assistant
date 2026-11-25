@@ -9,7 +9,7 @@ export default defineComponent({
     item:       { type: Object, default: () => ({ kind: 'str' }) },
     modelValue: { default: undefined },
     selfId:     { type: String, default: '' },
-    addLabel:   { type: String, default: 'Add' },
+    itemLabel:  { type: String, default: 'item' },   // names one item in the buttons
   },
   emits: ['update:modelValue'],
   setup(props, { emit }) {
@@ -42,12 +42,12 @@ export default defineComponent({
   <div class="cfg-list-editor">
     <div v-for="(row, i) in rows" :key="i" class="cfg-list-row">
       <span class="cfg-list-no">{{ i + 1 }}</span>
-      <FieldInput :spec="item" :model-value="row" :self-id="selfId" :aria-label="'Item ' + (i + 1)"
+      <FieldInput :spec="item" :model-value="row" :self-id="selfId" :aria-label="itemLabel + ' ' + (i + 1)"
                   @update:model-value="setRow(i, $event)" />
       <button type="button" class="btn btn-neutral btn-icon" :disabled="i === 0" title="Move up" aria-label="Move up" @click="move(i, -1)">↑</button>
       <button type="button" class="btn btn-neutral btn-icon" :disabled="i === rows.length - 1" title="Move down" aria-label="Move down" @click="move(i, 1)">↓</button>
-      <button type="button" class="btn btn-danger btn-icon" title="Remove" aria-label="Remove" @click="remove(i)">✕</button>
+      <button type="button" class="btn btn-danger btn-icon" :title="'Remove ' + itemLabel" :aria-label="'Remove ' + itemLabel + ' ' + (i + 1)" @click="remove(i)">✕</button>
     </div>
-    <button type="button" class="btn btn-neutral cfg-mini" @click="add">+ {{ addLabel }}</button>
+    <button type="button" class="btn btn-neutral cfg-mini" @click="add">+ Add {{ itemLabel }}</button>
   </div>
 </template>

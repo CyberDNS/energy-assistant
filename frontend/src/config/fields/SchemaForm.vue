@@ -47,8 +47,8 @@ export default defineComponent({
     // Fields inside can look up values of this form and the forms around it.
     const parentScope = inject(FORM_SCOPE, null)
     provide(FORM_SCOPE, {
-      lookup: (key) => (key in values.value ? values.value[key]
-        : key in props.context ? props.context[key] : parentScope?.lookup(key)),
+      lookup: (key, accept = () => true) => (key in values.value && accept(values.value[key]) ? values.value[key]
+        : key in props.context && accept(props.context[key]) ? props.context[key] : parentScope?.lookup(key, accept)),
     })
     const extra = computed(() => Object.fromEntries(
       Object.entries(values.value).filter(([k]) => !(k in props.specs))))
