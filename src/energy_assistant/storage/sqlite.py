@@ -304,6 +304,16 @@ CREATE TABLE IF NOT EXISTS savings_state (
 )
 """
 
+# Power charges (core/power_charge.py): the meter of the running 15-minute
+# interval and the month's peak (single row, JSON).
+_CREATE_POWER_CHARGE_STATE_TABLE = """
+CREATE TABLE IF NOT EXISTS power_charge_state (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    updated_at TEXT NOT NULL,
+    state      TEXT NOT NULL
+)
+"""
+
 # Plan fidelity diagnostics, purged with the history (see purge_before).
 # Every published plan, zlib-compressed JSON (~6 kB); day_ahead = 1 marks the
 # plan that froze a day's savings prediction.
@@ -496,6 +506,7 @@ class SqliteStorageBackend:
         await self._db.execute("DROP TABLE IF EXISTS savings_actual")
         await self._db.execute("DROP TABLE IF EXISTS savings_predicted")
         await self._db.execute(_CREATE_SAVINGS_STATE_TABLE)
+        await self._db.execute(_CREATE_POWER_CHARGE_STATE_TABLE)
         await self._db.execute(_CREATE_SAVINGS_SLOTS_TABLE)
         await self._add_missing_columns("savings_slots", _SAVINGS_SLOTS_ADDED_COLUMNS)
         await self._db.execute(_CREATE_PLAN_SNAPSHOTS_TABLE)
@@ -1249,6 +1260,23 @@ class SqliteStorageBackend:
             return None
         return datetime.fromisoformat(row[0]), json.loads(row[1])
 
+    async def save_power_charge_state(self, state: dict) -> None:
+        """Persist the power-charge meter (single row)."""
+        assert self._db is not None, "Call start() before save_power_charge_state()"
+        await self._db.execute(
+            "INSERT OR REPLACE INTO power_charge_state VALUES (1, ?, ?)",
+            (_utc_iso(datetime.now(UTC)), json.dumps(state)),
+        )
+        await self._db.commit()
+
+    async def load_power_charge_state(self) -> dict | None:
+        """The saved power-charge meter, or ``None``."""
+        assert self._db is not None, "Call start() before load_power_charge_state()"
+        async with self._db.execute(
+            "SELECT state FROM power_charge_state WHERE id = 1"
+        ) as cursor:
+            row = await cursor.fetchone()
+        return json.loads(row[0]) if row is not None else None
 
     # ------------------------------------------------------------------
     # Plan snapshots and control execution log

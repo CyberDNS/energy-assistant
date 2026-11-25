@@ -22,6 +22,7 @@ from ..core.config_schema import (
     THERMAL_LEARNING,
 )
 from ..core.device_model import DeviceSpec, ParamSpec, check_fields
+from ..core.power_charge import validate_tariffs
 from ..plugins import registry as plugin_registry
 from ..plugins.learned import LEARNING_OPTIONS
 
@@ -135,6 +136,10 @@ def validate_sections(raw: Mapping[str, Any]) -> list[str]:
     if len(defaults) > 1:
         errors.append(f"tariffs: only one tariff can be the default, found: {', '.join(defaults)}")
     errors.extend(_base_tariff_errors(tariffs))
+    # Power charges belong to the tariff at the grid connection: the default
+    # one, else the first (as the server picks it).
+    default_id = defaults[0] if defaults else next(iter(tariffs), None)
+    errors.extend(validate_tariffs(tariffs, default_id))
     dashboard_tariff = (raw.get("energy_dashboard") or {}).get("tariff") \
         if isinstance(raw.get("energy_dashboard"), Mapping) else None
     if dashboard_tariff and dashboard_tariff not in tariffs:

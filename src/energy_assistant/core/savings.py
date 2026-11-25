@@ -73,6 +73,16 @@ The simulated value is set back to the measured one every
 ``DEVICE_RESYNC_AFTER`` (and after data gaps); energy still unmatched then is
 neutral.
 
+Power charges
+-------------
+With power-dependent charges on the default tariff (``core/power_charge``)
+each house has its own 15-minute meter at the grid connection.  When an
+interval ends, its threshold charge and what it added to the house's month
+peak (``eur_per_kw_month`` per kW above the previous peak and the minimum)
+are booked into the slot it ends in, in both the bill and the cost.  The
+difference is the ``power_charges`` component.  The fee on the minimum and
+on a peak both houses reach is the same in both and so not part of it.
+
 Every slot also records the saving per component — ``batteries``, each car
 and each device — so the dashboard can explain the total.
 
@@ -102,6 +112,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 
 from .models import StorageConstraints, ThresholdConstraints
+from .power_charge import POWER_COMPONENT, PowerChargeMeter, PowerCharges
 from .thermal_model import ThermalModel, device_mode
 
 STATE_VERSION = 2
@@ -292,6 +303,8 @@ class SavingsState:
     last_resync: dict[str, str] = field(default_factory=dict)
     evs: dict[str, EvSession] = field(default_factory=dict)
     devices: dict[str, DeviceSim] = field(default_factory=dict)
+    power: dict[str, PowerChargeMeter] = field(default_factory=dict)
+    """Power-charge meter per house (``real`` / ``unc``)."""
 
     def to_dict(self) -> dict[str, Any]:
         return {"version": STATE_VERSION, **asdict(self)}
@@ -307,6 +320,7 @@ class SavingsState:
             last_resync=dict(data.get("last_resync") or {}),
             evs={k: EvSession(**v) for k, v in (data.get("evs") or {}).items()},
             devices={k: DeviceSim(**v) for k, v in (data.get("devices") or {}).items()},
+            power={k: PowerChargeMeter.from_dict(v) for k, v in (data.get("power") or {}).items()},
         )
 
 
@@ -430,6 +444,8 @@ class _HouseResult:
     cost: float
     ev_cost: dict[str, float]
     """Cost of each car's charged energy, moved into its session queue."""
+    net_kwh: float = 0.0
+    """Net energy of the default-tariff zone (+ import, − surplus)."""
 
 
 def _house_costs(
@@ -490,7 +506,7 @@ def _house_costs(
         if ev_total > 0
     }
     cost = bill - marginal + (used_cost - ev_battery_cost)
-    return _HouseResult(bill=bill, cost=cost, ev_cost=ev_cost)
+    return _HouseResult(bill=bill, cost=cost, ev_cost=ev_cost, net_kwh=net)
 
 
 # ---------------------------------------------------------------------------
@@ -512,8 +528,10 @@ class SavingsTracker:
         step_minutes: int,
         state: SavingsState | None = None,
         devices: Sequence[ThresholdConstraints] = (),
+        power_charges: PowerCharges | None = None,
     ) -> None:
         self._batteries = {sc.device_id: sc for sc in batteries}
+        self._power = power_charges or PowerCharges()
         self._devices = {tc.device_id: tc for tc in devices}
         # Thermal model and current ambient per threshold device (the server
         # updates them from the learned models; configured rates until then).
@@ -661,6 +679,24 @@ class SavingsTracker:
             u_charge, u_discharge, {**u_ev, **{_dev(d): e for d, e in u_dev.items()}},
         )
         slot.add_component(BATTERIES, unc.cost - real.cost)
+
+        # ── Power charges: each house's 15-minute import and month peak ──
+        if self._power:
+            charged: dict[str, float] = {}
+            for house, res in (("real", real), ("unc", unc)):
+                meter = self.state.power.setdefault(house, PowerChargeMeter())
+                import_kw = max(0.0, res.net_kwh + secondary_total) / hours
+                charged[house] = sum(
+                    self._power.interval_cost(iv.import_kwh)
+                    + self._power.peak_cost(iv.old_peak_kw, iv.new_peak_kw)
+                    for iv in meter.add(previous, sample.timestamp, import_kw)
+                )
+            slot.real_bill += charged["real"]
+            slot.uncontrolled_bill += charged["unc"]
+            slot.real_cost += charged["real"]
+            slot.uncontrolled_cost += charged["unc"]
+            if charged["real"] or charged["unc"]:
+                slot.add_component(POWER_COMPONENT, charged["unc"] - charged["real"])
 
         # ── Cars: book matched energy ─────────────────────────────────────
         ev_real_booked = ev_unc_booked = 0.0

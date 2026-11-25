@@ -46,6 +46,24 @@ export interface ConfigurationState {
   homeassistant: { source: 'supervisor' | 'config', label: string } | null
 }
 
+/** Power-dependent grid charges: the running 15-minute interval and the month's peak. */
+export interface PowerChargeStatus {
+  interval_start: string
+  interval_import_kwh: number
+  interval_average_kw: number | null
+  month: string
+  month_peak_kw: number
+  month_peak_at: string | null
+  /** Average import an interval may have without any power charge. */
+  free_kw: number | null
+  thresholds: { threshold_kw: number, excess_eur_per_kwh: number }[]
+  peaks: { eur_per_kw_month: number, minimum_kw: number }[]
+  allowed_import_w: number | null
+  planned_import_kw: number | null
+  /** Devices held back by the power charges → their setpoint (W). */
+  curtailed: Record<string, number>
+}
+
 export interface Status {
   timestamp: string
   configuration?: ConfigurationState
@@ -57,6 +75,7 @@ export interface Status {
   pv_opportunity_price_eur_per_kwh?: number | null
   devices?: StatusDevice[]
   ledger?: LedgerEntry[]
+  power_charges?: PowerChargeStatus | null
   [key: string]: unknown
 }
 

@@ -26,6 +26,11 @@ export default defineComponent({
         if (out.length === 3) break
       }
       if (props.name === 'tariffs') {
+        // Power charges live under "More settings": name them in the row.
+        for (const pc of e.settings.power_charges ?? []) {
+          if (pc?.type === 'power_threshold') out.push(`Power charge above ${pc.threshold_kw} kW`)
+          else if (pc?.type === 'monthly_peak') out.push(`Month peak ${pc.eur_per_kw_month} €/kW`)
+        }
         const users = cfg.file.value.devices.filter(d => d.tariff === e.id).length
         if (users) out.push(`${users} device${users === 1 ? '' : 's'}`)
       }
