@@ -112,6 +112,16 @@ from ..core.models import (
 from ..core.optimizer import OptimizationContext, SecondaryTariffLoad
 from ..core.plan_schedule import aligned_plan_period, next_plan_run
 from ..core.plugin_registry import BuildContext, SharedPool
+from ..core.power_charge import (
+    POWER_COMPONENT,
+    PowerChargeContext,
+    PowerChargeMeter,
+    PowerCharges,
+    interval_start,
+    month_key,
+    parse_power_charges,
+    peak_from_history,
+)
 from ..core.price_curve import PriceCurveHistory, build_price_slots
 from ..core.registry import DeviceRegistry
 from ..core.savings import (
@@ -692,6 +702,10 @@ class Application:
             await app.stop()
     """
 
+    # Power-dependent charges of the default tariff (core/power_charge.py);
+    # set per runtime.  None configured until then (immutable default).
+    _power_charges: PowerCharges = PowerCharges()
+
     def __init__(
         self,
         config_path: Path | str = "config.yaml",
@@ -716,6 +730,8 @@ class Application:
         self._storage_constraints: list[StorageConstraints]
         self._default_tariff: TariffModel | None
         self._grid_meter_id: str | None
+        self._power_meter = PowerChargeMeter()
+        self._power_meter_ts: datetime | None = None
         self._pv_opportunity_price: float
         self._horizon: timedelta
         self._last_forecast_pts: dict[ForecastQuantity, list[ForecastPoint]] = {}
@@ -1030,6 +1046,10 @@ class Application:
             len(self._fleet.sessions.sessions),
         )
 
+        # 7b'' — Power-dependent charges of the default tariff
+        # (core/power_charge.py); the meter is set up in step 9.
+        self._power_charges = self._parse_power_charges(cfg)
+
         # 7b' — Savings accounting: the real house vs. a simulated
         # uncontrolled house (core/savings.py).
         self._savings = SavingsTracker(
@@ -1037,6 +1057,7 @@ class Application:
             step_minutes=self._optimizer._step_min,
             state=await self._load_savings_state(),
             devices=self._threshold_constraints,
+            power_charges=self._power_charges,
         )
         # Plan fidelity: what the control loop did with each slot's intent.
         self._execution_log = ExecutionLog(step_minutes=self._optimizer._step_min)
@@ -1124,6 +1145,7 @@ class Application:
         if not hasattr(self, "_price_history"):
             self._price_history = PriceCurveHistory()
         self._tariff_zones = self._build_tariff_zones()
+        await self._init_power_meter()
         _log.info(
             "Tariff zones: %s",
             {zid: (len(z.meter_ids), len(z.producer_ids), len(z.storage_ids))
@@ -1277,6 +1299,7 @@ class Application:
                 await self._storage.save_savings_state(self._savings.state.to_dict())
             except Exception as exc:  # noqa: BLE001
                 _log.warning("Could not save the savings state before the reload: %s", exc)
+            await self._save_power_meter()
         if self._mqtt_publisher is not None:
             await self._mqtt_publisher.stop()
             self._mqtt_publisher = None
@@ -1984,6 +2007,7 @@ class Application:
             ev_charging_goals=ev_goals,
             secondary_loads=secondary_loads,
             max_import_kw=self._topology.max_import_kw if self._topology else None,
+            power_charges=self._power_charge_context(),
             producer_device_ids={
                 d.device_id for d in self._registry.by_category(DeviceCategory.PV)
             },
@@ -2130,6 +2154,126 @@ class Application:
             if state is not None and state.soc_pct is not None and state.soc_pct >= target:
                 await self._clear_force_charge(asset.asset_id, f"target {target:.0f}% reached")
 
+    # ------------------------------------------------------------------
+    # Power-dependent charges (core/power_charge.py)
+    # ------------------------------------------------------------------
+
+    def _parse_power_charges(self, cfg: AppConfig) -> PowerCharges:
+        """Power charges of the default tariff (the first one without a default)."""
+        tariff_id = cfg.default_tariff_id or next(iter(cfg.tariffs or {}), None)
+        raw = (cfg.tariffs or {}).get(tariff_id) or {} if tariff_id else {}
+        charges, errors = parse_power_charges(raw.get("power_charges"))
+        for err in errors:
+            _log.warning("Tariff %r: %s — ignored", tariff_id, err)
+        if charges:
+            _log.info(
+                "Power charges on tariff %r: %s", tariff_id,
+                ", ".join(
+                    [f"{t.excess_eur_per_kwh:.3f} €/kWh above {t.threshold_kw:g} kW"
+                     for t in charges.thresholds]
+                    + [f"{p.eur_per_kw_month:.2f} €/kW of the month's peak (min. "
+                       f"{p.minimum_kw:g} kW)" for p in charges.peaks]
+                ),
+            )
+        return charges
+
+    async def _init_power_meter(self) -> None:
+        """Restore the power-charge meter; without a stored peak for this
+        month, take it from the grid meter's 5-minute history."""
+        self._power_meter = PowerChargeMeter()
+        self._power_meter_ts = None
+        if not self._power_charges:
+            return
+        now = datetime.now(UTC)
+        try:
+            saved = await self._storage.load_power_charge_state()
+            if saved:
+                self._power_meter = PowerChargeMeter.from_dict(saved)
+            if self._power_meter.month != month_key(now) and self._grid_meter_id:
+                local = now.astimezone()
+                month_start = local.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+                rows = await self._storage.query_history(self._grid_meter_id, month_start, now)
+                peak, at = peak_from_history([(r.timestamp, r.pos_w) for r in rows], now)
+                self._power_meter.seed_peak(month_key(now), peak, at)
+                _log.info("Power charges: month peak %.2f kW from the history", peak)
+        except Exception as exc:  # noqa: BLE001 — must not block the start
+            _log.warning("Could not restore the power-charge meter: %s", exc)
+        _log.info(
+            "Power charges: this month's peak %.2f kW",
+            self._power_meter.month_peak_kw(now),
+        )
+
+    async def _save_power_meter(self) -> None:
+        if not self._power_charges:
+            return
+        try:
+            await self._storage.save_power_charge_state(self._power_meter.to_dict())
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("Could not save the power-charge meter: %s", exc)
+
+    async def _track_power_charges(self, now: datetime, device_states: dict[str, Any]) -> None:
+        """Book the grid import of this tick into the running 15-minute
+        interval and give the control loop the import the charges allow."""
+        if not self._power_charges:
+            return
+        state = device_states.get(self._grid_meter_id) if self._grid_meter_id else None
+        previous, self._power_meter_ts = self._power_meter_ts, now
+        if state is None or state.power_w is None:
+            self._power_meter_ts = None
+            closed = self._power_meter.close_open(now)
+        elif previous is None or not 0 < (now - previous).total_seconds() <= 120:
+            closed = self._power_meter.close_open(now)
+        else:
+            closed = self._power_meter.add(previous, now, max(0.0, state.power_w) / 1000.0)
+        for iv in closed:
+            if iv.new_peak_kw > iv.old_peak_kw + 1e-6:
+                _log.info(
+                    "Power charges: new month peak %.2f kW (was %.2f kW) at %s",
+                    iv.new_peak_kw, iv.old_peak_kw, iv.start.astimezone().strftime("%d.%m. %H:%M"),
+                )
+        if closed:
+            await self._save_power_meter()
+        self._control_loop.set_power_charge_limit(
+            self._power_meter.allowed_import_w(
+                self._power_charges, now, planned_kw=self._planned_import_kw(now),
+            )
+        )
+
+    def _planned_import_kw(self, now: datetime) -> float | None:
+        """Site import the active plan has for the slot *now* is in."""
+        plan = self._control_loop._active_plan
+        if plan is None:
+            return None
+        step = timedelta(minutes=plan.step_minutes)
+        for flow in plan.flows:
+            if flow.timestep <= now < flow.timestep + step:
+                return flow.grid_import_kw
+        return None
+
+    def _power_charge_context(self) -> PowerChargeContext | None:
+        if not self._power_charges:
+            return None
+        now = datetime.now(UTC)
+        return PowerChargeContext(
+            charges=self._power_charges,
+            month_peak_kw=self._power_meter.month_peak_kw(now),
+            interval_start=interval_start(now),
+            interval_import_kwh=self._power_meter.interval_import_kwh(now),
+        )
+
+    def power_charge_status(self) -> dict[str, Any] | None:
+        """For the API: the running interval vs. the threshold / month peak."""
+        if not self._power_charges:
+            return None
+        now = datetime.now(UTC)
+        out = self._power_meter.status(self._power_charges, now)
+        out["allowed_import_w"] = self._power_meter.allowed_import_w(
+            self._power_charges, now, planned_kw=self._planned_import_kw(now),
+        )
+        out["planned_import_kw"] = self._planned_import_kw(now)
+        out["curtailed"] = self._control_loop.power_charge_curtailed
+        return out
+
     def _grid_limit(self) -> GridLimit | None:
         """Grid connection limit from ``max_import_kw`` on the topology root."""
         root = self._topology
@@ -2183,6 +2327,8 @@ class Application:
         }
 
         await self._check_force_charge_reset(device_states)
+
+        await self._track_power_charges(now, device_states)
 
         tariff_prices = await self._fetch_tariff_prices(now)
 
@@ -2569,6 +2715,8 @@ class Application:
             groups.append({"id": "batteries", "kind": "batteries", "label": "Batteries"})
         if any(sc.degradation_cost_per_kwh > 0 for sc in self._storage_constraints):
             groups.append({"id": WEAR_COMPONENT, "kind": "wear", "label": "Battery wear"})
+        if self._power_charges:
+            groups.append({"id": POWER_COMPONENT, "kind": "power", "label": "Power charges"})
         # Savings are kept per charger (whichever car charged there), named
         # after the charger's default vehicle.
         for cid, spec in self._fleet.chargers.items():
@@ -2800,6 +2948,7 @@ class Application:
                     for tid, parts in market_breakdown.items()
                 },
                 "market_price_breakdown": market_breakdown,
+                "power_charges": self.power_charge_status(),
             }
 
         @api.get("/api/status")

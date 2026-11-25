@@ -97,6 +97,34 @@ tariffs:
   #     - { name: low, price_eur_per_kwh: -0.06, windows: [{ from: "00:00", to: "06:00" }] }
   #     - { name: high, price_eur_per_kwh: 0.04, windows: [{ days: [mon-fri], from: "17:00", to: "21:00" }] }
   #     - { name: standard, price_eur_per_kwh: 0.0, default: true }
+  # Power-dependent charges on the default tariff (power_charges:), billed on
+  # the 15-minute average import at the grid connection.  The plan keeps
+  # batteries, cars and loads below the threshold / the month's peak when
+  # that is cheaper, and goes above it when waiting would cost more; the
+  # control loop holds flexible loads at what the plan accepted.  Slots of
+  # 15 minutes (optimizer: step_minutes: 15) see the intervals exactly.
+  #
+  # Luxembourg, power reference (Referenzleistung, since 2025): energy drawn
+  # above the subscribed power in a quarter hour costs extra.
+  # household:
+  #   type: tibber
+  #   token: !secret tibber_token
+  #   default: true
+  #   power_charges:
+  #     - type: power_threshold
+  #       threshold_kw: 7.0            # your Referenzleistung
+  #       excess_eur_per_kwh: 0.11     # extra per kWh above it (see your grid operator)
+  #
+  # Belgium (Flanders), capacity tariff: per kW of the month's highest
+  # quarter-hour average, billed at least on 2.5 kW.
+  # household:
+  #   type: flat_rate
+  #   import_price_eur_per_kwh: 0.30
+  #   default: true
+  #   power_charges:
+  #     - type: monthly_peak
+  #       eur_per_kw_month: 4.20       # yearly kW price / 12, see your grid operator
+  #       minimum_kw: 2.5
 
 # ---------------------------------------------------------------------------
 # Tasmota devices on the LAN (type: tasmota)

@@ -49,7 +49,10 @@ valued at the mean import price of the last 24 h minus its ledger cost, real
 minus uncontrolled) over the window. Battery wear is a cost in both houses:
 each kWh stored costs purchase price / (cycle life x capacity), booked when
 charged; component 'battery_wear' is uncontrolled minus real wear, and the
-totals carry 'real_wear' / 'uncontrolled_wear'.
+totals carry 'real_wear' / 'uncontrolled_wear'. With power charges on the
+default tariff (15-minute import above a threshold, the month's peak), both
+houses pay them when an interval ends; component 'power_charges'.
+get_status 'power_charges': running interval, month peak, allowed import.
 """
 
 

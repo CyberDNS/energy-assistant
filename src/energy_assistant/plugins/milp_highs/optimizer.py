@@ -101,6 +101,7 @@ from ...core.models import (
     ThresholdConstraints,
 )
 from ...core.optimizer import OptimizationContext
+from ...core.power_charge import INTERVAL_H, PowerChargeContext, interval_start, month_key
 from ...core.thermal_model import ThermalModel, device_mode
 
 _log = logging.getLogger(__name__)
@@ -398,6 +399,7 @@ class MilpHigsOptimizer:
             max_import_w=(
                 context.max_import_kw * _WH if context.max_import_kw is not None else None
             ),
+            power_charges=context.power_charges,
         )
         t0 = time.monotonic()
         # Solve in a worker thread: prob.solve() blocks for up to the full
@@ -604,6 +606,7 @@ class MilpHigsOptimizer:
         secondary_load: list[list[float]] | None = None,
         secondary_prices: list[list[float]] | None = None,
         max_import_w: float | None = None,
+        power_charges: PowerChargeContext | None = None,
     ) -> tuple[pulp.LpProblem, dict]:
         """Construct the PuLP problem and return (problem, variables dict).
 
@@ -634,6 +637,9 @@ class MilpHigsOptimizer:
             above the limit cannot make the model infeasible, while flexible
             loads (batteries, EVs, threshold devices) are always shifted
             below it.  None = no limit.
+        power_charges:
+            Power-dependent charges on the site import (``core/power_charge``),
+            see ``_power_charge_cost``.
         """
         prob = pulp.LpProblem("energy_cost_optimizer", pulp.LpMinimize)
         T = range(n_steps)
@@ -786,6 +792,12 @@ class MilpHigsOptimizer:
             if limit_excess else 0
         )
 
+        power_cost = (
+            _power_charge_cost(prob, power_charges, site_imp, starts, dur, self._step_min)
+            if power_charges is not None and power_charges.charges and starts
+            else 0
+        )
+
         # ── Objective ─────────────────────────────────────────────────
         # Grid cost: p_imp/p_exp are €/Wh, g_imp/g_exp are Wh → product is €.
         grid_cost = pulp.lpSum(
@@ -881,6 +893,7 @@ class MilpHigsOptimizer:
         prob += (
             grid_cost
             + grid_limit_cost
+            + power_cost
             + degradation_cost
             + priority_tiebreak
             + pv_priority_tiebreak
@@ -1374,6 +1387,75 @@ def _extract_threshold_intents(
                 stored_energy_kwh=round(predicted_value, 4) if predicted_value is not None else None,
             ))
     return intents
+
+
+def _power_charge_cost(
+    prob: pulp.LpProblem,
+    ctx: PowerChargeContext,
+    site_imp: dict[int, pulp.LpAffineExpression],
+    starts: list[datetime],
+    dur: list[float],
+    step_minutes: int,
+) -> pulp.LpAffineExpression:
+    """Add the power charges to *prob*; return their cost (€).
+
+    The charges apply to the 15-minute average import at the grid
+    connection.  With slots of up to 15 minutes (dividing 15) the slots are
+    grouped into those intervals exactly, and the running interval includes
+    what was already drawn in it (``ctx.interval_import_kwh``).  Longer
+    slots can only see their own average, which assumes the import is flat
+    within the slot (a 15-minute peak inside it is not visible).
+
+    ``power_threshold``  per interval *i*:  ``x[i] ≥ E[i] − threshold × h[i]``,
+                         cost ``excess price × x[i]``.
+    ``monthly_peak``     per calendar month *m* in the horizon:
+                         ``P[m] × h[i] ≥ E[i]`` for its intervals, with
+                         ``P[m] ≥ max(this month's peak, minimum)`` (a later
+                         month starts at the minimum), cost ``price × (P[m] −
+                         its lower bound)``: only raising the peak costs.
+    Both are linear: no binaries.
+    """
+    charges = ctx.charges
+    exact = step_minutes <= 15 and 15 % step_minutes == 0
+    # Interval → (slots, hours, energy already drawn in Wh)
+    groups: dict[datetime, tuple[list[int], float, float]] = {}
+    for t, start in enumerate(starts):
+        if exact:
+            iv = interval_start(start)
+            prior = (
+                ctx.interval_import_kwh * _WH
+                if ctx.interval_start is not None and iv == interval_start(ctx.interval_start)
+                else 0.0
+            )
+            slots, hours, _ = groups.get(iv, ([], INTERVAL_H, prior))
+            groups[iv] = ([*slots, t], hours, prior)
+        else:
+            groups[start] = ([t], dur[t], 0.0)
+
+    terms: list = []
+    for n, (iv, (slots, hours, prior)) in enumerate(groups.items()):
+        energy = pulp.lpSum(site_imp[t] for t in slots) + prior
+        for k, th in enumerate(charges.thresholds):
+            excess = pulp.LpVariable(f"power_excess__{k}__{n}", lowBound=0)
+            prob += excess >= energy - th.threshold_kw * _WH * hours, f"power_threshold__{k}__{n}"
+            terms.append(th.excess_eur_per_kwh / _WH * excess)
+
+    current_month = month_key(starts[0])
+    by_month: dict[str, list[tuple[int, list[int], float, float]]] = {}
+    for n, (iv, (slots, hours, prior)) in enumerate(groups.items()):
+        by_month.setdefault(month_key(iv), []).append((n, slots, hours, prior))
+    for k, pk in enumerate(charges.peaks):
+        for m, (month, items) in enumerate(by_month.items()):
+            so_far = ctx.month_peak_kw if month == current_month else 0.0
+            floor_w = max(so_far, pk.minimum_kw) * _WH
+            peak = pulp.LpVariable(f"power_peak__{k}__{m}", lowBound=floor_w)
+            for n, slots, hours, prior in items:
+                prob += (
+                    peak * hours >= pulp.lpSum(site_imp[t] for t in slots) + prior,
+                    f"power_peak__{k}__{m}__{n}",
+                )
+            terms.append(pk.eur_per_kw_month / _WH * (peak - floor_w))
+    return pulp.lpSum(terms)
 
 
 def _interpolate_kw(

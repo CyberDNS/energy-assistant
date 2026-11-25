@@ -18,6 +18,7 @@ from .models import (
 if TYPE_CHECKING:
     from ..assets.ev import EvChargingGoal
     from .constraint import Constraint
+    from .power_charge import PowerChargeContext
     from .tariff import TariffModel
     from .thermal_model import ThermalModel
 
@@ -105,6 +106,9 @@ class OptimizationContext:
     tariffs together — from ``max_import_kw`` on the topology root.  None = no
     limit.  The realtime control loop enforces it per tick as well.
     """
+    power_charges: PowerChargeContext | None = None
+    """Power-dependent charges of the grid connection (``core/power_charge``)
+    with this month's peak and the running interval's import.  None = none."""
     thermal_models: dict[str, ThermalModel] = field(default_factory=dict)
     """Thermal model per threshold device (learned, see ``core/thermal_model``).
     Devices without an entry use the configured constant rates."""

@@ -22,6 +22,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from .device_model import DeviceCategory, ParamSpec, specs_to_dict
+from .power_charge import POWER_CHARGES_SPEC
 
 
 @dataclass(frozen=True)
@@ -191,7 +192,8 @@ COLLECTIONS: dict[str, CollectionSchema] = {
             "tariffs", "Tariffs", "Price models; devices and meters refer to them by id.",
             plugin_kind="tariff",
             common={"default": ParamSpec(bool, default=False, label="Default tariff",
-                                         description="Used by everything that names no tariff")},
+                                         description="Used by everything that names no tariff"),
+                    "power_charges": POWER_CHARGES_SPEC},
         ),
         CollectionSchema(
             "forecasts", "Forecasts", "System-wide forecasts such as PV generation.",

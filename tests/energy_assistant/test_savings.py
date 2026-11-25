@@ -19,6 +19,7 @@ from energy_assistant.core.models import (
     StorageConstraints,
     ThresholdConstraints,
 )
+from energy_assistant.core.power_charge import MonthlyPeak, PowerCharges, PowerThreshold
 from energy_assistant.core.savings import (
     DeviceLive,
     EvLive,
@@ -799,3 +800,38 @@ class TestBatteryWear:
         rows = [self._row(-1.0, -1.0, {"bat": 1.0}, {"bat": 1.0})]
         assert _with_battery_wear(rows, [self.SMA])[0]["real_wear_eur"] == 0.0
         assert _with_battery_wear(rows, [BAT]) is rows
+
+
+class TestPowerCharges:
+    """Power-dependent charges (#105) are booked in both houses."""
+
+    CHARGES = PowerCharges((PowerThreshold(7.0, 0.10),), (MonthlyPeak(4.0, 2.5),))
+
+    def test_grid_charging_above_the_threshold_costs_power_charges(self) -> None:
+        # 5 kW house; the real battery charges 4 kW from the grid (9 kW at the
+        # connection), the uncontrolled one (empty, no PV) does nothing.
+        tracker = SavingsTracker([BAT], step_minutes=60, power_charges=self.CHARGES)
+        (slot,) = _run(tracker, [_sample(m, 9.0, storage_kw=4.0) for m in range(62)])
+        # Threshold: 4 intervals × (9 − 7) kW × 0.25 h × 0.10 €/kWh = 0.20 €.
+        # Peak: real 9 kW, uncontrolled 5 kW above the 2.5 kW minimum, 4 €/kW.
+        real_power = 0.20 + (9.0 - 2.5) * 4.0
+        unc_power = (5.0 - 2.5) * 4.0
+        assert slot.components["power_charges"] == pytest.approx(unc_power - real_power)
+        assert slot.real_bill == pytest.approx(9.0 * 0.30 + real_power)
+        assert slot.uncontrolled_bill == pytest.approx(5.0 * 0.30 + unc_power)
+        # The peak is only charged once per month.
+        (slot2,) = _run(tracker, [_sample(m, 9.0, storage_kw=4.0) for m in range(62, 122)])
+        assert slot2.components["power_charges"] == pytest.approx(-0.20)
+
+    def test_no_component_without_power_charges(self) -> None:
+        tracker = SavingsTracker([BAT], step_minutes=60)
+        (slot,) = _run(tracker, [_sample(m, 9.0, storage_kw=4.0) for m in range(62)])
+        assert "power_charges" not in slot.components
+
+    def test_meters_survive_the_state_round_trip(self) -> None:
+        tracker = SavingsTracker([BAT], step_minutes=60, power_charges=self.CHARGES)
+        _run(tracker, [_sample(m, 9.0, storage_kw=4.0) for m in range(20)])
+        state = SavingsState.from_dict(json.loads(json.dumps(tracker.state.to_dict())))
+        assert state is not None
+        assert state.power == tracker.state.power
+        assert state.power["real"].month_peak_kw(T0) == pytest.approx(9.0)
