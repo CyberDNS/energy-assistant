@@ -216,9 +216,10 @@ export function useSavings(initial = RANGES[0]) {
   const panels = computed(() => groups.value.map(g => {
     const short = slots.value != null
     let traces = [], layout_ = null, note = ''
-    if (!short) {
+    if (!short || g.kind === 'wear') {
       traces = groupBarTraces(g)
       layout_ = layout({ showlegend: false })
+      if (g.kind === 'wear') note = 'Wear the real batteries avoided (+) or added (−) against the uncontrolled ones: each kWh stored costs purchase price ÷ (cycle life × capacity).'
     } else if (g.kind === 'batteries') {
       traces = batteryTraces.value
       layout_ = slotLayout('kWh stored')
