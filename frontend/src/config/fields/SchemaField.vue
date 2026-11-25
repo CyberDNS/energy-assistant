@@ -27,7 +27,7 @@ export default defineComponent({
       return parts.join(' · ')
     })
     // Compound editors are a group of controls, not one control to label.
-    const group = computed(() => wide.value || ['secret', 'entity', 'entity-value'].includes(editor.value))
+    const group = computed(() => wide.value || ['secret', 'entity', 'entity-value', 'time', 'month_day', 'weekdays'].includes(editor.value))
     return { editor, wide, hint, group }
   },
 })

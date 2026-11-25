@@ -64,7 +64,7 @@ _log = logging.getLogger(__name__)
 LEARNING_OPTIONS = {
     "history_unit": ParamSpec(str, choices=("W", "kW"), advanced=True,
                               description="Only for sensors without a unit"),
-    "subtract": ParamSpec(list, items=ParamSpec(str, entity=True), label="Subtract sensors",
+    "subtract": ParamSpec(list, items=ParamSpec(str, entity=True), label="Subtract sensors", item_label="sensor",
                           description="Sensors taken off before fitting; 'auto' = every other "
                                       "consumer with a learned forecast on the same tariff"),
     "temperature_entity": ParamSpec(str, entity=True, label="Outdoor temperature sensor",
@@ -77,12 +77,12 @@ LEARNING_OPTIONS = {
     "refit_interval_h": ParamSpec(float, minimum=0, exclusive_minimum=True, default=6,
                                   advanced=True,
                                   description="Hours between refits"),
-    "exclude": ParamSpec(list, label="Excluded periods", advanced=True, description="Periods left out of the training (local time)",
+    "exclude": ParamSpec(list, label="Excluded periods", item_label="period", advanced=True, description="Periods left out of the training (local time)",
                          items=ParamSpec(dict, fields={
                              "from": ParamSpec(str, required=True, label="from (YYYY-MM-DD HH:MM)"),
                              "to": ParamSpec(str, required=True, label="to (YYYY-MM-DD HH:MM)"),
                          })),
-    "exclude_when": ParamSpec(list, label="Exclude while", description="Hours left out while a condition holds",
+    "exclude_when": ParamSpec(list, label="Exclude while", item_label="condition", description="Hours left out while a condition holds",
                               items=ParamSpec(dict, fields={
                                   "entity": ParamSpec(str, required=True, entity=True),
                                   "condition": ParamSpec(str, choices=("frozen",),

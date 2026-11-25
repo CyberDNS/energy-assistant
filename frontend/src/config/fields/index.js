@@ -14,6 +14,10 @@
 //   PluginEditor       type + that plugin's settings (tariff, forecast)
 //   LearningEditor     on / off / on with options
 //   WeekdaysEditor     weekdays of a time window (Mo … Su toggles)
+//   TimeInput          time on a quarter hour (hour + minute dropdowns)
+//   MonthDayInput      day of the year, MM-DD (day + month dropdowns)
+//   CardListEditor     list of records with nested lists, one card per record
+//   TouPeriodsEditor   periods of a time-of-use tariff + the resulting week
 //   FieldInput         picks the editor for a spec
 //   SchemaField        label + FieldInput + hint
 //   SchemaForm         grid of SchemaFields for a mapping
@@ -34,13 +38,18 @@ import LoadProfileEditor from './LoadProfileEditor.vue'
 import PluginEditor from './PluginEditor.vue'
 import LearningEditor from './LearningEditor.vue'
 import WeekdaysEditor from './WeekdaysEditor.vue'
+import TimeInput from './TimeInput.vue'
+import MonthDayInput from './MonthDayInput.vue'
+import CardListEditor from './CardListEditor.vue'
+import TouPeriodsEditor from './TouPeriodsEditor.vue'
 import FieldInput from './FieldInput.vue'
 import SchemaField from './SchemaField.vue'
 import SchemaForm from './SchemaForm.vue'
 
 const COMPONENTS = {
   ScalarInput, OptionSelect, Combobox, EntityPicker, EntityValueInput, SecretPicker, ListEditor, TableEditor, MapEditor,
-  JsonEditor, LoadProfileEditor, PluginEditor, LearningEditor, WeekdaysEditor, FieldInput, SchemaField, SchemaForm,
+  JsonEditor, LoadProfileEditor, PluginEditor, LearningEditor, WeekdaysEditor, TimeInput, MonthDayInput, CardListEditor,
+  TouPeriodsEditor, FieldInput, SchemaField, SchemaForm,
 }
 
 export function registerFieldComponents(app) {

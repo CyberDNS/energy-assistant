@@ -55,7 +55,7 @@ export default defineComponent({
         <span class="ev-actions-spacer"></span>
         <button type="button" class="btn btn-danger cfg-mini" @click="removeDay(day)">Remove {{ day }}</button>
       </div>
-      <TableEditor :fields="ROW_FIELDS" :model-value="profile[day]" add-label="Add segment" @update:model-value="setRows(day, $event)" />
+      <TableEditor :fields="ROW_FIELDS" :model-value="profile[day]" item-label="segment" @update:model-value="setRows(day, $event)" />
     </div>
     <select v-if="free.length" class="cfg-profile-add" aria-label="Add a day type" @change="addDay($event.target.value); $event.target.value = ''">
       <option value="">+ Add day type…</option>
