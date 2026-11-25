@@ -17,6 +17,7 @@ export default defineComponent({
     const kind = computed(() => {
       const s = props.spec
       if (s.choices) return 'choice'
+      if (s.widget === 'checkbox' || s.widget === 'exclusive') return 'checkbox'
       if (s.kind === 'bool') return 'bool'
       if (s.kind === 'float' || s.kind === 'int') return 'number'
       return 'text'
@@ -58,6 +59,8 @@ export default defineComponent({
     <option v-for="c in spec.choices" :key="c" :value="c">{{ spec.choice_labels?.[c] ?? c }}{{ c === spec.default ? ' (default)' : '' }}</option>
     <option v-if="modelValue != null && !spec.choices.includes(modelValue)" :value="modelValue">{{ modelValue }} (invalid)</option>
   </select>
+  <input v-else-if="kind === 'checkbox'" type="checkbox" class="cfg-check" :checked="!!(modelValue ?? spec.default)" :aria-label="ariaLabel"
+         @change="set($event.target.checked ? true : undefined)" />
   <select v-else-if="kind === 'bool'" :value="String(modelValue ?? spec.default ?? '')" :aria-label="ariaLabel"
           @change="pick($event.target.value === '' ? '' : $event.target.value === 'true')">
     <option v-if="spec.default == null" value="">— not set</option>

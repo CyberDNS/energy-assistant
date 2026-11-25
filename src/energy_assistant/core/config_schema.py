@@ -150,7 +150,7 @@ SECTION_SCHEMAS: dict[str, SectionSchema] = {
                 "api_token": ParamSpec(str, secret=True, restart=True, label="API token",
                                        description="Bearer token for read-only access from "
                                                    "outside Home Assistant"),
-                "trusted_hosts": ParamSpec(list, items=ParamSpec(str), restart=True, advanced=True,
+                "trusted_hosts": ParamSpec(list, items=ParamSpec(str), restart=True, advanced=True, item_label="address",
                                            description="Addresses that need no token (default: "
                                                        "HA ingress and localhost)"),
                 "history_retention_days": ParamSpec(float, default=8, label="Diagnostics kept (days)",
@@ -172,7 +172,7 @@ SECTION_SCHEMAS: dict[str, SectionSchema] = {
                 "import_consumers": ParamSpec(bool, default=False, label="Import consumers",
                                               description="Import the dashboard's individual "
                                                           "devices"),
-                "exclude": ParamSpec(list, items=ParamSpec(str), when={"import_consumers": True}, 
+                "exclude": ParamSpec(list, items=ParamSpec(str), when={"import_consumers": True}, item_label="entry",
                                      description="Entries to leave out: energy or power sensor, "
                                                  "name shown in HA, or device id"),
                 "tariff": ParamSpec(str, tariff=True, when={"import_consumers": True}, 

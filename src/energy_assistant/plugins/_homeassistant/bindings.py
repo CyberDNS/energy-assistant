@@ -276,7 +276,7 @@ def binding_specs(capability: Capability) -> dict[str, ParamSpec]:
         return {
             "entity": ParamSpec(str, required=True, entity=True, domains=BOOL_DOMAINS,
                                 label="Entity", description="Entity whose state says on / off"),
-            "on": ParamSpec(list, advanced=True, items=ParamSpec(str), label="Counts as on",
+            "on": ParamSpec(list, advanced=True, items=ParamSpec(str), label="Counts as on", item_label="state",
                             description="States that count as on (default: on, true, home, "
                                         "connected, plugged, …)"),
             "attribute": ParamSpec(str, advanced=True, label="Attribute", attribute_of="entity",
@@ -284,7 +284,7 @@ def binding_specs(capability: Capability) -> dict[str, ParamSpec]:
         }
     if capability is Capability.PHASE_POWER_W:
         return {
-            "entities": ParamSpec(list, required=True, label="Power per phase",
+            "entities": ParamSpec(list, required=True, label="Power per phase", item_label="phase sensor",
                                   items=ParamSpec(str, entity=True, domains=NUMERIC_DOMAINS,
                                                   units=UNITS[ValueKind.POWER]),
                                   description="One power sensor per phase (L1, L2, L3)"),

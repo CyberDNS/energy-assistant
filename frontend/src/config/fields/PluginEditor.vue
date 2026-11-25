@@ -33,7 +33,10 @@ export default defineComponent({
       const next = cfg.plugins(props.kind).find(p => p.type === type)
       const allowed = next?.settings ? { ...next.settings, ...props.common } : null
       const kept = Object.fromEntries(Object.entries(settings.value).filter(([k]) => !allowed || k in allowed))
-      emit('update:modelValue', { type, ...kept })
+      // Settings with an example to start from (spec.initial) get it when empty.
+      const initial = Object.fromEntries(Object.entries(next?.settings ?? {})
+        .filter(([k, s]) => s.initial != null && kept[k] == null).map(([k, s]) => [k, JSON.parse(JSON.stringify(s.initial))]))
+      emit('update:modelValue', { type, ...initial, ...kept })
     }
     const setSettings = (s) => emit('update:modelValue', { type: value.value.type, ...(s ?? {}) })
     return { value, options, plugin, specs, settings, setType, setSettings }
