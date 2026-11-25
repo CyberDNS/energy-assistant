@@ -202,9 +202,65 @@ def _savings_totals(rows: list[dict]) -> dict[str, Any]:
         "uncontrolled_bill": sum(r["uncontrolled_bill"] for r in rows),
         "real_bill": sum(r["real_bill"] for r in rows),
         "ev_saving": sum(r["ev_saving"] for r in rows),
+        "real_wear": sum(r.get("real_wear_eur", 0.0) for r in rows),
+        "uncontrolled_wear": sum(r.get("uncontrolled_wear_eur", 0.0) for r in rows),
         "components": components,
         "hours": sum(r["hours"] for r in rows),
     }
+
+
+#: Component key of the battery wear in savings slots and totals.
+WEAR_COMPONENT = "battery_wear"
+
+
+def _with_battery_wear(rows: list[dict], batteries: list[StorageConstraints]) -> list[dict]:
+    """Add battery wear to both houses of every savings slot.
+
+    Each kWh stored costs ``degradation_cost_per_kwh`` (purchase price ÷
+    (cycle life × capacity)), as in the planner.  Per slot and house the
+    charged energy is the positive part of the measured (real) or simulated
+    battery energy; it is split over the batteries whose stored energy rose
+    in the slot (else by charge power) and stored with each battery's charge
+    efficiency.  The wear is added to each house's cost; the difference is
+    the ``battery_wear`` component of the saving.  Rows are returned as new
+    dicts; slots are unchanged when no battery has a wear cost."""
+    wear_of = {sc.device_id: sc for sc in batteries if sc.degradation_cost_per_kwh > 0}
+    if not wear_of:
+        return rows
+    out: list[dict] = []
+    prev: dict | None = None
+    for row in rows:
+        detail = row.get("stored_detail") or {}
+        prev_detail = (prev or {}).get("stored_detail") or {}
+        wear: dict[str, float] = {}
+        for house, key in (("real", "real_battery_kwh"), ("uncontrolled", "uncontrolled_battery_kwh")):
+            charged = max(0.0, float(row.get(key) or 0.0))
+            if charged <= 0:
+                wear[house] = 0.0
+                continue
+            now_kwh, before = detail.get(house) or {}, prev_detail.get(house) or {}
+            rise = {b: max(0.0, now_kwh.get(b, 0.0) - before.get(b, now_kwh.get(b, 0.0)))
+                    for b in now_kwh if b in wear_of}
+            if sum(rise.values()) <= 1e-9:
+                rise = {b: sc.max_charge_kw for b, sc in wear_of.items()}
+            total = sum(rise.values()) or 1.0
+            wear[house] = sum(
+                charged * share / total * wear_of[b].charge_efficiency * wear_of[b].degradation_cost_per_kwh
+                for b, share in rise.items()
+            )
+        new = dict(row)
+        if wear["real"] or wear["uncontrolled"]:
+            new["real_cost"] = row["real_cost"] + wear["real"]
+            new["uncontrolled_cost"] = row["uncontrolled_cost"] + wear["uncontrolled"]
+            if "saving" in row:
+                new["saving"] = row["saving"] + wear["uncontrolled"] - wear["real"]
+            new["components"] = {**(row.get("components") or {}),
+                                 WEAR_COMPONENT: wear["uncontrolled"] - wear["real"]}
+        new["real_wear_eur"] = wear["real"]
+        new["uncontrolled_wear_eur"] = wear["uncontrolled"]
+        out.append(new)
+        prev = row
+    return out
 
 
 def _stored_positions(
@@ -2475,6 +2531,7 @@ class Application:
         rows = await self._storage.query_savings_slots(
             datetime.min.replace(tzinfo=timezone.utc), datetime.max.replace(tzinfo=timezone.utc)
         )
+        rows = _with_battery_wear(rows, self._savings.batteries)
         await self._mqtt_publisher.publish_savings(_savings_totals(rows))
 
     def _update_savings_ev_needs(
@@ -2510,6 +2567,8 @@ class Application:
         groups: list[dict[str, Any]] = []
         if self._storage_constraints:
             groups.append({"id": "batteries", "kind": "batteries", "label": "Batteries"})
+        if any(sc.degradation_cost_per_kwh > 0 for sc in self._storage_constraints):
+            groups.append({"id": WEAR_COMPONENT, "kind": "wear", "label": "Battery wear"})
         # Savings are kept per charger (whichever car charged there), named
         # after the charger's default vehicle.
         for cid, spec in self._fleet.chargers.items():
@@ -2910,6 +2969,7 @@ class Application:
             all_rows = await self._storage.query_savings_slots(
                 datetime.min.replace(tzinfo=UTC), end
             )
+            all_rows = _with_battery_wear(all_rows, self._savings.batteries)
             prices, positions = _stored_positions(all_rows, self._savings.batteries)
             first = next(
                 (i for i, r in enumerate(all_rows) if r["slot_start"] >= start), len(all_rows)
@@ -2959,6 +3019,7 @@ class Application:
             all_rows = await self._storage.query_savings_slots(
                 datetime.min.replace(tzinfo=UTC), end
             )
+            all_rows = _with_battery_wear(all_rows, self._savings.batteries)
             prices, positions = _stored_positions(all_rows, self._savings.batteries)
             idx = [i for i, r in enumerate(all_rows) if r["slot_start"] >= start]
             rows = [all_rows[i] for i in idx]

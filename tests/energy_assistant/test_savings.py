@@ -683,6 +683,39 @@ class TestServerWiring:
             await app._storage.stop()
 
 
+    async def test_api_counts_battery_wear_in_both_houses(self, tmp_path: Path) -> None:
+        """6000 € / (1000 cycles × 10 kWh) = 0.60 € per kWh stored (η_c = 1):
+        the real house charges 1 kWh, the uncontrolled one 2 kWh."""
+        import httpx
+
+        worn = BAT.model_copy(update={"purchase_price_eur": 6000.0, "cycle_life": 1000})
+        app = await self._app(tmp_path)
+        app._storage_constraints = [worn]
+        app._savings = SavingsTracker([worn], step_minutes=15)
+        try:
+            now = datetime.now(UTC)
+            await app._storage.save_savings_slot(SavingsSlot(
+                now - timedelta(hours=2), 0.25, 0.30, 0.30, 0.30, 0.30, 0.0,
+                real_battery_kwh=1.0, uncontrolled_battery_kwh=2.0,
+                real_stored={"bat": 2.0}, uncontrolled_stored={"bat": 3.0},
+            ))
+            transport = httpx.ASGITransport(app=app._build_api(), client=("127.0.0.1", 1))
+            async with httpx.AsyncClient(transport=transport, base_url="http://ea") as c:
+                day = (await c.get("/api/savings", params={"hours": 24})).json()
+                slots = (await c.get("/api/savings/slots", params={
+                    "start": (now - timedelta(hours=3)).isoformat()})).json()
+            t = day["totals"]
+            assert t["real_wear"] == pytest.approx(0.60)
+            assert t["uncontrolled_wear"] == pytest.approx(1.20)
+            assert t["components"]["battery_wear"] == pytest.approx(0.60)
+            assert t["real"] == pytest.approx(0.60)
+            assert {"id": "battery_wear", "kind": "wear", "label": "Battery wear"} in day["groups"]
+            (row,) = slots["slots"]
+            assert row["saving"] == pytest.approx(0.60) and row["real_cost"] == pytest.approx(0.90)
+        finally:
+            await app._storage.stop()
+
+
 class TestStoredPosition:
     def test_values_usable_energy_at_the_price_minus_ledger_cost(self) -> None:
         bat = StorageConstraints(
@@ -730,3 +763,39 @@ def test_kpi_sensor_is_a_monetary_total() -> None:
     assert cfg["unique_id"] == "ea_savings_real"
     assert cfg["device_class"] == "monetary"
     assert cfg["state_class"] == "total"
+
+
+class TestBatteryWear:
+    SMA = StorageConstraints(device_id="sma", capacity_kwh=7.4, max_charge_kw=3.0, max_discharge_kw=3.0,
+                             charge_efficiency=0.9, purchase_price_eur=3500.0, cycle_life=6000)
+    ZEN = StorageConstraints(device_id="zen", capacity_kwh=7.6, max_charge_kw=1.2, max_discharge_kw=0.8,
+                             charge_efficiency=0.9, purchase_price_eur=2700.0, cycle_life=6000)
+
+    @staticmethod
+    def _row(real_kwh: float, unc_kwh: float, real: dict, unc: dict) -> dict:
+        return {"real_cost": 0.0, "uncontrolled_cost": 0.0, "saving": 0.0, "components": {},
+                "real_battery_kwh": real_kwh, "uncontrolled_battery_kwh": unc_kwh,
+                "stored_detail": {"real": real, "uncontrolled": unc}}
+
+    def test_charge_is_split_by_which_battery_rose(self) -> None:
+        from energy_assistant.server import _with_battery_wear
+
+        rows = [
+            self._row(0.0, 0.0, {"sma": 1.0, "zen": 1.0}, {"sma": 1.0, "zen": 1.0}),
+            # Real: only the SMA rose; uncontrolled: both rose equally.
+            self._row(1.0, 1.0, {"sma": 1.9, "zen": 1.0}, {"sma": 1.45, "zen": 1.45}),
+        ]
+        out = _with_battery_wear(rows, [self.SMA, self.ZEN])
+        sma, zen = self.SMA.degradation_cost_per_kwh, self.ZEN.degradation_cost_per_kwh
+        assert out[1]["real_wear_eur"] == pytest.approx(0.9 * sma)
+        assert out[1]["uncontrolled_wear_eur"] == pytest.approx(0.45 * sma + 0.45 * zen)
+        assert out[1]["components"]["battery_wear"] == pytest.approx(0.45 * (zen - sma))
+        assert out[0]["real_wear_eur"] == 0.0 and "battery_wear" not in out[0]["components"]
+        assert rows[1]["real_cost"] == 0.0  # input rows untouched
+
+    def test_discharge_and_batteries_without_prices_cost_nothing(self) -> None:
+        from energy_assistant.server import _with_battery_wear
+
+        rows = [self._row(-1.0, -1.0, {"bat": 1.0}, {"bat": 1.0})]
+        assert _with_battery_wear(rows, [self.SMA])[0]["real_wear_eur"] == 0.0
+        assert _with_battery_wear(rows, [BAT]) is rows
