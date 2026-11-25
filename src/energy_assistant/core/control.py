@@ -594,6 +594,10 @@ class ControlLoop:
         self._ledger = ledger
         # Site import limit, enforced on every tick (see core/grid_limit.py).
         self._grid_guard = GridLimitGuard(grid_limit) if grid_limit is not None else None
+        # Power charges (core/power_charge.py): the same curtailment against
+        # an import limit that changes every tick, see set_power_charge_limit.
+        self._power_guard: GridLimitGuard | None = None
+        self._curtail_order: tuple[str, ...] = grid_limit.curtail_order if grid_limit else ()
         self._contributors: list[ControlContributor] = list(contributors or [])
         self._active_plan: EnergyPlan | None = None
         self._last_storage_setpoints_w: dict[str, float] = {}
@@ -835,7 +839,11 @@ class ControlLoop:
     ) -> dict[str, Behaviour | None]:
         """The behaviour of each row's setpoint (``behaviour_for`` of its
         contributor; ``None`` without one, or without a setpoint)."""
-        curtailed = set(self._grid_guard.curtailed) if self._grid_guard is not None else set()
+        curtailed = {
+            did
+            for guard in (self._grid_guard, self._power_guard) if guard is not None
+            for did in guard.curtailed
+        }
         by_id = {c.device_id: c for c in self._contributors}
         out: dict[str, Behaviour | None] = {}
         for did, sp, _mode, intent in rows:
@@ -1043,20 +1051,47 @@ class ControlLoop:
             result.append((contributor.device_id, setpoint_w, mode, intent))
         return self._apply_grid_limit(result, live)
 
+    def set_power_charge_limit(self, max_import_w: float | None) -> None:
+        """Import (W) the power charges allow on this tick, None = no limit.
+
+        Set before every tick: it follows the running 15-minute interval
+        (``PowerChargeMeter.allowed_import_w``).  Flexible loads are curtailed
+        to it like to the grid connection limit; the curtailment is kept
+        across ticks, so the hysteresis still works.
+        """
+        if max_import_w is None:
+            self._power_guard = None
+            return
+        limit = GridLimit(
+            max_import_w=max_import_w,
+            curtail_order=self._curtail_order,
+            hysteresis_w=max(200.0, 0.05 * abs(max_import_w)),
+        )
+        if self._power_guard is None:
+            self._power_guard = GridLimitGuard(limit)
+        else:
+            self._power_guard.limit = limit
+
+    @property
+    def power_charge_curtailed(self) -> dict[str, float]:
+        """Setpoints currently held down by the power charges."""
+        return self._power_guard.curtailed if self._power_guard is not None else {}
+
     def _apply_grid_limit(
         self,
         rows: list[tuple[str, float | None, str, ControlIntent | None]],
         live: LiveSituation,
     ) -> list[tuple[str, float | None, str, ControlIntent | None]]:
-        """Curtail flexible loads so site import stays below the grid limit."""
-        if self._grid_guard is None:
+        """Curtail flexible loads so site import stays below the grid limit
+        and the import the power charges allow."""
+        guards = [g for g in (self._grid_guard, self._power_guard) if g is not None]
+        if not guards:
             return rows
-        limited = self._grid_guard.apply(
-            {did: sp for did, sp, _m, _i in rows},
-            list(self._contributors),
-            live,
-            previous=self.last_setpoints,
-        )
+        limited: dict[str, float | None] = {did: sp for did, sp, _m, _i in rows}
+        for guard in guards:
+            limited = guard.apply(
+                limited, list(self._contributors), live, previous=self.last_setpoints,
+            )
         out: list[tuple[str, float | None, str, ControlIntent | None]] = []
         storage_ids = {
             c.device_id for c in self._contributors if isinstance(c, StorageControlContributor)

@@ -7,6 +7,7 @@ import { RouterLink } from 'vue-router'
 import EnergyFlow from '../components/EnergyFlow.vue'
 import EvCard from '../components/EvCard.vue'
 import GuestCard from '../components/GuestCard.vue'
+import PowerChargeStatus from '../components/PowerChargeStatus.vue'
 import PlotlyChart from '../components/PlotlyChart.js'
 import { useCars } from '../composables/useCars'
 import { usePowerFlow } from '../composables/usePowerFlow'
@@ -210,6 +211,8 @@ const kwh = (v: number | null | undefined) => (v == null ? '—' : `${fmt(v, v <
         </dl>
       </section>
     </div>
+
+    <PowerChargeStatus v-if="status?.power_charges" :pc="status.power_charges" />
 
     <section class="panel full" aria-label="Today">
       <div class="panel-head">
