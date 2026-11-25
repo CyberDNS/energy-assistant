@@ -23,9 +23,9 @@ export function deviceNav(category: string | null | undefined): string {
   }
 }
 
-/** The page behind a savings group: the batteries together, a car, a device. */
+/** The page behind a savings group: the batteries together (also their wear), a car, a device. */
 export function savingsLink(group: { id: string, kind: string }): string {
-  if (group.kind === 'batteries') return '/batteries'
+  if (group.kind === 'batteries' || group.kind === 'wear') return '/batteries'
   const id = encodeURIComponent(group.id)
   return group.kind === 'car' ? `/cars/${id}` : `/devices/${id}`
 }

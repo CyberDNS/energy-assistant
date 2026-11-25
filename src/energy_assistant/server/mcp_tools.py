@@ -46,7 +46,10 @@ charging slots save nothing and the saving shows when stored energy is used.
 So a house holding more stored energy looks worse until it uses it:
 'real_with_stored' adds the change of 'stored_position' (usable stored energy
 valued at the mean import price of the last 24 h minus its ledger cost, real
-minus uncontrolled) over the window.
+minus uncontrolled) over the window. Battery wear is a cost in both houses:
+each kWh stored costs purchase price / (cycle life x capacity), booked when
+charged; component 'battery_wear' is uncontrolled minus real wear, and the
+totals carry 'real_wear' / 'uncontrolled_wear'.
 """
 
 

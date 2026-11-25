@@ -98,7 +98,8 @@ onMounted(() => load(range.value))
       <p class="savings-note">
         Compared against a simulated uncontrolled house on the same load, PV and prices:
         its batteries charge from PV surplus only and cover the household load, and cars charge
-        as late as possible to reach their charge plan. Stored energy is costed when it is used,
+        as late as possible to reach their charge plan. Battery wear counts in both houses: each kWh
+        stored costs the battery's purchase price ÷ (cycle life × capacity). Stored energy is costed when it is used,
         at what it cost to store it (ledger); charging saves nothing by itself, the saving shows
         when the energy replaces grid power. "Incl. stored energy" also counts the energy one
         house still holds beyond the other, valued at the mean import price of the last 24 h
