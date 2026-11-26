@@ -24,6 +24,7 @@ registry = PluginRegistry()
 # is handled inside the registry, not here.
 from . import (  # noqa: E402
     differential,
+    entsoe,
     flat_rate,
     forecast_solar,
     generic_consumer,
@@ -48,6 +49,7 @@ from . import (  # noqa: E402
 )
 
 differential.register(registry)
+entsoe.register(registry)
 flat_rate.register(registry)
 forecast_solar.register(registry)
 generic_consumer.register(registry)

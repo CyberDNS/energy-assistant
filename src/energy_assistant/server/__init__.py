@@ -371,12 +371,19 @@ def _learning_category(item: dict[str, Any]) -> str:
 
 
 async def _current_export_price(tariffs: dict[str, TariffModel]) -> float:
-    """Return the current feed-in (export) price from the first tariff that has one."""
+    """Return the current feed-in (export) price from the first tariff that has one.
+
+    Schedules may start before now (spot tariffs list the whole day), so the
+    point in force now is used, not the first one.
+    """
+    now = datetime.now(UTC)
     for tariff in tariffs.values():
         try:
             sched = await tariff.export_price_schedule(timedelta(hours=1))
             if sched and any(tp.price_eur_per_kwh > 0.001 for tp in sched):
-                return sched[0].price_eur_per_kwh
+                pts = sorted(sched, key=lambda tp: tp.timestamp)
+                current = [tp for tp in pts if tp.timestamp <= now]
+                return (current[-1] if current else pts[0]).price_eur_per_kwh
         except Exception:  # noqa: BLE001
             pass
     return 0.0
