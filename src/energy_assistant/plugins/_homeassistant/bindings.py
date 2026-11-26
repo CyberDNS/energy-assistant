@@ -17,6 +17,7 @@ Keys
 ``attribute``       read this attribute of ``entity`` instead of its state
 ``import_entity`` / ``export_entity``
                     power and energy: two entities, value = import − export
+                    (the config UI picks one or the other with a switch)
 ``entities``        per-phase power: one entity per phase
 ``invert_sign``     power: the entity counts the other direction as positive
 ``scale``           multiply the value (after unit conversion)
@@ -40,7 +41,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from ...core.device_model import Capability, DeviceConfigError, ParamSpec
+from ...core.device_model import Capability, DeviceConfigError, ParamSpec, file_keys
 from .client_types import EntityState
 
 _log = logging.getLogger(__name__)
@@ -269,8 +270,20 @@ UNIT_FREE: dict[ValueKind, tuple[str, ...]] = {
 }
 
 
-def binding_specs(capability: Capability) -> dict[str, ParamSpec]:
-    """The keys a binding of *capability* accepts, as ``ParamSpec``s."""
+#: Names of the two directions of a split binding: (key word, label word).
+IMPORT_EXPORT = ("import", "export")
+CHARGE_DISCHARGE = ("charge", "discharge")
+
+
+def binding_specs(capability: Capability, *,
+                  directions: tuple[str, str] = IMPORT_EXPORT) -> dict[str, ParamSpec]:
+    """The keys a binding of *capability* accepts, as ``ParamSpec``s.
+
+    Power and energy start with the ``source`` switch of the config UI (never
+    in the file): one signed entity, or one entity per direction
+    (``import_entity`` / ``export_entity``).  *directions* only names the two
+    directions in the form (a battery's are charge and discharge).
+    """
     kind = CAPABILITY_KINDS[capability]
     if kind is ValueKind.BOOL:
         return {
@@ -291,32 +304,48 @@ def binding_specs(capability: Capability) -> dict[str, ParamSpec]:
             "scale": _scale(),
         }
     fit = {"units": UNITS.get(kind, ()), "unit_free_domains": UNIT_FREE.get(kind, ())}
+    if kind not in (ValueKind.POWER, ValueKind.ENERGY):
+        return {
+            "entity": ParamSpec(str, required=True, entity=True, domains=NUMERIC_DOMAINS,
+                                label="Entity", description=_KIND_HINT[kind], **fit),
+            "attribute": _attribute(),
+            "scale": _scale(),
+        }
+    what = "power" if kind is ValueKind.POWER else "energy"
+    one, other = directions
+    single, split = {"source": "single"}, {"source": "split"}
     specs: dict[str, ParamSpec] = {
+        "source": ParamSpec(
+            str, selector=True, choices=("single", "split"), default="single",
+            choice_labels={"single": "One entity (+ / −)",
+                           "split": f"Separate {one} and {other}"},
+            label="Read from",
+            description=(f"One {what} entity for both directions, or one entity for "
+                         f"{one} and one for {other}")),
         "entity": ParamSpec(str, required=True, entity=True, domains=NUMERIC_DOMAINS,
-                            label="Entity", description=_KIND_HINT[kind], **fit),
+                            label="Entity", description=_KIND_HINT[kind], when=single, **fit),
     }
-    if kind in (ValueKind.POWER, ValueKind.ENERGY):
-        specs["entity"] = ParamSpec(str, required=True, entity=True, domains=NUMERIC_DOMAINS,
-                                    label="Entity", description=_KIND_HINT[kind],
-                                    when={"import_entity": None}, **fit)
-        what = "power" if kind is ValueKind.POWER else "energy"
-        specs["import_entity"] = ParamSpec(
-            str, advanced=True, entity=True, domains=NUMERIC_DOMAINS, when={"entity": None},
-            label=f"Import {what} entity",
-            description="Separate import and export sensors instead of one entity", **fit)
-        specs["export_entity"] = ParamSpec(
-            str, entity=True, domains=NUMERIC_DOMAINS, required=True,
-            when={"import_entity": "*"}, label=f"Export {what} entity",
-            description=f"Export {what} sensor", **fit)
     if kind is ValueKind.POWER:
-        specs["invert_sign"] = ParamSpec(bool, default=False, label="Invert sign",
-                                         description="The sensor counts the other direction "
-                                                     "as positive")
-    specs["attribute"] = ParamSpec(str, advanced=True, label="Attribute", attribute_of="entity",
-                                   description="Read this attribute of the entity instead of "
-                                               "its state")
+        specs["invert_sign"] = ParamSpec(
+            bool, default=False, label="Invert sign", when=single,
+            description=f"The sensor counts {other} as positive (default: {one} positive)")
+    specs["import_entity"] = ParamSpec(
+        str, required=True, entity=True, domains=NUMERIC_DOMAINS, when=split,
+        label=f"{one.capitalize()} {what} entity",
+        description=f"{one.capitalize()} {what} sensor, ≥ 0", **fit)
+    specs["export_entity"] = ParamSpec(
+        str, required=True, entity=True, domains=NUMERIC_DOMAINS, when=split,
+        label=f"{other.capitalize()} {what} entity",
+        description=f"{other.capitalize()} {what} sensor, ≥ 0", **fit)
+    specs["attribute"] = _attribute(when=single)
     specs["scale"] = _scale()
     return specs
+
+
+def _attribute(**kwargs: Any) -> ParamSpec:
+    return ParamSpec(str, advanced=True, label="Attribute", attribute_of="entity",
+                     description="Read this attribute of the entity instead of its state",
+                     **kwargs)
 
 
 _KIND_HINT = {
@@ -349,11 +378,11 @@ def parse_binding(where: str, capability: Capability, raw: Any) -> ReadBinding:
     if not isinstance(raw, Mapping):
         raise DeviceConfigError([f"{where}: must be a mapping like {{entity: sensor.…}}"])
     kind = CAPABILITY_KINDS[capability]
-    specs = binding_specs(capability)
-    unknown = set(raw) - set(specs)
+    keys = file_keys(binding_specs(capability))
+    unknown = set(raw) - set(keys)
     if unknown:
         raise DeviceConfigError([
-            f"{where}: unknown key(s) {', '.join(sorted(unknown))} (allowed: {', '.join(specs)})"
+            f"{where}: unknown key(s) {', '.join(sorted(unknown))} (allowed: {', '.join(keys)})"
         ])
     entity = raw.get("entity") or None
     import_entity = raw.get("import_entity") or None

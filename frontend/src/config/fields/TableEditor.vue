@@ -1,7 +1,7 @@
 <script>
 import { defineComponent, computed } from 'vue'
 import { isEmpty } from '../useConfig.js'
-import { applies } from './SchemaForm.vue'
+import { applies } from './when.js'
 
 // A list of records as a table: one column per field of `fields`
 // ({ key: spec }), one row per record.  Used for charge curves, PV planes,

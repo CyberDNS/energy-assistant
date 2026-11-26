@@ -16,7 +16,8 @@ export default defineComponent({
   emits: ['update:modelValue'],
   setup(props) {
     const editor = computed(() => editorFor(props.spec, props.modelValue))
-    const wide = computed(() => WIDE.has(editor.value))
+    // A selector heads its own row, above the fields it switches.
+    const wide = computed(() => WIDE.has(editor.value) || !!props.spec.selector)
     const hint = computed(() => {
       const s = props.spec
       const parts = []
@@ -27,7 +28,7 @@ export default defineComponent({
       return parts.join(' · ')
     })
     // Compound editors are a group of controls, not one control to label.
-    const group = computed(() => wide.value || ['secret', 'entity', 'entity-value', 'time', 'month_day', 'weekdays'].includes(editor.value))
+    const group = computed(() => wide.value || ['secret', 'entity', 'entity-value', 'time', 'month_day', 'weekdays'].includes(editor.value) || !!props.spec.selector)
     return { editor, wide, hint, group }
   },
 })
