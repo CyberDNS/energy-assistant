@@ -667,13 +667,29 @@ CATEGORY_SCHEMAS: dict[DeviceCategory, CategorySchema] = {
 
 
 # ---------------------------------------------------------------------------
+# Control mode (observe / active)
+# ---------------------------------------------------------------------------
+
+#: ``control:`` of a device: Energy Assistant plans it but only *observes*
+#: (logs what it would send, sends nothing), or controls it (*active*).
+OBSERVE = "observe"
+ACTIVE = "active"
+CONTROL_MODES = (OBSERVE, ACTIVE)
+
+#: Categories the control loop commands — the only ones ``control:`` is for.
+CONTROLLED_CATEGORIES = frozenset({
+    DeviceCategory.BATTERY, DeviceCategory.CHARGER, DeviceCategory.THERMAL_LOAD,
+})
+
+
+# ---------------------------------------------------------------------------
 # DeviceSpec
 # ---------------------------------------------------------------------------
 
 #: Keys of a device entry that belong to the model; all others are plugin settings.
 MODEL_KEYS = frozenset({
     "id", "label", "category", "type", "tariff", "forecast", "learning",
-    "capabilities", "params", "ha_discovery", "energy_dashboard",
+    "capabilities", "params", "ha_discovery", "energy_dashboard", "control",
     *(c.value for c in ConnectionType),
 })
 
@@ -703,6 +719,21 @@ class DeviceSpec:
     ha_discovery: bool = True
     energy_dashboard: str | None = None
     """Statistic id this device was imported from (HA Energy dashboard)."""
+    control: str | None = None
+    """``observe`` / ``active`` (``CONTROL_MODES``) for a device the control
+    loop commands.  Not set = ``active``: configurations from before observe
+    mode keep controlling their devices.  Devices added from the UI, presets
+    or the onboarding are written with ``control: observe``."""
+
+    @property
+    def controlled(self) -> bool:
+        """Whether the control loop commands this device."""
+        return self.category in CONTROLLED_CATEGORIES
+
+    @property
+    def observed(self) -> bool:
+        """A controlled device in observe mode: planned, never commanded."""
+        return self.controlled and self.control == OBSERVE
 
     @property
     def display_name(self) -> str:
@@ -761,6 +792,8 @@ class DeviceSpec:
             out["ha_discovery"] = False
         if self.energy_dashboard:
             out["energy_dashboard"] = self.energy_dashboard
+        if self.control:
+            out["control"] = self.control
         return out
 
 
@@ -880,6 +913,13 @@ def parse_device(device_id: str, raw: Mapping[str, Any], errors: list[str]) -> D
     tariff = raw.get("tariff")
     if tariff is not None and not isinstance(tariff, str):
         errors.append(f"{where}: 'tariff:' must be a tariff id")
+    control = raw.get("control")
+    if control is not None:
+        if control not in CONTROL_MODES:
+            errors.append(f"{where}: 'control:' must be one of {', '.join(CONTROL_MODES)}")
+        elif category not in CONTROLLED_CATEGORIES:
+            errors.append(f"{where}: 'control:' is only for devices Energy Assistant commands "
+                          f"({_names(CONTROLLED_CATEGORIES)})")
 
     if len(errors) > start:
         return None
@@ -900,6 +940,7 @@ def parse_device(device_id: str, raw: Mapping[str, Any], errors: list[str]) -> D
         learning=dict(learning) if isinstance(learning, Mapping) else learning,
         ha_discovery=raw.get("ha_discovery", True) is not False,
         energy_dashboard=raw.get("energy_dashboard"),
+        control=control,
     )
 
 

@@ -318,6 +318,8 @@ devices:
     metered_by: household_meter
     profile: sma_sunny_boy_storage
     host: 192.168.x.x
+    # control: observe              # plan only, send nothing (see README "Observe first");
+    #                               # not set = active (controlled)
     params:
       capacity_kwh: 7.4
       max_charge_kw: 3.0

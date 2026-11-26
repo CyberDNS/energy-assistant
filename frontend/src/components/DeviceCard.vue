@@ -11,6 +11,8 @@ interface Setpoint {
   category?: string | null
   grid_allowed?: boolean | null
   export_allowed?: boolean | null
+  /** Observe mode: what would be sent; nothing is. */
+  observed?: boolean
 }
 const props = defineProps<{
   device: {
@@ -20,6 +22,7 @@ const props = defineProps<{
     power_w?: number | null
     soc_pct?: number | null
     available?: boolean
+    control?: string | null
     sp?: Setpoint
   }
   /** Route of the device's page; makes the name a link. */
@@ -55,6 +58,10 @@ const setpoint = computed(() => {
       />
       <RouterLink v-if="to" :to="to" class="dev-label ev-label-link">{{ device.label ?? device.device_id }}</RouterLink>
       <span v-else class="dev-label">{{ device.label ?? device.device_id }}</span>
+      <span
+        v-if="device.control === 'observe'" class="pill pill-off" data-testid="observing-chip"
+        title="Planned, but Energy Assistant sends it nothing"
+      >Observing</span>
       <span class="dev-power" :class="{ producing: (device.power_w ?? 0) < 0 }">{{ fmtPower(device.power_w) }}</span>
     </div>
     <div v-if="device.soc_pct != null" class="soc-row">
@@ -65,7 +72,7 @@ const setpoint = computed(() => {
     </div>
     <div v-if="device.sp" class="dev-sp">
       <span :class="pill">{{ (device.sp.mode ?? '—').replace(/_/g, ' ') }}</span>
-      <span class="dev-sp-w">{{ setpoint }}</span>
+      <span class="dev-sp-w">{{ device.sp.observed && device.sp.setpoint_w != null ? 'would send ' : '' }}{{ setpoint }}</span>
       <span v-if="device.sp.grid_allowed != null" class="dev-flag" :class="{ off: !device.sp.grid_allowed }">
         grid {{ device.sp.grid_allowed ? '✓' : '✗' }}
       </span>

@@ -6,6 +6,7 @@ Endpoints (all under ``/api/config``)::
     GET    /file                    the content of config.yaml, in structured form
     GET    /entities                Home Assistant entity ids (for pickers)
     POST   /validate                check one change without saving
+    PUT    /devices/{id}/control    observe / active, applied at once (no reload)
     PUT    /devices/{id}            create or change a device        ┐
     PUT    /tariffs/{id}            … a tariff                       │ then apply
     PUT    /forecasts/{id}          … a system-wide forecast         │ without a
@@ -64,7 +65,10 @@ from ..core.config_schema import COLLECTIONS, LEARNING_KINDS, SECTION_SCHEMAS
 from ..core.device_model import (
     CAPABILITY_TITLES,
     CATEGORY_SCHEMAS,
+    CONTROL_MODES,
+    CONTROLLED_CATEGORIES,
     MODEL_KEYS,
+    OBSERVE,
     Capability,
     DeviceConfigError,
     ParamSpec,
@@ -81,6 +85,8 @@ _log = logging.getLogger(__name__)
 
 _ENV_PREFIX = "ENERGY_ASSISTANT_SECRET_"
 
+_CONTROLLED = {c.value for c in CONTROLLED_CATEGORIES}
+
 
 class ChangeBody(BaseModel):
     """One change to the config file."""
@@ -96,6 +102,11 @@ class ChangeBody(BaseModel):
     """Revision of the file the edit is based on (from ``GET /file``)."""
     create: bool = False
     """True when adding an entry: fails if the id already exists."""
+
+
+class ControlBody(BaseModel):
+    control: str
+    """``observe`` or ``active``."""
 
 
 class SecretBody(BaseModel):
@@ -166,6 +177,9 @@ def mount_config_api(api: FastAPI, app: Application) -> None:
         if kind == "devices":
             if value.get("id") not in (None, item_id):
                 raise ConfigStoreError("a device id cannot be changed (stored data is keyed by it)")
+            if create and value.get("control") is None and value.get("category") in _CONTROLLED:
+                # New devices start in observe mode (issue #134).
+                value = {**value, "control": OBSERVE}
             return doc.with_entry(kind, item_id, form_to_entry(value, existing))
         settings = value.get("settings") or {}
         if not isinstance(settings, Mapping) or "type" in settings:
@@ -256,6 +270,8 @@ def mount_config_api(api: FastAPI, app: Application) -> None:
             },
             "learning_kinds": {cat.value: kind for cat, kind in LEARNING_KINDS.items()},
             "model_keys": sorted(MODEL_KEYS),
+            # Categories with control: observe | active (issue #134).
+            "controlled_categories": sorted(_CONTROLLED),
             "presets": presets_json(),
         }
 
@@ -395,6 +411,40 @@ def mount_config_api(api: FastAPI, app: Application) -> None:
     async def put_config_device(device_id: str, body: ChangeBody) -> dict:
         """Create or change one device in config.yaml and apply it."""
         return await _change("devices", device_id, body)
+
+    @api.put("/api/config/devices/{device_id}/control")
+    async def put_device_control(device_id: str, body: ControlBody) -> dict:
+        """Switch a device between observe mode (planned, nothing sent) and
+        active control: writes ``control:`` into its entry in config.yaml and
+        applies it without a reload — active from the next control tick,
+        observe releases the device at once (issue #134)."""
+        if body.control not in CONTROL_MODES:
+            raise HTTPException(422, {"errors": [f"control must be one of {', '.join(CONTROL_MODES)}"]})
+        async with edit_lock:
+            doc = _read()
+            entry = doc.entry("devices", device_id)
+            running = app.running_devices().get(device_id)
+            if entry is None or running is None:
+                raise HTTPException(404, {"errors": [f"device {device_id!r} is not in config.yaml"]})
+            if not running.controlled:
+                raise HTTPException(422, {"errors": [
+                    f"{device_id!r} is not a device Energy Assistant controls"]})
+            new_text = doc.with_entry("devices", device_id, {**entry, "control": body.control})
+            if app.config_problems or doc.revision != revision_of(app.loaded_config_text):
+                # Not running as in the file: save and apply it as a whole.
+                result = await _apply(new_text, doc, doc.revision)
+            else:
+                problems = await _problems(new_text)
+                if problems:
+                    raise HTTPException(422, {"errors": problems})
+                try:
+                    revision = _store().write(new_text, expected_revision=doc.revision)
+                except ConfigConflictError as exc:
+                    raise HTTPException(409, {"errors": [str(exc)]}) from exc
+                await app.set_device_control(device_id, body.control, new_text)
+                result = {"ok": True, "revision": revision, "applied": True, "problems": []}
+            _log.info("Config: device %r set to control: %s from the UI", device_id, body.control)
+            return {**result, "control": body.control}
 
     @api.put("/api/config/tariffs/{tariff_id}")
     async def put_config_tariff(tariff_id: str, body: ChangeBody) -> dict:

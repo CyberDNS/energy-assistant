@@ -680,6 +680,7 @@ class ControlLoop:
         registry: DeviceRegistry,
         *,
         send_commands: bool = True,
+        observed: frozenset[str] | set[str] = frozenset(),
     ) -> None:
         """Execute one control tick.
 
@@ -703,6 +704,10 @@ class ControlLoop:
             False while the devices are released (``core/failsafe.py``):
             no command is sent and no setpoint is reported, but the ledger
             still books the measured energy.
+        observed:
+            Devices in observe mode (``control: observe``): their setpoint is
+            computed and reported in ``last_setpoints`` ("would send"), but
+            no command is sent to them.
         """
         if self._active_plan is None:
             # No plan has been computed yet (e.g. the first tick right after
@@ -728,7 +733,8 @@ class ControlLoop:
         for contributor in self._contributors:
             setpoint_w, intent = setpoints[contributor.device_id]
 
-            if setpoint_w is not None and send_commands:
+            if (setpoint_w is not None and send_commands
+                    and contributor.device_id not in observed):
                 device = registry.get(contributor.device_id)
                 if device is not None:
                     await self._send(device, contributor.device_id, setpoint_w,

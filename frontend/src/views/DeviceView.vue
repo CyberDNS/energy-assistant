@@ -6,6 +6,7 @@ import { RouterLink, useRoute } from 'vue-router'
 import { fetchControllable, fetchLearned } from '../api.js'
 import ControllableDeviceCard from '../components/ControllableDeviceCard.vue'
 import DeviceCard from '../components/DeviceCard.vue'
+import DeviceControls from '../components/DeviceControls.vue'
 import DeviceHistory from '../components/DeviceHistory.vue'
 import DeviceSavings from '../components/DeviceSavings.vue'
 import LearnedModel from '../components/LearnedModel.vue'
@@ -23,6 +24,7 @@ import { navItem } from '../nav'
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const route = useRoute()
 const status = inject('status') as Ref<Status | null>
+const refresh = inject('refresh') as () => Promise<void>
 const devices = useLiveDevices(status)
 
 const id = computed(() => String(route.params.id ?? ''))
@@ -89,6 +91,8 @@ const savingsGroup = computed(() => (category.value === 'battery' ? 'batteries' 
         </dl>
       </DeviceCard>
     </div>
+
+    <DeviceControls :device-id="id" @changed="refresh(); loadPlan()" />
 
     <div v-if="planned" class="full panel" data-testid="device-plan">
       <h2>Plan</h2>

@@ -96,6 +96,9 @@ export const setConfigSecret = (name, value) =>
 export const deleteConfigSecret = (name) =>
   configCall(`/api/config/secrets/${encodeURIComponent(name)}`, { method: 'DELETE' })
 export const reloadConfig = () => configCall('/api/config/reload', { method: 'POST' })
+// Observe mode (#134): 'observe' | 'active', written to config.yaml and applied at once.
+export const setDeviceControl = (id, control) =>
+  configCall(`/api/config/devices/${encodeURIComponent(id)}/control`, _json('PUT', { control }))
 // config.yaml as text (the editor of last resort, also when it is not valid YAML).
 export const fetchConfigText = () => configCall('/api/config/text')
 export const saveConfigText = (text, revision) =>
