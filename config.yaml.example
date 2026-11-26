@@ -64,6 +64,26 @@ tariffs:
     token: !secret tibber_token   # https://developer.tibber.com/settings/access-token
     # home_id: !secret tibber_home_id   # default: the account's first home
     default: true
+  # Any dynamic tariff in Europe without a supplier plugin: the day-ahead spot
+  # price of your bidding zone from ENTSO-E, plus fees, taxes and VAT:
+  #   price = (spot + markup + grid fee + taxes) × (1 + vat)
+  # VAT applies to the whole sum, spot included.  Free API token: register at
+  # https://transparency.entsoe.eu and ask for "Restful API access".
+  # household:
+  #   type: entsoe
+  #   zone: DE-LU                      # BE, NL, AT, FR, DK1, SE3, …
+  #   token: !secret entsoe_token
+  #   formula:
+  #     markup_eur_per_kwh: 0.025      # supplier margin
+  #     grid_fee_eur_per_kwh: 0.09
+  #     taxes_eur_per_kwh: 0.04        # levies, electricity tax
+  #     vat: 0.19                      # fraction: 0.19 = 19 %
+  #   export:
+  #     type: spot                     # none (default) | spot | fixed
+  #     factor: 1.0                    # spot: spot × factor + offset_eur_per_kwh
+  #     # type: fixed
+  #     # price_eur_per_kwh: 0.08
+  #   default: true
   # A fixed rate, e.g. a separately metered heat pump (Messkonzept 8).
   # heatpump:
   #   type: flat_rate

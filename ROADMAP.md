@@ -127,7 +127,7 @@ and what comes later. Open items link to their GitHub issue.
 
 - [ ] Issue forms for device requests and problem reports (#101)
 - [ ] Support page: anonymised, encrypted support bundle with replayable scenario, pre-filled issue (#102)
-- [ ] Tariffs: ENTSO-E day-ahead with fee/tax formula (#103); time-of-use done (#104), power-dependent charges (`power_charges:` power threshold, Luxembourg; monthly peak, Flanders) done (#105)
+- [x] Tariffs: ENTSO-E day-ahead with fee/tax formula (`entsoe`, #103); time-of-use done (#104), power-dependent charges (`power_charges:` power threshold, Luxembourg; monthly peak, Flanders) done (#105)
 - [x] Generic devices via Home Assistant entities for all categories, with presets (#106); still open: presets marked "not yet" verified on real installations
 - [ ] Generic devices: OCPP 1.6J (#107), Modbus SunSpec (#108)
 
