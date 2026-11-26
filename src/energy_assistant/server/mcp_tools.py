@@ -136,7 +136,8 @@ def build_mcp_server(api: FastAPI) -> MCPServer:
     ) -> dict[str, Any]:
         """Control execution log in [start, end) (max 8 days): per accounting
         slot and device the dominant intent mode, time-averaged planned power,
-        setpoint sent and measured power (W, + = charge/consume).
+        setpoint sent and measured power (W, + = charge/consume).  observed =
+        the device was in observe mode: setpoint_w is what would have been sent.
         device_ids: comma-separated; default all controlled devices."""
         return await get("/api/execution", start=start, end=end, device_ids=device_ids)
 

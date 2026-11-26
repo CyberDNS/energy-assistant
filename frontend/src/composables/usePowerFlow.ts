@@ -12,6 +12,11 @@ export interface StatusDevice {
   power_w?: number | null
   soc_pct?: number | null
   available?: boolean
+  /** Observe mode (#134): 'observe' when every device in control_targets is observed. */
+  control?: 'observe' | 'active' | null
+  /** The controlled devices whose observe/active switch concerns this device:
+   *  itself, the thermal load a switch executes, the charger of a car. */
+  control_targets?: string[]
 }
 
 export interface LedgerEntry {
@@ -74,6 +79,8 @@ export interface Status {
   current_price_eur_per_kwh?: number | null
   pv_opportunity_price_eur_per_kwh?: number | null
   devices?: StatusDevice[]
+  /** 'observe' | 'active' per device Energy Assistant commands (#134). */
+  control?: Record<string, 'observe' | 'active'>
   ledger?: LedgerEntry[]
   power_charges?: PowerChargeStatus | null
   [key: string]: unknown

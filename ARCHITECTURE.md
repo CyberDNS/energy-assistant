@@ -279,6 +279,25 @@ on every page offers it when the file on disk differs from what is running
 `server.port`, `server.api_token` and `server.trusted_hosts` still need a
 restart.
 
+### Observe mode: switching control without a reload
+
+`control: observe | active` (`DeviceSpec.control`, only for the categories
+the control loop commands: battery, charger, thermal load) is the one
+setting applied without a reload: `PUT /api/config/devices/{id}/control`
+writes it into the entry (config store, as every edit) and calls
+`Application.set_device_control`, which updates the running spec and the
+set of observed devices (`_observed`) and adopts the new file text as the
+running one.  `ControlLoop.tick(observed=…)` computes setpoints for every
+contributor but sends none to observed devices; the charger side effects
+(vehicle assignment, SoC push, refresh) are skipped for them too, and
+`_release_devices` leaves them (and the switch of an observed thermal load)
+alone.  Switching to observe releases the device once.  The projected
+savings (`core/projection.py`) run a second `SavingsTracker` on samples in
+which the observed devices follow the would-send setpoints; its slots are
+stored in `projected_savings_slots`.  New devices get `control: observe` from
+the config API (`create`); an entry without it is active, so existing
+configurations are unchanged.
+
 ### Configuration needed: a config mistake never stops the process
 
 `Application.start()` never fails on the configuration. When the file has

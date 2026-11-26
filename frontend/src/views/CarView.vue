@@ -2,6 +2,7 @@
 import { computed, inject } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 import ControllableDeviceCard from '../components/ControllableDeviceCard.vue'
+import DeviceControls from '../components/DeviceControls.vue'
 import DeviceHistory from '../components/DeviceHistory.vue'
 import DeviceSavings from '../components/DeviceSavings.vue'
 import EvCard from '../components/EvCard.vue'
@@ -13,6 +14,7 @@ import { planning } from '../composables/useStatus.js'
 // Also what an iframe in a Home Assistant dashboard shows (…?embed=1).
 const route = useRoute()
 const embed = inject('embed', computed(() => false))
+const refreshStatus = inject('refresh', async () => {}) as () => Promise<void>
 const { cars, chargers, loaded, refresh, planOf } = useCars()
 
 const wanted = computed(() => String(route.params.vehicle ?? '').trim().toLowerCase())
@@ -44,6 +46,7 @@ usePageTitle(() => car.value?.label ?? (loaded.value ? 'Unknown car' : ''), [{ t
       </div>
       <!-- An embedded car card stays what it was: the car and its charging plan. -->
       <template v-if="!embed">
+        <DeviceControls :device-id="car.vehicle_id" @changed="refreshStatus(); refresh()" />
         <DeviceHistory :device-id="car.vehicle_id" :power-device-id="car.charger_id || null" category="vehicle" />
         <DeviceSavings :group="car.vehicle_id" />
       </template>
