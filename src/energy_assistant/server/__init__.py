@@ -85,7 +85,13 @@ from ..core.control import (
     StorageControlContributor,
     surplus_opportunity_price,
 )
-from ..core.device_model import DeviceCategory, DeviceConfigError, DeviceSpec
+from ..core.device_model import (
+    ACTIVE,
+    OBSERVE,
+    DeviceCategory,
+    DeviceConfigError,
+    DeviceSpec,
+)
 from ..core.event import DeviceStateEvent, EventBus, PlanUpdatedEvent
 from ..core.execution_log import DeviceTick, ExecutionLog
 from ..core.failsafe import (
@@ -123,6 +129,7 @@ from ..core.power_charge import (
     peak_from_history,
 )
 from ..core.price_curve import PriceCurveHistory, build_price_slots
+from ..core.projection import ObservedProjection
 from ..core.registry import DeviceRegistry
 from ..core.savings import (
     DeviceLive,
@@ -748,6 +755,11 @@ class Application:
         self._day_ahead_flagged: date | None = None
         self._dry_run: bool
         self._dry_run_log_gate = ChangeGate()
+        # Devices in observe mode (control: observe, issue #134): planned,
+        # never commanded — see _observed_devices.
+        self._observed: frozenset[str] = frozenset()
+        self._projection: ObservedProjection | None = None
+        self._projected_savings: SavingsTracker | None = None
         self._first_poll_done: asyncio.Event
         self._api: FastAPI
         # One asset per vehicle, kept in place (other components hold the
@@ -931,6 +943,7 @@ class Application:
         self._control_interval_s = float(ctl.get("control_interval_s", 30))
         self._poll_interval_s = float(ctl.get("poll_interval_s", self._control_interval_s))
         self._dry_run = bool(ctl.get("dry_run", False)) or os.environ.get("ENERGY_ASSISTANT_DRY_RUN", "") == "1"
+        self._observed = self._observed_devices()
         # Safety buffer for the EV missed-deadline feasibility check — see
         # build_goal_from_parts. 1.2 = require 20% more time than the bare
         # minimum before declaring a deadline still reachable.
@@ -1059,6 +1072,21 @@ class Application:
             devices=self._threshold_constraints,
             power_charges=self._power_charges,
         )
+        # Projected savings: the same accounting for the house in which the
+        # observed devices follow the control loop (core/projection.py).
+        projected_state = await self._load_projected_state()
+        self._projection = ObservedProjection(
+            self._storage_constraints, self._threshold_constraints,
+            state=projected_state.get("projection"),
+        )
+        self._projected_savings = SavingsTracker(
+            self._storage_constraints,
+            step_minutes=self._optimizer._step_min,
+            state=SavingsState.from_dict(projected_state["tracker"])
+            if projected_state.get("tracker") else None,
+            devices=self._threshold_constraints,
+            power_charges=self._power_charges,
+        )
         # Plan fidelity: what the control loop did with each slot's intent.
         self._execution_log = ExecutionLog(step_minutes=self._optimizer._step_min)
 
@@ -1083,7 +1111,8 @@ class Application:
             self._storage_constraints, self._cfg.devices, self._storage,
             self._build_ctx.data_dir,
         )
-        self._savings.set_batteries(self._planning_storage_constraints())
+        for tracker in self._savings_trackers():
+            tracker.set_batteries(self._planning_storage_constraints())
 
         # 7d — MQTT publisher (optional — only started when mqtt: is configured)
         if self._cfg.backends.mqtt:
@@ -1155,6 +1184,8 @@ class Application:
 
         if self._dry_run:
             _log.warning("DRY RUN — control commands will be logged but not sent")
+        elif self._observed:
+            _log.info("Observe mode (nothing is sent to them): %s", ", ".join(sorted(self._observed)))
 
         # 10 — Connections the new configuration no longer uses
         await SharedPool.sweep()
@@ -1297,6 +1328,7 @@ class Application:
         if not self._config_problems:
             try:
                 await self._storage.save_savings_state(self._savings.state.to_dict())
+                await self._save_projected_state()
             except Exception as exc:  # noqa: BLE001
                 _log.warning("Could not save the savings state before the reload: %s", exc)
             await self._save_power_meter()
@@ -1313,25 +1345,122 @@ class Application:
         charge, a stopped wallbox or a switched-off cooler never outlives the
         control that commanded it.  Each device gets ``_RELEASE_TIMEOUT_S``;
         one that hangs or fails does not keep the others from being
-        released.  Not in dry-run."""
+        released.  Not in dry-run.  Devices in observe mode are left alone:
+        they run on their own logic, which a release could change (e.g. a
+        charge mode the user set) — they are released once, when switched
+        to observe (``set_device_control``)."""
         if getattr(self, "_dry_run", True) or not hasattr(self, "_registry"):
             return
+        hands_off = self._hands_off_devices()
+        await asyncio.gather(*(
+            self._release_device(d) for d in self._registry.all() if d.device_id not in hands_off
+        ))
 
-        async def release_one(device: Any) -> None:
-            release = getattr(device, "release", None)
-            if release is None:
-                return
-            try:
-                await asyncio.wait_for(release(), _RELEASE_TIMEOUT_S)
-            except asyncio.CancelledError:
-                raise
-            except TimeoutError:
-                _log.warning("Could not release device %r: no answer within %.0f s",
-                             device.device_id, _RELEASE_TIMEOUT_S)
-            except Exception as exc:  # noqa: BLE001
-                _log.warning("Could not release device %r: %s", device.device_id, exc)
+    @staticmethod
+    async def _release_device(device: Any) -> None:
+        """``release()`` one device (if it has one), within ``_RELEASE_TIMEOUT_S``;
+        a failure is logged."""
+        release = getattr(device, "release", None)
+        if release is None:
+            return
+        try:
+            await asyncio.wait_for(release(), _RELEASE_TIMEOUT_S)
+        except asyncio.CancelledError:
+            raise
+        except TimeoutError:
+            _log.warning("Could not release device %r: no answer within %.0f s",
+                         device.device_id, _RELEASE_TIMEOUT_S)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("Could not release device %r: %s", device.device_id, exc)
 
-        await asyncio.gather(*(release_one(d) for d in self._registry.all()))
+    # ------------------------------------------------------------------
+    # Observe mode (control: observe, issue #134)
+    # ------------------------------------------------------------------
+
+    def _observed_devices(self) -> frozenset[str]:
+        """Ids of the devices in observe mode (``DeviceSpec.observed``)."""
+        return frozenset(d for d, spec in self._cfg.devices.items() if spec.observed)
+
+    def _hands_off_devices(self) -> set[str]:
+        """The observed devices and the devices they act through (the switch
+        of an observed thermal load): nothing is sent to these."""
+        observed = getattr(self, "_observed", frozenset())
+        cfg = getattr(self, "_cfg", None)
+        if not observed or cfg is None:
+            return set()
+        out = set(observed)
+        for device_id in observed:
+            spec = cfg.devices.get(device_id)
+            if spec is not None and spec.controlled_by:
+                out.add(spec.controlled_by)
+        # A switch shared with a device that is controlled stays controlled.
+        for device_id, spec in cfg.devices.items():
+            if device_id not in observed and spec.controlled and spec.controlled_by:
+                out.discard(spec.controlled_by)
+        return out
+
+    def control_modes(self) -> dict[str, str]:
+        """``observe`` / ``active`` per device the control loop commands."""
+        return {
+            d: (OBSERVE if spec.observed else ACTIVE)
+            for d, spec in self._cfg.devices.items() if spec.controlled
+        }
+
+    def control_targets(self, device_id: str) -> list[str]:
+        """The controlled devices whose control acts on *device_id*, so its
+        page can show their observe/active switch: the device itself when the
+        control loop commands it; for a switch, the thermal loads it switches
+        (``controlled_by``); for a car, the charger it is at, else the
+        chargers it is the default vehicle of, else every charger."""
+        spec = self._cfg.devices.get(device_id)
+        if spec is None:
+            return []
+        if spec.controlled:
+            return [device_id]
+        out = [d for d, s in self._cfg.devices.items()
+               if s.controlled and s.controlled_by == device_id]
+        fleet = getattr(self, "_fleet", None)
+        if spec.category is DeviceCategory.VEHICLE and fleet is not None:
+            at = fleet.sessions.charger_of(device_id)
+            chargers = [at] if at else [
+                cid for cid, c in fleet.chargers.items()
+                if c.params.get("default_vehicle") == device_id
+            ] or list(fleet.chargers)
+            out += [c for c in chargers if c not in out]
+        return out
+
+    def effective_control(self, device_id: str) -> str | None:
+        """``observe`` when every control target of *device_id* is observed,
+        ``active`` when one is controlled, ``None`` without targets."""
+        modes = self.control_modes()
+        targets = [modes[t] for t in self.control_targets(device_id) if t in modes]
+        if not targets:
+            return None
+        return OBSERVE if all(m == OBSERVE for m in targets) else ACTIVE
+
+    async def set_device_control(self, device_id: str, mode: str, config_text: str) -> None:
+        """Switch one device between observe and active without a reload.
+
+        *config_text* is config.yaml as just written with the new ``control:``
+        (``config_api``); it becomes the running configuration's text.
+        Active takes effect at the next control tick.  Observe releases the
+        device (and the switch it acts through) at once, so it goes back to
+        its own logic."""
+        spec = self._cfg.devices.get(device_id)
+        if spec is None or not spec.controlled:
+            raise ValueError(f"{device_id!r} is not a device Energy Assistant controls")
+        before = self._hands_off_devices()
+        self._cfg.devices[device_id] = dataclasses.replace(spec, control=mode)
+        self._observed = self._observed_devices()
+        self._config_text = config_text
+        _log.info("Device %s: control %s", device_id,
+                  "switched to observe — released to its own logic" if mode == OBSERVE
+                  else "switched on — Energy Assistant controls it from the next tick")
+        if mode == OBSERVE and not self._dry_run:
+            for did in sorted(self._hands_off_devices() - before):
+                device = self._registry.get(did)
+                if device is not None:
+                    await self._release_device(device)
 
     async def _close_devices(self) -> None:
         """Stop the background work of devices that own some (pollers)."""
@@ -1638,7 +1767,8 @@ class Application:
         # be stale right after the previous one); on plug-in only when the
         # charger system has another vehicle assigned.
         current = getattr(device, "assigned_vehicle_id", None)
-        if wanted is None or self._dry_run or (session.source != MANUAL and wanted == current):
+        if (wanted is None or self._dry_run or charger_id in self._observed
+                or (session.source != MANUAL and wanted == current)):
             return
         try:
             await device.assign_vehicle(wanted)
@@ -1654,7 +1784,8 @@ class Application:
             soc = est.state.soc_pct
             spec = self._fleet.vehicles[vid]
             target = self._fleet.soc_push_target(vid)
-            if soc is not None and target is not None and not self._dry_run:
+            if (soc is not None and target is not None and not self._dry_run
+                    and target[0] not in self._observed):
                 cid, ext_id = target
                 last = self._soc_pushed.get(vid)
                 key = round(soc, 1)
@@ -1682,7 +1813,7 @@ class Application:
                 and reported is not None
                 and datetime.now(UTC) - reported > timedelta(minutes=refresh_min)
                 and mono - self._refresh_pressed.get(vid, -1e9) > refresh_min * 60
-                and not self._dry_run
+                and not self._dry_run and cid not in self._observed
             ):
                 self._refresh_pressed[vid] = mono
                 try:
@@ -1991,7 +2122,10 @@ class Application:
 
         thermal_models, ambient_forecasts = await self._thermal_inputs(effective_horizon)
         storage_constraints = self._planning_storage_constraints(refit=True)
-        self._savings.set_batteries(storage_constraints)
+        for tracker in self._savings_trackers():
+            tracker.set_batteries(storage_constraints)
+        if self._projection is not None:
+            self._projection.set_batteries(storage_constraints)
         battery_refill = await self._battery_refill(effective_horizon, storage_constraints)
         context = OptimizationContext(
             device_states=device_states,
@@ -2418,7 +2552,9 @@ class Application:
             return
 
         command = await self._failsafe.check_plan(self._control_loop._active_plan, now)
-        await self._control_loop.tick(live, self._registry, send_commands=command)
+        await self._control_loop.tick(
+            live, self._registry, send_commands=command, observed=self._observed
+        )
         await self._record_execution(now, device_states)
 
         # Persist updated ledger state so it survives restarts.
@@ -2454,6 +2590,7 @@ class Application:
                     planned_w=intent.power_kw * 1000.0 if intent is not None else None,
                     setpoint_w=loop.last_setpoints.get(device_id),
                     measured_w=state.power_w if state is not None else None,
+                    observed=self._dry_run or device_id in self._observed,
                 )
             plan = loop._active_plan
             finished = self._execution_log.record(
@@ -2614,6 +2751,7 @@ class Application:
         sample = await self._savings_sample(now, import_price, device_states)
         if sample is None:
             return
+        await self._track_projected_savings(sample)
         finished = self._savings.tick(sample)
         for slot in finished:
             await self._save_savings_slot(slot)
@@ -2629,6 +2767,79 @@ class Application:
                 sum(c.ev_saving for c in corrections),
             )
             await self._publish_savings()
+
+    async def _track_projected_savings(self, sample: LiveSample) -> None:
+        """Book *sample* into the projected savings: the house in which the
+        observed devices follow the control loop (core/projection.py).  Runs
+        only while a device is observed (not in a dry run).
+
+        Called before this tick's control step, so the control loop's last
+        setpoints are those in force since the previous sample."""
+        if (not getattr(self, "_observed", None) or self._dry_run
+                or self._projection is None or self._projected_savings is None):
+            return
+        projected = self._projection.project(
+            sample, self._observed, self._control_loop.last_setpoints
+        )
+        tracker = self._projected_savings
+        finished = tracker.tick(projected)
+        for slot in finished:
+            await self._storage.save_savings_slot(slot, projected=True)
+        for corr in tracker.pop_corrections():
+            await self._storage.apply_savings_correction(corr, projected=True)
+        if finished:
+            await self._save_projected_state()
+            _log.info(
+                "Projected savings %s (observed devices controlled): %+.3f €",
+                finished[-1].start.astimezone().strftime("%H:%M"),
+                sum(slot.saving for slot in finished),
+            )
+
+    async def _save_projected_state(self) -> None:
+        if self._projection is None or self._projected_savings is None:
+            return
+        await self._storage.save_savings_state(
+            {"tracker": self._projected_savings.state.to_dict(),
+             "projection": self._projection.to_dict()},
+            projected=True,
+        )
+
+    async def _load_projected_state(self) -> dict[str, Any]:
+        """The saved projected-savings state ({} when stale or missing)."""
+        saved = await self._storage.load_savings_state(projected=True)
+        if saved is None:
+            return {}
+        saved_at, data = saved
+        if datetime.now(UTC) - saved_at > _SAVINGS_STATE_MAX_AGE:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    async def _projected_savings_summary(self, start: datetime) -> dict[str, Any] | None:
+        """Projected savings (observe mode): what control of the observed
+        devices would have saved — in the window from *start* and since the
+        first projected slot, totalled and per component (``batteries``, a
+        charger id, a thermal-load id).  ``None`` before any projected slot."""
+        rows = await self._storage.query_savings_slots(
+            datetime.min.replace(tzinfo=UTC), datetime.now(UTC), projected=True
+        )
+        if not rows:
+            return None
+        rows = _with_battery_wear(rows, self._savings.batteries)
+        window = [r for r in rows if r["slot_start"] >= start]
+        return {
+            "observed": sorted(self._observed),
+            "since": rows[0]["slot_start"].isoformat(),
+            "totals": _savings_totals(window),
+            "all_time": _savings_totals(rows),
+        }
+
+    def _savings_trackers(self) -> list[SavingsTracker]:
+        """The savings accounting and the projected one (observe mode): both
+        run on the same batteries, car plans and thermal models."""
+        out = [self._savings]
+        if self._projected_savings is not None:
+            out.append(self._projected_savings)
+        return out
 
     async def _save_savings_slot(self, slot: SavingsSlot) -> None:
         await self._storage.save_savings_slot(slot)
@@ -2695,16 +2906,21 @@ class Application:
             if st is None or st.extra.get("plugged") is not True:
                 continue
             goal = goals.get(cid)
-            if goal is None or not goal.connected:
-                self._savings.set_ev_goal(cid, None, None)
-            elif goal.pv_only:
-                self._savings.set_ev_goal(cid, None, None, pv_only=True)
-            else:
-                self._savings.set_ev_goal(
-                    cid,
-                    goal.phase1_required_kwh + goal.phase2_required_kwh,
-                    goal.target_by,
-                )
+            for tracker in self._savings_trackers():
+                self._set_ev_goal(tracker, cid, goal)
+
+    @staticmethod
+    def _set_ev_goal(tracker: SavingsTracker, cid: str, goal: EvChargingGoal | None) -> None:
+        if goal is None or not goal.connected:
+            tracker.set_ev_goal(cid, None, None)
+        elif goal.pv_only:
+            tracker.set_ev_goal(cid, None, None, pv_only=True)
+        else:
+            tracker.set_ev_goal(
+                cid,
+                goal.phase1_required_kwh + goal.phase2_required_kwh,
+                goal.target_by,
+            )
 
     def _savings_groups(self) -> list[dict[str, Any]]:
         """Controlled device groups the Savings tab shows one panel each for:
@@ -2764,9 +2980,10 @@ class Application:
                 _log.debug("thermal:%s: ambient forecast failed: %s", device_id, exc)
             # The savings' uncontrolled thermostat runs on the same model.
             points = ambients.get(device_id) or []
-            self._savings.set_thermal_model(
-                device_id, models[device_id], points[0].value if points else None
-            )
+            for tracker in self._savings_trackers():
+                tracker.set_thermal_model(
+                    device_id, models[device_id], points[0].value if points else None
+                )
         return models, ambients
 
     def _is_day_ahead_plan(self, plan: EnergyPlan) -> bool:
@@ -2869,6 +3086,7 @@ class Application:
             behaviours = self._control_loop.behaviours(setpoint_rows, live)
 
             devices_payload = []
+            controls = self.control_modes()
             for s in device_states_map.values():
                 spec = self._cfg.devices.get(s.device_id)
                 devices_payload.append(
@@ -2884,6 +3102,8 @@ class Application:
                         "available": s.available,
                         "timestamp": s.timestamp.isoformat(),
                         "is_virtual": spec is not None and spec.type == "generic_consumer",
+                        "control": self.effective_control(s.device_id),
+                        "control_targets": self.control_targets(s.device_id),
                         "forecast_power_w": await _virtual_forecast_power_w(
                             spec, getattr(self, "_device_forecast_providers", {}).get(s.device_id)
                         ),
@@ -2905,6 +3125,8 @@ class Application:
                         "available": False,
                         "timestamp": None,
                         "is_virtual": spec is not None and spec.type == "generic_consumer",
+                        "control": self.effective_control(device.device_id),
+                        "control_targets": self.control_targets(device.device_id),
                         "forecast_power_w": None,
                     })
 
@@ -2916,12 +3138,16 @@ class Application:
                 "current_price_eur_per_kwh": current_price,
                 "pv_opportunity_price_eur_per_kwh": self._pv_opportunity_price,
                 "dry_run": self._dry_run,
+                # Observe mode per device the control loop commands (#134).
+                "control": controls,
                 "failsafe": self._failsafe.to_dict(),
                 "devices": devices_payload,
                 "setpoints": [
                     {
                         "device_id": did,
                         "setpoint_w": sp,
+                        # Observe mode: what would be sent; nothing is.
+                        "observed": did in self._observed,
                         "behaviour": b.value if (b := behaviours.get(did)) is not None else None,
                         "mode": mode,
                         "grid_allowed": intent.grid_allowed if intent is not None else None,
@@ -3090,7 +3316,9 @@ class Application:
         ) -> dict:
             """Control execution log in ``[start, end)``: per slot and device
             the dominant intent mode, time-averaged planned power, setpoint
-            sent and measured power (W, + = charge/consume)."""
+            sent and measured power (W, + = charge/consume).  ``observed``:
+            the device was in observe mode, ``setpoint_w`` is what would have
+            been sent."""
             start = _as_utc(start)
             end = _as_utc(end) if end is not None else datetime.now(timezone.utc)
             if end - start > timedelta(days=8):
@@ -3149,6 +3377,7 @@ class Application:
                 "reference_price": prices[-1] if prices else None,
                 "all_time": _stored_change(_savings_totals(all_rows), 0, last, positions),
                 "groups": self._savings_groups(),
+                "projected": await self._projected_savings_summary(start),
                 # Per-slot detail (what batteries and cars did in both
                 # houses) for windows short enough to chart it.
                 "slots": [

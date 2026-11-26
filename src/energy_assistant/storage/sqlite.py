@@ -265,7 +265,7 @@ _LOAD_ALL_EV_FORCE_CHARGE = "SELECT asset_id, target_soc_pct FROM ev_force_charg
 # Savings accounting (core/savings.py): real house vs. simulated uncontrolled
 # house, one row per accounting slot (96 a day), kept for SAVINGS_KEEP_DAYS.
 _CREATE_SAVINGS_SLOTS_TABLE = """
-CREATE TABLE IF NOT EXISTS savings_slots (
+CREATE TABLE IF NOT EXISTS {table} (
     slot_start        TEXT PRIMARY KEY,
     hours             REAL NOT NULL,
     real_cost         REAL NOT NULL,
@@ -297,7 +297,7 @@ SAVINGS_KEEP_DAYS = 400
 """Savings slots are kept this long (the dashboard's longest range is 1 y)."""
 
 _CREATE_SAVINGS_STATE_TABLE = """
-CREATE TABLE IF NOT EXISTS savings_state (
+CREATE TABLE IF NOT EXISTS {table} (
     id         INTEGER PRIMARY KEY CHECK (id = 1),
     updated_at TEXT NOT NULL,
     state      TEXT NOT NULL
@@ -341,8 +341,17 @@ CREATE TABLE IF NOT EXISTS control_execution (
 )
 """
 
+# Added later (created on older DBs by start()): 1 = observe mode, the
+# setpoint was only computed ("would send"), not sent.
+_CONTROL_EXECUTION_ADDED_COLUMNS = {"observed": "INTEGER NOT NULL DEFAULT 0"}
+
+# Projected savings (core/projection.py): the same slots for the house in
+# which the devices in observe mode follow the control loop.
+_PROJECTED = "projected_savings_slots"
+
 _PURGE_SAVINGS_SQL = (
     ("DELETE FROM savings_slots WHERE slot_start < ?", SAVINGS_KEEP_DAYS),
+    (f"DELETE FROM {_PROJECTED} WHERE slot_start < ?", SAVINGS_KEEP_DAYS),
 )
 
 _PURGE_DIAGNOSTICS_SQL = (
@@ -505,12 +514,15 @@ class SqliteStorageBackend:
         # The accounting before #82; its rows were only kept for debugging.
         await self._db.execute("DROP TABLE IF EXISTS savings_actual")
         await self._db.execute("DROP TABLE IF EXISTS savings_predicted")
-        await self._db.execute(_CREATE_SAVINGS_STATE_TABLE)
+        for state_table in ("savings_state", "projected_savings_state"):
+            await self._db.execute(_CREATE_SAVINGS_STATE_TABLE.format(table=state_table))
         await self._db.execute(_CREATE_POWER_CHARGE_STATE_TABLE)
-        await self._db.execute(_CREATE_SAVINGS_SLOTS_TABLE)
-        await self._add_missing_columns("savings_slots", _SAVINGS_SLOTS_ADDED_COLUMNS)
+        for slots_table in ("savings_slots", _PROJECTED):
+            await self._db.execute(_CREATE_SAVINGS_SLOTS_TABLE.format(table=slots_table))
+            await self._add_missing_columns(slots_table, _SAVINGS_SLOTS_ADDED_COLUMNS)
         await self._db.execute(_CREATE_PLAN_SNAPSHOTS_TABLE)
         await self._db.execute(_CREATE_CONTROL_EXECUTION_TABLE)
+        await self._add_missing_columns("control_execution", _CONTROL_EXECUTION_ADDED_COLUMNS)
         # Superseded by ev_weekly_plan + ev_day_overrides
         await self._db.execute("DROP TABLE IF EXISTS ev_targets")
         await self._db.execute(_CREATE_LEDGER_HISTORY_INDEX)
@@ -1106,11 +1118,12 @@ class SqliteStorageBackend:
     # Savings accounting
     # ------------------------------------------------------------------
 
-    async def save_savings_slot(self, slot: SavingsSlot) -> None:
-        """Persist the result of one accounting slot."""
+    async def save_savings_slot(self, slot: SavingsSlot, projected: bool = False) -> None:
+        """Persist the result of one accounting slot (*projected*: of the
+        projected house, see core/projection.py)."""
         assert self._db is not None, "Call start() before save_savings_slot()"
         await self._db.execute(
-            "INSERT OR REPLACE INTO savings_slots (slot_start, hours, real_cost,"
+            f"INSERT OR REPLACE INTO {_slots_table(projected)} (slot_start, hours, real_cost,"
             " uncontrolled_cost, real_bill, uncontrolled_bill, ev_saving,"
             " real_battery_kwh, uncontrolled_battery_kwh, real_ev_kwh, uncontrolled_ev_kwh,"
             " real_stored_kwh, uncontrolled_stored_kwh, import_price, stored_detail,"
@@ -1134,12 +1147,15 @@ class SqliteStorageBackend:
         )
         await self._db.commit()
 
-    async def apply_savings_correction(self, correction: SlotCorrection) -> bool:
+    async def apply_savings_correction(
+        self, correction: SlotCorrection, projected: bool = False
+    ) -> bool:
         """Add a correction to a stored slot; False if the slot is not stored."""
         assert self._db is not None, "Call start() before apply_savings_correction()"
         key = _utc_iso(correction.start)
+        table = _slots_table(projected)
         async with self._db.execute(
-            "SELECT components, detail FROM savings_slots WHERE slot_start = ?", (key,)
+            f"SELECT components, detail FROM {table} WHERE slot_start = ?", (key,)
         ) as cursor:
             row = await cursor.fetchone()
         if row is None:
@@ -1154,7 +1170,7 @@ class SqliteStorageBackend:
         )
         ev["unc_kwh"] = ev.get("unc_kwh", 0.0) + correction.uncontrolled_ev_kwh
         await self._db.execute(
-            "UPDATE savings_slots SET"
+            f"UPDATE {table} SET"
             " uncontrolled_ev_kwh = COALESCE(uncontrolled_ev_kwh, 0) + ?,"
             " uncontrolled_cost = uncontrolled_cost + ?,"
             " uncontrolled_bill = uncontrolled_bill + ?,"
@@ -1171,14 +1187,18 @@ class SqliteStorageBackend:
         await self._db.commit()
         return True
 
-    async def query_savings_slots(self, start: datetime, end: datetime) -> list[dict]:
-        """Savings slots in ``[start, end)``, oldest first."""
+    async def query_savings_slots(
+        self, start: datetime, end: datetime, projected: bool = False
+    ) -> list[dict]:
+        """Savings slots in ``[start, end)``, oldest first (*projected*: of
+        the projected house)."""
         assert self._db is not None, "Call start() before query_savings_slots()"
         async with self._db.execute(
             "SELECT slot_start, hours, real_cost, uncontrolled_cost, real_bill,"
             " uncontrolled_bill, ev_saving, real_battery_kwh, uncontrolled_battery_kwh,"
             " real_ev_kwh, uncontrolled_ev_kwh, real_stored_kwh, uncontrolled_stored_kwh,"
-            " import_price, stored_detail, components, detail FROM savings_slots"
+            " import_price, stored_detail, components, detail"
+            f" FROM {_slots_table(projected)}"
             " WHERE slot_start >= ? AND slot_start < ? ORDER BY slot_start",
             (_utc_iso(start), _utc_iso(end)),
         ) as cursor:
@@ -1240,20 +1260,22 @@ class SqliteStorageBackend:
         await self._db.commit()
         return deleted
 
-    async def save_savings_state(self, state: dict) -> None:
+    async def save_savings_state(self, state: dict, projected: bool = False) -> None:
         """Persist the savings tracker state (single row)."""
         assert self._db is not None, "Call start() before save_savings_state()"
+        table = "projected_savings_state" if projected else "savings_state"
         await self._db.execute(
-            "INSERT OR REPLACE INTO savings_state VALUES (1, ?, ?)",
+            f"INSERT OR REPLACE INTO {table} VALUES (1, ?, ?)",
             (_utc_iso(datetime.now(timezone.utc)), json.dumps(state)),
         )
         await self._db.commit()
 
-    async def load_savings_state(self) -> tuple[datetime, dict] | None:
+    async def load_savings_state(self, projected: bool = False) -> tuple[datetime, dict] | None:
         """Return ``(saved_at, state)``, or ``None`` if nothing was saved."""
         assert self._db is not None, "Call start() before load_savings_state()"
+        table = "projected_savings_state" if projected else "savings_state"
         async with self._db.execute(
-            "SELECT updated_at, state FROM savings_state WHERE id = 1"
+            f"SELECT updated_at, state FROM {table} WHERE id = 1"
         ) as cursor:
             row = await cursor.fetchone()
         if row is None:
@@ -1324,12 +1346,15 @@ class SqliteStorageBackend:
     async def save_execution_slots(self, slots: "list[ExecutionSlot]") -> None:
         assert self._db is not None, "Call start() before save_execution_slots()"
         await self._db.executemany(
-            "INSERT OR REPLACE INTO control_execution VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO control_execution (slot_start, device_id, seconds, mode,"
+            " planned_w, setpoint_w, measured_w, plan_created_at, observed)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 (
                     _utc_iso(s.start), s.device_id, s.seconds, s.mode,
                     s.planned_w, s.setpoint_w, s.measured_w,
                     _utc_iso(s.plan_created_at) if s.plan_created_at else None,
+                    int(s.observed),
                 )
                 for s in slots
             ],
@@ -1343,7 +1368,7 @@ class SqliteStorageBackend:
         assert self._db is not None, "Call start() before query_execution()"
         sql = (
             "SELECT slot_start, device_id, seconds, mode, planned_w, setpoint_w,"
-            " measured_w, plan_created_at FROM control_execution"
+            " measured_w, plan_created_at, observed FROM control_execution"
             " WHERE slot_start >= ? AND slot_start < ?"
         )
         params: list = [_utc_iso(start), _utc_iso(end)]
@@ -1356,7 +1381,12 @@ class SqliteStorageBackend:
             "slot_start", "device_id", "seconds", "mode", "planned_w",
             "setpoint_w", "measured_w", "plan_created_at",
         )
-        return [dict(zip(keys, row)) for row in rows]
+        # observed: setpoint_w is what would have been sent (observe mode).
+        return [{**dict(zip(keys, row)), "observed": bool(row[8])} for row in rows]
+
+
+def _slots_table(projected: bool) -> str:
+    return _PROJECTED if projected else "savings_slots"
 
 
 def _prediction(cols: tuple) -> dict | None:

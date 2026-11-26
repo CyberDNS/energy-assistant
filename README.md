@@ -430,6 +430,34 @@ planner schedules the load in cheap
 or PV hours; the control loop keeps it inside its thresholds whatever the plan
 says.  Stored thermal models and savings are keyed by the thermal load's id.
 
+### Observe first, control per device
+
+A battery, charger or thermal load that is added in the UI (also from a
+preset) starts in **observe mode** (`control: observe` in its entry):
+Energy Assistant plans it like any other device and computes what it would
+send, but sends it nothing — the device keeps its own logic.  Switch control
+on per device on its page (Devices → the device → *Let Energy Assistant
+control this device*); this writes `control: active` into config.yaml.
+
+* **Observe → control** takes effect at the next control tick (no reload).
+* **Control → observe** releases the device at once (see the fail-safe
+  below), so it goes back to its own logic.  An observed device is not
+  released at start, reload or stop: its own settings are left alone.
+* An entry **without `control:`** is controlled, so configurations from
+  before observe mode keep working unchanged.
+* The execution log (`/api/execution`, MCP `get_execution`) records what
+  would have been sent, flagged `observed`.
+* **Projected savings**: while a device is observed, a second savings
+  accounting runs in which the observed devices follow the control loop
+  (their power is the would-send setpoint, the grid changes by the same
+  amount, an observed battery's SoC is simulated).  Its result — what control
+  would have saved — is shown on the device page and, while every device is
+  observed, on Home.  It is a simulation: the setpoints are computed on the
+  real situation, and a car's or cooler's SoC/temperature is not simulated.
+  `/api/savings` returns it under `projected`.
+* `controller.dry_run` stays: it is the global switch for development and
+  sends nothing to any device.
+
 ### When Energy Assistant stops or loses control (fail-safe)
 
 Energy Assistant never leaves a device stuck in a commanded state: a battery

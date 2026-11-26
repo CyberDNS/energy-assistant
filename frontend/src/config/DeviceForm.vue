@@ -30,7 +30,7 @@ export default defineComponent({
       id: '', category: props.category ?? '', type: '', label: '', tariff: null,
       settings: {}, capabilities: {}, params: {},
       metered_by: null, controlled_by: null, included_in: null,
-      forecast: null, learning: true, ha_discovery: true,
+      forecast: null, learning: true, ha_discovery: true, control: null,
     })
     for (const key of ['settings', 'capabilities', 'params']) form[key] ??= {}
 
@@ -46,6 +46,20 @@ export default defineComponent({
         form.type = plugins.value.length === 1 ? plugins.value[0].type : ''
       }
     }, { immediate: true })
+
+    // Observe mode (issue #134): a device Energy Assistant commands starts in
+    // observe (plans, sends nothing); an entry without control: is active.
+    const controlled = computed(() => (schema.value.controlled_categories ?? []).includes(form.category))
+    watch(controlled, (yes) => {
+      if (!yes) form.control = null
+      else if (isNew && form.control == null) form.control = 'observe'
+    }, { immediate: true })
+    const controlSpec = {
+      kind: 'str', label: 'Control', default: 'active', choices: ['observe', 'active'],
+      choice_labels: { observe: 'Observe only', active: 'Control it' },
+      description: 'Observe only: Energy Assistant plans this device and shows what it would do and save, '
+        + 'but sends it nothing. Control it: Energy Assistant sends the commands.',
+    }
 
     // Presets (core/presets.py): a ready-made device for a common integration.
     // Picking one asks for its variables (an entity prefix, …) and fills the
@@ -149,6 +163,7 @@ export default defineComponent({
              cfg, schema, isNew, readOnly, form, categorySchema, plugins, plugin, basics, capabilities,
              allBuiltIn, gridConnection,
              bindingSpecs, setBinding, connectionSpecs, connectionValues, setConnections,
+             controlled, controlSpec,
              learningKind, showForecast, showLearning, advancedSpecs, idProblem, state, save, remove }
   },
 })
@@ -226,6 +241,7 @@ export default defineComponent({
         </div>
         <SchemaField name="label" :spec="basics.label" :model-value="form.label || undefined" @update:model-value="form.label = $event ?? ''" />
         <SchemaField name="tariff" :spec="basics.tariff" :model-value="form.tariff || undefined" @update:model-value="form.tariff = $event ?? null" />
+        <SchemaField v-if="controlled" name="control" :spec="controlSpec" :model-value="form.control || undefined" @update:model-value="form.control = $event ?? null" />
       </div>
     </section>
 

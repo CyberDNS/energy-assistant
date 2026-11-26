@@ -7,7 +7,9 @@ execution log answers that: one row per accounting slot and controlled
 device with
 
 * the intent that was active (dominant mode, time-averaged planned power),
-* the setpoint actually sent (time average), and
+* the setpoint actually sent (time average) — for a device in observe mode
+  (``control: observe``) the setpoint it *would* have been sent, flagged
+  ``observed``, and
 * the power actually measured (time average).
 
 ``ExecutionLog`` is a pure accumulator: feed it one ``ExecutionSample`` per
@@ -37,6 +39,8 @@ class DeviceTick:
     """Setpoint sent (W); ``None`` = no command."""
     measured_w: float | None
     """Measured power (W); ``None`` = no reading."""
+    observed: bool = False
+    """Observe mode: *setpoint_w* was computed but not sent ("would send")."""
 
 
 @dataclass
@@ -56,6 +60,13 @@ class ExecutionSlot:
     measured_s: float = 0.0
     plan_created_at: datetime | None = None
     """Creation time of the last plan that drove this slot."""
+    observed_s: float = 0.0
+    """Time the device was in observe mode (setpoints not sent)."""
+
+    @property
+    def observed(self) -> bool:
+        """The device was observed (not controlled) for most of the slot."""
+        return self.observed_s * 2 > self.seconds
 
     @property
     def mode(self) -> str:
@@ -124,6 +135,8 @@ class ExecutionLog:
             if tick.measured_w is not None:
                 row.measured_ws += tick.measured_w * dt
                 row.measured_s += dt
+            if tick.observed:
+                row.observed_s += dt
             if plan_created_at is not None:
                 row.plan_created_at = plan_created_at
         # A slot ends with the tick that leaves it: close it right away when
