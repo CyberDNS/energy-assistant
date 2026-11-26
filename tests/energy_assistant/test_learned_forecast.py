@@ -376,6 +376,17 @@ async def test_diagnostics_fetches_history_for_a_model_loaded_from_disk(tmp_path
     assert len(diag["days"]) == N_DAYS
 
 
+async def test_diagnostics_summary_skips_history_and_forecast(tmp_path):
+    path = tmp_path / "hp.json"
+    await _provider(_make_ha(), model_path=path).get_forecast(timedelta(hours=1))
+    ha = FakeHAClient()
+    ha.fail_statistics = True  # the summary must not need the history
+    diag = await _provider(ha, model_path=path).diagnostics(detail=False)
+    assert diag["status"] == "fitted" and diag["model"]["mode"] == "temperature"
+    assert diag["last_error"] is None
+    assert "days" not in diag and "forecast" not in diag
+
+
 async def test_diagnostics_without_model_reports_fallback_and_error():
     ha = FakeHAClient()
     ha.fail_statistics = True

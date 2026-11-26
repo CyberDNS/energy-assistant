@@ -448,15 +448,33 @@ class LearnedConsumptionForecast:
         )
         return days, excluded_days
 
-    async def diagnostics(self, horizon: timedelta = timedelta(hours=48)) -> dict[str, Any]:
+    async def diagnostics(
+        self, horizon: timedelta = timedelta(hours=48), *, detail: bool = True
+    ) -> dict[str, Any]:
         """Everything needed to inspect the model: parameters, the training
         days with their status, and the current forecast.
 
         Fetches the history on demand when no snapshot is in memory (e.g. the
-        model was loaded from disk after a restart).
+        model was loaded from disk after a restart). With ``detail=False``
+        only the status and model parameters, without the training days and
+        the forecast (the Learning overview).
         """
         await self._ensure_model()
         model = self._model
+        summary = {
+            "id": self._id,
+            "history_entity": self._history_entity,
+            "subtract": list(self._subtract),
+            "temperature_entity": self._temperature_entity,
+            "weather_entity": self._weather_entity,
+            "status": "fitted" if model else ("fallback" if self._fallback else "no_model"),
+            "refitting": self._refit_task is not None and not self._refit_task.done(),
+            "refit_interval_h": self._refit_interval.total_seconds() / 3600.0,
+            "last_error": self._last_error,
+            "model": model.to_dict() if model else None,
+        }
+        if not detail:
+            return summary
         if self._snapshot is None:
             try:
                 self._snapshot = await self._fetch_history()
@@ -502,20 +520,8 @@ class LearnedConsumptionForecast:
                     "kwh": round(model.daily_kwh(day, temp), 1),
                 })
 
-        return {
-            "id": self._id,
-            "history_entity": self._history_entity,
-            "subtract": list(self._subtract),
-            "temperature_entity": self._temperature_entity,
-            "weather_entity": self._weather_entity,
-            "status": "fitted" if model else ("fallback" if self._fallback else "no_model"),
-            "refitting": self._refit_task is not None and not self._refit_task.done(),
-            "refit_interval_h": self._refit_interval.total_seconds() / 3600.0,
-            "last_error": self._last_error,
-            "model": model.to_dict() if model else None,
-            "days": days,
-            "forecast": forecast,
-        }
+        # last_error may have changed while fetching the history.
+        return {**summary, "last_error": self._last_error, "days": days, "forecast": forecast}
 
     # ------------------------------------------------------------ internals
 

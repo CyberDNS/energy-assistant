@@ -193,6 +193,10 @@ def test_learner_applies_only_when_learned_and_confident(tmp_path):
     assert few.apply(_sc()).charge_efficiency == 0.95
     diag = asyncio.run(few.diagnostics())
     assert diag["status"] == "collecting" and diag["kind"] == "efficiency"
+    assert "cycles" in diag and "series" in diag
+    summary = asyncio.run(few.diagnostics(detail=False))
+    assert summary["status"] == "collecting" and summary["estimate"] == diag["estimate"]
+    assert "cycles" not in summary and "series" not in summary
 
 
 def test_learner_keeps_cycles_beyond_measurement_history(tmp_path):

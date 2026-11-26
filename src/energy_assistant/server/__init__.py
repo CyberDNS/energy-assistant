@@ -55,7 +55,9 @@ from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.encoders import jsonable_encoder
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -368,6 +370,12 @@ def _learning_category(item: dict[str, Any]) -> str:
     return {"thermal": "thermal", "efficiency": "storage", "pv": "pv"}.get(
         item.get("kind", ""), "consumption"
     )
+
+
+def _learned_device_id(item: dict[str, Any]) -> str:
+    """The device a ``/api/learned`` entry belongs to (as the UI links it):
+    its ``device_id``, else a consumption forecast's id without ``_forecast``."""
+    return item.get("device_id") or str(item.get("id", "")).removesuffix("_forecast")
 
 
 async def _current_export_price(tariffs: dict[str, TariffModel]) -> float:
@@ -3522,23 +3530,40 @@ class Application:
             return await self._aligned_forecast()
 
         @api.get("/api/learned")
-        async def get_learned() -> list[dict]:
+        async def get_learned(summary: bool = False, device_id: str | None = None) -> JSONResponse:
             """Diagnostics of every learned model: consumption forecasts (model,
             training days, forecast) and thermal models of threshold devices
-            (``kind: "thermal"``: parameters, fit quality, measured vs. model)."""
-            out = []
-            for provider in self._forecast_providers:
-                if hasattr(provider, "diagnostics"):
-                    out.append(await provider.diagnostics(self._horizon))
-            for learner in self._thermal_learners.values():
-                out.append(await learner.diagnostics())
-            for learner in self._efficiency_learners.values():
-                out.append(await learner.diagnostics())
-            for item in out:
+            (``kind: "thermal"``: parameters, fit quality, measured vs. model).
+
+            ``summary=true`` leaves out the charts' data (training days,
+            forecast, series, cycles) and the work to compute it — status and
+            model parameters only, for the Learning overview. ``device_id``
+            keeps only the models of that device (its page)."""
+            async def diag(entry: tuple[Any, bool], detail: bool) -> dict[str, Any]:
+                learner, is_forecast = entry
+                if is_forecast:
+                    item = await learner.diagnostics(self._horizon, detail=detail)
+                else:
+                    item = await learner.diagnostics(detail=detail)
                 item.setdefault("category", _learning_category(item))
                 if item.get("kind") == "pv" and not item.get("device_id"):
                     item["device_id"] = self._pv_device_for(item.get("history_entity"))
-            return out
+                return item
+
+            learners: list[tuple[Any, bool]] = [
+                *((p, True) for p in self._forecast_providers if hasattr(p, "diagnostics")),
+                *((t, False) for t in self._thermal_learners.values()),
+                *((e, False) for e in self._efficiency_learners.values()),
+            ]
+            if device_id is not None:
+                # Which learner belongs to the device is in its (cheap) summary.
+                learners = [
+                    entry for entry in learners
+                    if _learned_device_id(await diag(entry, False)) == device_id
+                ]
+            out = [await diag(entry, not summary) for entry in learners]
+            # Several hundred kB for all models: encode off the event loop.
+            return JSONResponse(await asyncio.to_thread(jsonable_encoder, out))
 
         @api.post("/api/learned/{forecast_id}/refit")
         async def refit_learned(forecast_id: str) -> dict:
@@ -4259,6 +4284,10 @@ class Application:
 
         # Read-only MCP endpoint (POST /mcp) for debugging tools.
         mcp_holder.append(mount_mcp_server(api))
+
+        # Large JSON (plan, learned models, history) compresses ~10x. Server-sent
+        # events (text/event-stream) are never compressed by this middleware.
+        api.add_middleware(GZipMiddleware, minimum_size=2048)
 
         # Outermost: guards everything not coming through HA ingress.
         token = os.environ.get("ENERGY_ASSISTANT_API_TOKEN") or self._cfg.server.get("api_token")
