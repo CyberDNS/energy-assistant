@@ -17,7 +17,7 @@
 //
 // When neither is given, the page used last is restored.
 
-const LAST_KEY = 'energy-assistant.lastTab'
+const LAST_KEY = 'nornwatt.lastTab'
 const VIEWS = {
   live: '/', home: '/', plan: '/plan', cars: '/cars', batteries: '/batteries', loads: '/loads',
   devices: '/devices', savings: '/savings', history: '/devices', learning: '/learning', settings: '/settings',

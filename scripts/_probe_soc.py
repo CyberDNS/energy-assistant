@@ -4,9 +4,9 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from energy_assistant.core.device_model import DeviceCategory
-from energy_assistant.config.yaml import YamlConfigLoader
-from energy_assistant.loader.device_loader import build as build_from_config
+from nornwatt.core.device_model import DeviceCategory
+from nornwatt.config.yaml import YamlConfigLoader
+from nornwatt.loader.device_loader import build as build_from_config
 
 
 async def main() -> None:

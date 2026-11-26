@@ -91,7 +91,7 @@ const traces = computed(() => {
     const rows = soc.value.filter(r => r.soc_pct != null)
     out.push({
       name: 'State of charge', mode: 'lines', x: rows.map(r => plotTime(r.t)), y: rows.map(r => r.soc_pct),
-      yaxis: hasPower.value ? 'y2' : 'y', line: { width: 2, color: '#12805c' },
+      yaxis: hasPower.value ? 'y2' : 'y', line: { width: 2, color: '#6250d6' },
       hovertemplate: '%{x|%d.%m. %H:%M}  %{y:.0f} %<extra>State of charge</extra>',
     })
   }

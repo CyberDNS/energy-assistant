@@ -2,7 +2,7 @@ import { computed, ref } from 'vue'
 
 export type ThemeChoice = 'system' | 'light' | 'dark'
 
-const KEY = 'energy-assistant.theme'
+const KEY = 'nornwatt.theme'
 
 function stored(): ThemeChoice {
   try {

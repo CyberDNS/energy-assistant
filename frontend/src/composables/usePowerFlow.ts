@@ -79,7 +79,7 @@ export interface Status {
   current_price_eur_per_kwh?: number | null
   pv_opportunity_price_eur_per_kwh?: number | null
   devices?: StatusDevice[]
-  /** 'observe' | 'active' per device Energy Assistant commands (#134). */
+  /** 'observe' | 'active' per device Nornwatt commands (#134). */
   control?: Record<string, 'observe' | 'active'>
   ledger?: LedgerEntry[]
   power_charges?: PowerChargeStatus | null

@@ -56,18 +56,18 @@ watch(() => route.path, checkConfig)
 // ── dismissed for this browser session ──
 const dismissed = ref<Set<string>>(new Set())
 try {
-  dismissed.value = new Set(JSON.parse(sessionStorage.getItem('energy-assistant.dismissed') ?? '[]'))
+  dismissed.value = new Set(JSON.parse(sessionStorage.getItem('nornwatt.dismissed') ?? '[]'))
 } catch { /* storage blocked */ }
 function dismiss(id: string) {
   dismissed.value = new Set([...dismissed.value, id])
-  try { sessionStorage.setItem('energy-assistant.dismissed', JSON.stringify([...dismissed.value])) } catch { /* storage blocked */ }
+  try { sessionStorage.setItem('nornwatt.dismissed', JSON.stringify([...dismissed.value])) } catch { /* storage blocked */ }
 }
 
 const notices = computed<Notice[]>(() => {
   const out: Notice[] = []
   if (statusError.value) {
     out.push({
-      id: 'offline', tone: 'danger', text: 'Energy Assistant is not reachable.', detail: statusError.value,
+      id: 'offline', tone: 'danger', text: 'Nornwatt is not reachable.', detail: statusError.value,
       action: { label: 'Retry', run: refresh }, dismissible: false,
     })
   }
@@ -97,7 +97,7 @@ const notices = computed<Notice[]>(() => {
   if (s?.dry_run) {
     out.push({
       id: 'dry-run', tone: 'warning',
-      text: 'Dry run is on: Energy Assistant plans, but does not control any device.',
+      text: 'Dry run is on: Nornwatt plans, but does not control any device.',
       action: { label: 'Open settings', to: '/settings/system' }, dismissible: true,
     })
   }
@@ -108,7 +108,7 @@ const notices = computed<Notice[]>(() => {
     const since = safe.since ? new Date(safe.since).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : null
     out.push({
       id: 'failsafe:' + (safe.since ?? ''), tone: 'danger',
-      text: `Energy Assistant has released all devices to their own operation: ${safe.reason_text ?? safe.reason}.`,
+      text: `Nornwatt has released all devices to their own operation: ${safe.reason_text ?? safe.reason}.`,
       detail: [since && `Since ${since}`, safe.detail, 'Control resumes by itself once this is resolved.']
         .filter(Boolean).join(' · '),
       action: { label: 'Open plan', to: '/plan' }, dismissible: true,

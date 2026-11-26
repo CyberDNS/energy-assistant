@@ -12,15 +12,15 @@ const C = {
   actual:   '#2a78d6',  // measured consumption
   model:    '#eb6834',  // what the model says
   outlier:  '#1baf7a',  // days the fit dropped on its own
-  excluded: '#8d9891',  // days removed by exclude / exclude_when
+  excluded: '#8b93a7',  // days removed by exclude / exclude_when
   active:   '#6250d6',  // hourly shape on days the temperature term is active
   idle:     '#008300',  // hourly shape on the other days
   running:  'rgba(42,120,214,.16)',  // thermal: share of a window the device ran
-  ambient:  '#8d9891',  // thermal: ambient input
+  ambient:  '#8b93a7',  // thermal: ambient input
   limit:    '#b8574a',  // thermal: thresholds
   power:    'rgba(42,120,214,.30)',  // efficiency: battery power
   cycle:    'rgba(235,104,52,.10)',  // efficiency: closed cycles
-  configured: '#8d9891',             // efficiency: configured value
+  configured: '#8b93a7',             // efficiency: configured value
 }
 
 const RANGES = [

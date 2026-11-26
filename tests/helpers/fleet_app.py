@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from energy_assistant.assets.fleet import VehicleFleet
-from energy_assistant.core.device_model import parse_devices
-from energy_assistant.core.registry import DeviceRegistry
-from energy_assistant.server import Application
+from nornwatt.assets.fleet import VehicleFleet
+from nornwatt.core.device_model import parse_devices
+from nornwatt.core.registry import DeviceRegistry
+from nornwatt.server import Application
 
 
 class FakeSessionStorage:

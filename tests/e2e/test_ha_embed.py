@@ -27,7 +27,7 @@ import pytest
 
 sync_api = pytest.importorskip("playwright.sync_api")
 
-FRONTEND = Path(__file__).resolve().parents[2] / "src" / "energy_assistant" / "frontend"
+FRONTEND = Path(__file__).resolve().parents[2] / "src" / "nornwatt" / "frontend"
 
 STATUS = {
     "timestamp": "2026-11-22T12:00:00+00:00", "planning": False, "dry_run": False,
@@ -48,7 +48,7 @@ HOST = """<!doctype html><meta charset="utf-8"><title>fake Home Assistant</title
 <style>html,body{margin:0;height:100%}iframe{border:0;width:100%;height:100%;display:block}</style>
 <iframe id="app"></iframe>
 <script>
-  const PREFIX = '/app/energy_assistant'
+  const PREFIX = '/app/nornwatt'
   const params = new URLSearchParams(location.search)
   window.ha = { path: params.get('route') ?? '', kiosk: false, subscribed: false, menuToggles: 0, navigations: [] }
   const frame = document.getElementById('app')
@@ -186,7 +186,7 @@ def test_follows_and_mirrors_home_assistants_url(server, page) -> None:
     # A page change in the app rewrites HA's URL, without a new history entry.
     _nav(app, "/batteries").click()
     page.wait_for_function("window.ha.path === '/batteries'")
-    assert _ha(page, "navigations") == [{"path": "/app/energy_assistant/batteries", "replace": True}]
+    assert _ha(page, "navigations") == [{"path": "/app/nornwatt/batteries", "replace": True}]
 
     # HA moving on its own (back, forward, a link) moves the app, and is not echoed.
     page.evaluate("window.haGoTo('/savings')")

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from energy_assistant.plugins._modbus.client import ModbusError
+from nornwatt.plugins._modbus.client import ModbusError
 
 
 class FakeModbusClient:

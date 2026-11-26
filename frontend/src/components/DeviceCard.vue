@@ -60,7 +60,7 @@ const setpoint = computed(() => {
       <span v-else class="dev-label">{{ device.label ?? device.device_id }}</span>
       <span
         v-if="device.control === 'observe'" class="pill pill-off" data-testid="observing-chip"
-        title="Planned, but Energy Assistant sends it nothing"
+        title="Planned, but Nornwatt sends it nothing"
       >Observing</span>
       <span class="dev-power" :class="{ producing: (device.power_w ?? 0) < 0 }">{{ fmtPower(device.power_w) }}</span>
     </div>

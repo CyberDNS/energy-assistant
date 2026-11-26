@@ -1,4 +1,4 @@
-"""VS Code dev launcher for Energy Assistant.
+"""VS Code dev launcher for Nornwatt.
 
 Usage (via launch.json):
     python scripts/run_controller.py              # live mode, local config + temp DB
@@ -19,16 +19,16 @@ os.chdir(ROOT)
 # --dry-run: prevent any commands being sent to real devices.
 if "--dry-run" in sys.argv:
     sys.argv.remove("--dry-run")
-    os.environ["ENERGY_ASSISTANT_DRY_RUN"] = "1"
+    os.environ["NORNWATT_DRY_RUN"] = "1"
 
 # Use a dedicated dev port so this never conflicts with a running HA addon.
-os.environ.setdefault("ENERGY_ASSISTANT_PORT", "8089")
+os.environ.setdefault("NORNWATT_PORT", "8089")
 
 # Default to local config.yaml and a throwaway DB so production data is untouched.
 has_positional = any(a for a in sys.argv[1:] if not a.startswith("-"))
 if not has_positional:
     sys.argv += ["config.yaml", "--db", "/tmp/ea-dev.db"]
 
-from energy_assistant.__main__ import main  # noqa: E402
+from nornwatt.__main__ import main  # noqa: E402
 
 main()

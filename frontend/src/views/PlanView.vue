@@ -3,6 +3,8 @@ import { defineComponent, ref, watch, onMounted, onUnmounted } from 'vue'
 import { fetchPlan, fetchForecast, fetchVehicles, fetchControllable, triggerPlanRefresh } from '../api.js'
 import { planVersion, planning, labelOf } from '../composables/useStatus.js'
 import PlotlyChart from '../components/PlotlyChart.js'
+import { series } from '../lib/chartTheme.ts'
+import { isDark } from '../composables/useTheme.ts'
 import EvCard from '../components/EvCard.vue'
 import GuestCard from '../components/GuestCard.vue'
 import ControllableDeviceCard from '../components/ControllableDeviceCard.vue'
@@ -82,25 +84,26 @@ function buildFlowTraces(intents, forecast, evDeviceIds, planFlows) {
     solvedExport[i] ?? Math.max(0, pv + dischargeKw[i] - consKw[i] - chargeKw[i] - evChargeKw[i])
   )
 
+  const c = series()
   return {
     flowTraces: [
-      { name: 'PV',          type: 'bar', x: ts, y: pvKw,                    marker: { color: '#f0c040' }, hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra></extra>' },
-      { name: 'Discharge',   type: 'bar', x: ts, y: dischargeKw,             marker: { color: '#4caf7d' }, hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra></extra>' },
-      { name: 'Grid import', type: 'bar', x: ts, y: gridImport,              marker: { color: '#e07070' }, hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra></extra>' },
-      { name: 'Consumption', type: 'bar', x: ts, y: consKw.map(v => -v),     marker: { color: '#6b7bb5' }, hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra></extra>' },
-      { name: 'Charge',      type: 'bar', x: ts, y: chargeKw.map(v => -v),   marker: { color: '#3a9ad9' }, hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra></extra>' },
-      { name: 'EV Charging', type: 'bar', x: ts, y: evChargeKw.map(v => -v), marker: { color: '#00acc1' }, hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra></extra>' },
-      { name: 'Grid export', type: 'bar', x: ts, y: gridExport.map(v => -v), marker: { color: '#b07030' }, hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra></extra>' },
+      { name: 'PV',          type: 'bar', x: ts, y: pvKw,                    marker: { color: c.solar }, hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra></extra>' },
+      { name: 'Discharge',   type: 'bar', x: ts, y: dischargeKw,             marker: { color: c.battery }, hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra></extra>' },
+      { name: 'Grid import', type: 'bar', x: ts, y: gridImport,              marker: { color: c.import }, hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra></extra>' },
+      { name: 'Consumption', type: 'bar', x: ts, y: consKw.map(v => -v),     marker: { color: c.home }, hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra></extra>' },
+      { name: 'EV Charging', type: 'bar', x: ts, y: evChargeKw.map(v => -v), marker: { color: c.car }, hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra></extra>' },
+      { name: 'Charge',      type: 'bar', x: ts, y: chargeKw.map(v => -v),   marker: { color: c.battery }, hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra></extra>' },
+      { name: 'Grid export', type: 'bar', x: ts, y: gridExport.map(v => -v), marker: { color: c.export }, hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra></extra>' },
     ],
     forecastTraces: [
-      { name: 'PV forecast',    mode: 'lines', x: ts, y: pvKw,            line: { color: '#f0c040' }, hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra></extra>' },
-      { name: 'Consumption',    mode: 'lines', x: ts, y: consKw,          line: { color: '#6b7bb5' }, hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra></extra>' },
-      { name: 'EV Charging',    mode: 'lines', x: ts, y: evChargeKw,      line: { color: '#00acc1', dash: 'dot' }, hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra></extra>' },
+      { name: 'PV forecast',    mode: 'lines', x: ts, y: pvKw,            line: { color: c.solar }, hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra></extra>' },
+      { name: 'Consumption',    mode: 'lines', x: ts, y: consKw,          line: { color: c.home }, hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra></extra>' },
+      { name: 'EV Charging',    mode: 'lines', x: ts, y: evChargeKw,      line: { color: c.car, dash: 'dot' }, hovertemplate: '%{x|%H:%M}  %{y:.2f} kW<extra></extra>' },
     ],
     priceTraces: [
-      { name: 'Import price',      mode: 'lines', x: ts, y: priceReal, line: { color: '#e07070' },               connectgaps: false, hovertemplate: '%{x|%H:%M}  %{y:.4f} €/kWh<extra></extra>' },
-      { name: 'Import (forecast)', mode: 'lines', x: ts, y: priceEst,  line: { color: '#e07070', dash: 'dash' }, connectgaps: false, hovertemplate: '%{x|%H:%M}  %{y:.4f} €/kWh<extra></extra>', showlegend: hasEst },
-      { name: 'Export price',      mode: 'lines', x: ts, y: expPrices, line: { color: '#4caf7d' },               hovertemplate: '%{x|%H:%M}  %{y:.4f} €/kWh<extra></extra>' },
+      { name: 'Import price',      mode: 'lines', x: ts, y: priceReal, line: { color: c.import },               connectgaps: false, hovertemplate: '%{x|%H:%M}  %{y:.4f} €/kWh<extra></extra>' },
+      { name: 'Import (forecast)', mode: 'lines', x: ts, y: priceEst,  line: { color: c.import, dash: 'dash' }, connectgaps: false, hovertemplate: '%{x|%H:%M}  %{y:.4f} €/kWh<extra></extra>', showlegend: hasEst },
+      { name: 'Export price',      mode: 'lines', x: ts, y: expPrices, line: { color: c.export },               hovertemplate: '%{x|%H:%M}  %{y:.4f} €/kWh<extra></extra>' },
     ],
     evChargeKw,
   }
@@ -182,6 +185,8 @@ export default defineComponent({
     // Refetch immediately when the server pushes a new plan (SSE 'plan'
     // event) — e.g. after '↺ Refresh plan' finishes or a scheduled re-solve.
     watch(planVersion, () => refresh())
+    // The series colours follow the theme.
+    watch(isDark, () => refresh())
 
     return { loaded, controllable, planMeta, flowTraces, fcastTraces, priceTraces, socTraces, refresh, triggerRefresh, refreshing, planning, XAXIS }
   },

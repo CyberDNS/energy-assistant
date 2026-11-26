@@ -1,4 +1,4 @@
-# Energy Assistant: development notes
+# Nornwatt: development notes
 
 ## Python environment
 - **Python 3.14**, the same version as CI (`.github/workflows/tests.yml`) and the
@@ -26,7 +26,7 @@ New or changed code should pass `ruff check` cleanly.
 
 ## Web UI (`frontend/`)
 - Vue 3 + Vite + Tailwind + shadcn-vue; needs Node 24. The build goes to
-  `src/energy_assistant/frontend/` (gitignored), which is what the server serves.
+  `src/nornwatt/frontend/` (gitignored), which is what the server serves.
 - A fresh worktree has no build: `cd frontend && npm ci && npm run build`.
   Without it `/` only says how to build, and the browser tests skip.
 

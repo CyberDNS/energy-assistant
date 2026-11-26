@@ -1,4 +1,4 @@
-"""Show live status and the active plan from the running energy-assistant server.
+"""Show live status and the active plan from the running nornwatt server.
 
 Connects to the server REST API and renders the same 5-panel Plotly diagnostics
 as ``diagnostics_sim.py``, but driven by the *active live plan*:
@@ -11,7 +11,7 @@ as ``diagnostics_sim.py``, but driven by the *active live plan*:
 
 Prerequisite — start the server first::
 
-    python -m energy_assistant
+    python -m nornwatt
 
 Usage::
 
@@ -37,13 +37,13 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from energy_assistant.core.device_model import DeviceCategory
-from energy_assistant.config.yaml import YamlConfigLoader
-from energy_assistant.core.models import DeviceState
-from energy_assistant.core.optimizer import OptimizationContext
-from energy_assistant.core.plugin_registry import BuildContext
-from energy_assistant.loader.device_loader import build as build_from_config
-from energy_assistant.plugins.milp_highs import MilpHigsOptimizer
+from nornwatt.core.device_model import DeviceCategory
+from nornwatt.config.yaml import YamlConfigLoader
+from nornwatt.core.models import DeviceState
+from nornwatt.core.optimizer import OptimizationContext
+from nornwatt.core.plugin_registry import BuildContext
+from nornwatt.loader.device_loader import build as build_from_config
+from nornwatt.plugins.milp_highs import MilpHigsOptimizer
 
 import visualize_optimizer as _vo
 

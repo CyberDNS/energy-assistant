@@ -13,7 +13,7 @@ Usage::
     ZENDURE_CLOUD_KEY=... python scripts/probe_zendure.py --seconds 60
 
 Note: the cloud hands out one MQTT client id per account.  While the ioBroker
-adapter (or energy-assistant) is connected with the same key, the broker may
+adapter (or nornwatt) is connected with the same key, the broker may
 kick one of the two connections.
 """
 
@@ -29,14 +29,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import yaml
 
-from energy_assistant.plugins.zendure import cloud_bridge
-from energy_assistant.plugins.zendure.cloud import cloud_login
-from energy_assistant.plugins.zendure.device import ZendureDevice
+from nornwatt.plugins.zendure import cloud_bridge
+from nornwatt.plugins.zendure.cloud import cloud_login
+from nornwatt.plugins.zendure.device import ZendureDevice
 
 
 def _cloud_key_from_config(path: Path, device_id: str) -> tuple[str | None, dict]:
-    from energy_assistant.config.yaml import _make_loader
-    from energy_assistant.secrets import SecretsManager
+    from nornwatt.config.yaml import _make_loader
+    from nornwatt.secrets import SecretsManager
 
     loader = _make_loader(SecretsManager(path.parent / "secrets.yaml"))
     with path.open() as f:
@@ -84,7 +84,7 @@ async def main(args: argparse.Namespace) -> None:
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--config", default=os.environ.get("ENERGY_ASSISTANT_CONFIG"))
+    p.add_argument("--config", default=os.environ.get("NORNWATT_CONFIG"))
     p.add_argument("--device", default="zendure")
     p.add_argument("--seconds", type=int, default=30)
     asyncio.run(main(p.parse_args()))

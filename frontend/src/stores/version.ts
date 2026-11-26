@@ -11,7 +11,7 @@ export interface VersionInfo {
   commit: string | null
 }
 
-const REPO = 'https://github.com/CyberDNS/energy-assistant'
+const REPO = 'https://github.com/CyberDNS/nornwatt'
 
 export const versionInfo = ref<VersionInfo | null>(null)
 

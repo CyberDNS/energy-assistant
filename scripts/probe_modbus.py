@@ -25,10 +25,10 @@ from pathlib import Path
 # Allow running without 'pip install -e .'
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from energy_assistant.plugins._modbus import codec  # noqa: E402
-from energy_assistant.plugins._modbus.client import ModbusError, ModbusTcpClient  # noqa: E402
-from energy_assistant.plugins.modbus.device import ModbusDevice  # noqa: E402
-from energy_assistant.plugins.modbus.profile import (  # noqa: E402
+from nornwatt.plugins._modbus import codec  # noqa: E402
+from nornwatt.plugins._modbus.client import ModbusError, ModbusTcpClient  # noqa: E402
+from nornwatt.plugins.modbus.device import ModbusDevice  # noqa: E402
+from nornwatt.plugins.modbus.profile import (  # noqa: E402
     ProfileError,
     available_profiles,
     load_profile,

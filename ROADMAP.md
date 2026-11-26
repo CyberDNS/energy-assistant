@@ -1,6 +1,6 @@
 # Roadmap
 
-Working list for Energy Assistant: what exists, what is being worked on next,
+Working list for Nornwatt: what exists, what is being worked on next,
 and what comes later. Open items link to their GitHub issue.
 
 ## Direction
@@ -40,9 +40,9 @@ and what comes later. Open items link to their GitHub issue.
 - [x] Tibber: prices and cloud live meter (native; device plugin `tibber_cloud`)
 - [x] Tibber Pulse read locally from the bridge, SML decoding (#61)
 - [x] Tasmota: meters via IR heads (main grid meter) and energy plugs, read locally (#95)
-- [x] Modbus TCP, profile-driven, with SMA Sunny Boy Storage profile (native); the SMA is commanded through its battery management, released when Energy Assistant stops (#123)
+- [x] Modbus TCP, profile-driven, with SMA Sunny Boy Storage profile (native); the SMA is commanded through its battery management, released when Nornwatt stops (#123)
 - [x] Zendure via cloud or local MQTT (native)
-- [x] openWB via MQTT or Home Assistant; vehicle assigned to the chargepoint by Energy Assistant
+- [x] openWB via MQTT or Home Assistant; vehicle assigned to the chargepoint by Nornwatt
 - [x] Home Assistant connection over one websocket with a state cache and service calls; REST only as fallback (#124)
 - [x] Home Assistant device types for every category, configured through entities only (#106):
   - shared read bindings and actuators (switch, number, select) with write-on-mismatch, rate limit and read-back; `homeassistant_sensor` (#126)
@@ -140,7 +140,7 @@ and what comes later. Open items link to their GitHub issue.
 
 ## Housekeeping (outside the repo)
 
-- [x] Home Assistant leftovers from ioBroker removed (2026-11-24): Zendure Solarflow MQTT sensors and charge-mode text entity, Tibber adjusted price list (its "Home Old" chart now uses Energy Assistant's price curve), Energy AI actions sensor, the ioBroker restart automation
+- [x] Home Assistant leftovers from ioBroker removed (2026-11-24): Zendure Solarflow MQTT sensors and charge-mode text entity, Tibber adjusted price list (its "Home Old" chart now uses Nornwatt's price curve), Energy AI actions sensor, the ioBroker restart automation
 - [ ] Stop the ioBroker container on bear (David, in Unraid); keep it for now
 - [ ] Remove the ioBroker container and its appdata once nothing has been missed
 - [x] `push_soc_to_charger: false` for both cars (openWB reads the SoC from Home Assistant directly)

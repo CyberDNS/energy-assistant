@@ -34,7 +34,7 @@ class FakeHAClient:
 
     async def get_entity(self, entity_id: str):
         """``EntityState`` of *entity_id*; ``reported`` holds per-entity timestamps."""
-        from energy_assistant.plugins._homeassistant.client import EntityState
+        from nornwatt.plugins._homeassistant.client import EntityState
 
         if entity_id not in self._states:
             return None

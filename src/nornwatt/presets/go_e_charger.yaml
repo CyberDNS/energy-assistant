@@ -1,0 +1,31 @@
+title: go-e Charger (go-eCharger API v2 integration)
+category: charger
+integration: go-eCharger API v2 (custom, marq24/ha-goecharger-api2)
+url: https://github.com/marq24/ha-goecharger-api2
+verified: false
+description: >-
+  The "Force state" select starts (Charge) and stops (Don't charge) charging;
+  the requested current sets the power.  The charger has no PV mode Nornwatt
+  can use, so it follows the surplus by changing the current.  The
+  select's options may show as their labels (Charge / Don't charge) instead of
+  2 / 1 on your installation: compare with the select's options.  Not yet
+  checked on a real go-e.  When Nornwatt stops, the charger keeps its
+  last state; set Force state to Neutral by hand to give it back its own logic.
+variables:
+  serial:
+    label: Serial number (as in the entity ids, goe_<serial>_…)
+    example: "123456"
+device:
+  type: homeassistant_charger
+  settings: { phases: 3 }
+  capabilities:
+    power_w: { entity: "sensor.goe_{serial}_nrg_11" }
+    plugged: { entity: "binary_sensor.goe_{serial}_car_0" }
+    power_setpoint:
+      control: modes
+      mode: "select.goe_{serial}_frc"
+      modes:
+        charge: { option: "2", current: "number.goe_{serial}_amp" }
+        stop: { option: "1" }
+      max_current_a: 16
+  params: { min_power_kw: 4.14, max_power_kw: 11 }

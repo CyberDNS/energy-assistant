@@ -1,1 +1,0 @@
-# Energy Assistant — v2

@@ -5,16 +5,16 @@ import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
-from energy_assistant.assets.ev import EvChargingAsset, EvWeeklyTarget
-from energy_assistant.core.device_model import DeviceCategory, DeviceSpec
-from energy_assistant.core.models import (
+from nornwatt.assets.ev import EvChargingAsset, EvWeeklyTarget
+from nornwatt.core.device_model import DeviceCategory, DeviceSpec
+from nornwatt.core.models import (
     EV_DISPLAY_MODES,
     ControlIntent,
     DeviceState,
     EnergyPlan,
     ev_current_mode,
 )
-from energy_assistant.plugins.mqtt_publisher import (
+from nornwatt.plugins.mqtt_publisher import (
     _STATUS_TOPIC,
     CHARGING_MODES,
     DiscoveryDevice,
@@ -23,6 +23,7 @@ from energy_assistant.plugins.mqtt_publisher import (
     _discovery_configs,
     _parse_weekly_command,
     _reading_messages,
+    _legacy_topics,
     _stale_vehicle_topics,
     _weekly_discovery_configs,
     _weekly_state_messages,
@@ -48,11 +49,11 @@ def test_away_vehicle_reports_unplugged_and_away() -> None:
     asset = replace(_asset(), device_id="")
     vehicle = DeviceState(device_id="scooter", soc_pct=55.0, extra={"range_km": 200.0})
     msgs = dict(_reading_messages(asset, vehicle, None))
-    assert msgs["energy_assistant/vehicle/scooter/soc"] == "55"
-    assert msgs["energy_assistant/vehicle/scooter/plugged"] == "OFF"
-    assert msgs["energy_assistant/vehicle/scooter/location"] == "away"
+    assert msgs["nornwatt/vehicle/scooter/soc"] == "55"
+    assert msgs["nornwatt/vehicle/scooter/plugged"] == "OFF"
+    assert msgs["nornwatt/vehicle/scooter/location"] == "away"
     assert dict(_reading_messages(_asset(), vehicle, None))[
-        "energy_assistant/vehicle/scooter/location"] == "cp1"
+        "nornwatt/vehicle/scooter/location"] == "cp1"
 
 
 def test_unplugged_car_with_soc_stays_available() -> None:
@@ -60,10 +61,10 @@ def test_unplugged_car_with_soc_stays_available() -> None:
         device_id="cp1", soc_pct=62.0, available=False, extra={"plugged": False},
     )
     msgs = _msgs(state)
-    assert msgs["energy_assistant/vehicle/scooter/available"] == "online"
-    assert msgs["energy_assistant/vehicle/scooter/soc"] == "62"
-    assert msgs["energy_assistant/vehicle/scooter/plugged"] == "OFF"
-    assert "energy_assistant/vehicle/scooter/charging_mode" not in msgs
+    assert msgs["nornwatt/vehicle/scooter/available"] == "online"
+    assert msgs["nornwatt/vehicle/scooter/soc"] == "62"
+    assert msgs["nornwatt/vehicle/scooter/plugged"] == "OFF"
+    assert "nornwatt/vehicle/scooter/charging_mode" not in msgs
 
 
 def test_plan_messages_exclude_live_readings() -> None:
@@ -73,8 +74,8 @@ def test_plan_messages_exclude_live_readings() -> None:
     )
     topics = {t for t, _, _ in _build_state_messages(_asset(), None, state, None, False)}
     for key in ("available", "soc", "range", "range_available", "plugged"):
-        assert f"energy_assistant/vehicle/scooter/{key}" not in topics
-    assert "energy_assistant/vehicle/scooter/override_active" in topics
+        assert f"nornwatt/vehicle/scooter/{key}" not in topics
+    assert "nornwatt/vehicle/scooter/override_active" in topics
 
 
 def test_plugged_car_reports_plugged_on() -> None:
@@ -82,8 +83,8 @@ def test_plugged_car_reports_plugged_on() -> None:
         device_id="cp1", soc_pct=40.0, available=True, extra={"plugged": True},
     )
     msgs = _msgs(state)
-    assert msgs["energy_assistant/vehicle/scooter/available"] == "online"
-    assert msgs["energy_assistant/vehicle/scooter/plugged"] == "ON"
+    assert msgs["nornwatt/vehicle/scooter/available"] == "online"
+    assert msgs["nornwatt/vehicle/scooter/plugged"] == "ON"
 
 
 def test_range_published_when_reported() -> None:
@@ -92,8 +93,8 @@ def test_range_published_when_reported() -> None:
         extra={"plugged": True, "range_km": 341.6},
     )
     msgs = _msgs(state)
-    assert msgs["energy_assistant/vehicle/scooter/range_available"] == "online"
-    assert msgs["energy_assistant/vehicle/scooter/range"] == "342"
+    assert msgs["nornwatt/vehicle/scooter/range_available"] == "online"
+    assert msgs["nornwatt/vehicle/scooter/range"] == "342"
 
 
 def test_missing_range_marks_sensor_unavailable() -> None:
@@ -102,41 +103,41 @@ def test_missing_range_marks_sensor_unavailable() -> None:
         extra={"plugged": True, "range_km": None},
     )
     msgs = _msgs(state)
-    assert msgs["energy_assistant/vehicle/scooter/range_available"] == "offline"
-    assert "energy_assistant/vehicle/scooter/range" not in msgs
-    assert _msgs(None)["energy_assistant/vehicle/scooter/range_available"] == "offline"
+    assert msgs["nornwatt/vehicle/scooter/range_available"] == "offline"
+    assert "nornwatt/vehicle/scooter/range" not in msgs
+    assert _msgs(None)["nornwatt/vehicle/scooter/range_available"] == "offline"
 
 
 def test_range_discovery_is_distance_sensor() -> None:
     configs = {cfg["unique_id"]: cfg for _, cfg in _discovery_configs(_asset(), {})}
-    cfg = configs["ea_ev_scooter_range"]
-    assert cfg["state_topic"] == "energy_assistant/vehicle/scooter/range"
+    cfg = configs["nw_ev_scooter_range"]
+    assert cfg["state_topic"] == "nornwatt/vehicle/scooter/range"
     assert cfg["device_class"] == "distance"
     assert cfg["unit_of_measurement"] == "km"
     assert [a["topic"] for a in cfg["availability"]] == [
-        _STATUS_TOPIC, "energy_assistant/vehicle/scooter/range_available",
+        _STATUS_TOPIC, "nornwatt/vehicle/scooter/range_available",
     ]
     assert cfg["availability_mode"] == "all"
 
 
 def test_unreadable_device_goes_offline() -> None:
     msgs = _msgs(DeviceState(device_id="cp1", available=False))
-    assert msgs["energy_assistant/vehicle/scooter/available"] == "offline"
-    assert "energy_assistant/vehicle/scooter/plugged" not in msgs
-    assert _msgs(None)["energy_assistant/vehicle/scooter/available"] == "offline"
+    assert msgs["nornwatt/vehicle/scooter/available"] == "offline"
+    assert "nornwatt/vehicle/scooter/plugged" not in msgs
+    assert _msgs(None)["nornwatt/vehicle/scooter/available"] == "offline"
 
 
 def test_discovery_availability_split() -> None:
     configs = {cfg["unique_id"]: cfg for _, cfg in _discovery_configs(_asset(), {})}
     # Live readings require both bridge status and data availability
-    for uid in ("ea_ev_scooter_soc", "ea_ev_scooter_plugged"):
+    for uid in ("nw_ev_scooter_soc", "nw_ev_scooter_plugged"):
         topics = [a["topic"] for a in configs[uid]["availability"]]
-        assert topics == [_STATUS_TOPIC, "energy_assistant/vehicle/scooter/available"]
+        assert topics == [_STATUS_TOPIC, "nornwatt/vehicle/scooter/available"]
         assert configs[uid]["availability_mode"] == "all"
-    # Setters / goal entities only depend on Energy Assistant being up
-    for uid in ("ea_ev_scooter_target_soc_set", "ea_ev_scooter_override",
-                "ea_ev_scooter_charging_mode", "ea_ev_scooter_charging_state",
-                "ea_ev_scooter_deadline"):
+    # Setters / goal entities only depend on Nornwatt being up
+    for uid in ("nw_ev_scooter_target_soc_set", "nw_ev_scooter_override",
+                "nw_ev_scooter_charging_mode", "nw_ev_scooter_charging_state",
+                "nw_ev_scooter_deadline"):
         assert configs[uid]["availability_topic"] == _STATUS_TOPIC
 
 
@@ -145,12 +146,12 @@ def test_discovery_availability_split() -> None:
 def test_weekly_discovery_has_three_entities_per_weekday() -> None:
     configs = dict(_weekly_discovery_configs(_asset(), {}))
     assert len(configs) == 21
-    soc = configs["homeassistant/number/ea_ev_scooter_weekly_mon_soc/config"]
-    assert soc["state_topic"] == "energy_assistant/vehicle/scooter/weekly/mon/soc/state"
-    assert soc["command_topic"] == "energy_assistant/vehicle/scooter/weekly/mon/soc/set"
+    soc = configs["homeassistant/number/nw_ev_scooter_weekly_mon_soc/config"]
+    assert soc["state_topic"] == "nornwatt/vehicle/scooter/weekly/mon/soc/state"
+    assert soc["command_topic"] == "nornwatt/vehicle/scooter/weekly/mon/soc/set"
     assert soc["availability_topic"] == _STATUS_TOPIC
-    assert "homeassistant/time/ea_ev_scooter_weekly_sun_time/config" in configs
-    assert "homeassistant/switch/ea_ev_scooter_weekly_sun_enabled/config" in configs
+    assert "homeassistant/time/nw_ev_scooter_weekly_sun_time/config" in configs
+    assert "homeassistant/switch/nw_ev_scooter_weekly_sun_enabled/config" in configs
     # …and they are part of the full discovery payload
     all_uids = {cfg["unique_id"] for _, cfg in _discovery_configs(_asset(), {})}
     assert {cfg["unique_id"] for cfg in configs.values()} <= all_uids
@@ -159,7 +160,7 @@ def test_weekly_discovery_has_three_entities_per_weekday() -> None:
 def test_weekly_state_uses_stored_rows_and_defaults() -> None:
     weekly = {1: EvWeeklyTarget(weekday=1, enabled=True, target_soc_pct=80.0, target_by="07:30")}
     msgs = {t: p for t, p, _ in _weekly_state_messages(_asset(), weekly)}
-    base = "energy_assistant/vehicle/scooter/weekly"
+    base = "nornwatt/vehicle/scooter/weekly"
     assert msgs[f"{base}/mon/soc/state"] == "80"
     assert msgs[f"{base}/mon/time/state"] == "07:30:00"
     assert msgs[f"{base}/mon/enabled/state"] == "ON"
@@ -190,9 +191,9 @@ async def test_weekly_command_dispatches_to_callback() -> None:
         pass
 
     pub = EvMqttPublisher(None, [_asset()], noop, noop, noop, on_set_weekly=on_set_weekly)
-    await pub._dispatch("energy_assistant/vehicle/scooter/weekly/fri/time/set", "05:15:00")
-    await pub._dispatch("energy_assistant/vehicle/scooter/weekly/fri/soc/set", "999")   # rejected
-    await pub._dispatch("energy_assistant/vehicle/unknown/weekly/fri/soc/set", "80")      # unknown asset
+    await pub._dispatch("nornwatt/vehicle/scooter/weekly/fri/time/set", "05:15:00")
+    await pub._dispatch("nornwatt/vehicle/scooter/weekly/fri/soc/set", "999")   # rejected
+    await pub._dispatch("nornwatt/vehicle/unknown/weekly/fri/soc/set", "80")      # unknown asset
     assert calls == [("scooter", 5, {"target_by": "05:15"})]
 
 
@@ -200,17 +201,17 @@ async def test_weekly_command_dispatches_to_callback() -> None:
 
 def test_charging_sensors_are_enums_with_documented_options() -> None:
     configs = {cfg["unique_id"]: cfg for _, cfg in _discovery_configs(_asset(), {})}
-    state = configs["ea_ev_scooter_charging_state"]
+    state = configs["nw_ev_scooter_charging_state"]
     assert state["device_class"] == "enum"
     assert state["options"] == list(EV_DISPLAY_MODES)
-    assert state["state_topic"] == "energy_assistant/vehicle/scooter/charging_state"
-    mode = configs["ea_ev_scooter_charging_mode"]
+    assert state["state_topic"] == "nornwatt/vehicle/scooter/charging_state"
+    mode = configs["nw_ev_scooter_charging_mode"]
     assert mode["device_class"] == "enum"
     assert mode["options"] == list(CHARGING_MODES)
 
 
 def test_charging_mode_from_behaviour() -> None:
-    from energy_assistant.core.models import Behaviour
+    from nornwatt.core.models import Behaviour
 
     assert charging_mode_from_behaviour(Behaviour.CHARGE, disabled=False) == "instant_charging"
     assert charging_mode_from_behaviour(Behaviour.ABSORB_SURPLUS, disabled=False) == "pv_charging"
@@ -256,14 +257,14 @@ async def test_live_states_are_deduped_and_replayed_on_reconnect() -> None:
     while not pub._queue.empty():
         queued.append(pub._queue.get_nowait()[:2])
     assert queued == [
-        ("energy_assistant/vehicle/scooter/charging_state", "charge_from_grid"),
-        ("energy_assistant/vehicle/scooter/charging_mode", "instant_charging"),
-        ("energy_assistant/vehicle/scooter/charging_state", "idle"),
+        ("nornwatt/vehicle/scooter/charging_state", "charge_from_grid"),
+        ("nornwatt/vehicle/scooter/charging_mode", "instant_charging"),
+        ("nornwatt/vehicle/scooter/charging_state", "idle"),
     ]
     # Cache holds the latest value per topic for re-publishing on reconnect.
     assert pub._live_states == {
-        "energy_assistant/vehicle/scooter/charging_state": "idle",
-        "energy_assistant/vehicle/scooter/charging_mode": "instant_charging",
+        "nornwatt/vehicle/scooter/charging_state": "idle",
+        "nornwatt/vehicle/scooter/charging_mode": "instant_charging",
     }
 
 
@@ -286,7 +287,7 @@ async def test_readings_are_published_only_on_change() -> None:
     queued = []
     while not pub._queue.empty():
         queued.append(pub._queue.get_nowait()[:2])
-    base = "energy_assistant/vehicle/scooter"
+    base = "nornwatt/vehicle/scooter"
     assert queued == [
         (f"{base}/available", "online"),
         (f"{base}/soc", "70"),
@@ -351,23 +352,23 @@ async def test_device_sensors_are_discovered_lazily_as_subdevices() -> None:
     queued = _drain(pub)
     configs = {t: json.loads(p) for t, p in queued if t.startswith("homeassistant/")}
     assert set(configs) == {
-        "homeassistant/sensor/ea_dev_sma_battery_power_w/config",
-        "homeassistant/sensor/ea_dev_sma_battery_soc_pct/config",
-        "homeassistant/sensor/ea_dev_sma_battery_max_cha_w/config",
+        "homeassistant/sensor/nw_dev_sma_battery_power_w/config",
+        "homeassistant/sensor/nw_dev_sma_battery_soc_pct/config",
+        "homeassistant/sensor/nw_dev_sma_battery_max_cha_w/config",
     }
-    power = configs["homeassistant/sensor/ea_dev_sma_battery_power_w/config"]
-    assert power["device"]["via_device"] == "energy_assistant_kpis"
-    assert power["device"]["identifiers"] == ["energy_assistant_device_sma_battery"]
+    power = configs["homeassistant/sensor/nw_dev_sma_battery_power_w/config"]
+    assert power["device"]["via_device"] == "nornwatt_kpis"
+    assert power["device"]["identifiers"] == ["nornwatt_device_sma_battery"]
     assert power["device_class"] == "power" and power["unit_of_measurement"] == "W"
     assert [a["topic"] for a in power["availability"]] == [
-        _STATUS_TOPIC, "energy_assistant/device/sma_battery/available",
+        _STATUS_TOPIC, "nornwatt/device/sma_battery/available",
     ]
     states = {t: p for t, p in queued if not t.startswith("homeassistant/")}
     assert states == {
-        "energy_assistant/device/sma_battery/available": "online",
-        "energy_assistant/device/sma_battery/power_w": "-1234",
-        "energy_assistant/device/sma_battery/soc_pct": "55.2",
-        "energy_assistant/device/sma_battery/max_cha_w": "3000",
+        "nornwatt/device/sma_battery/available": "online",
+        "nornwatt/device/sma_battery/power_w": "-1234",
+        "nornwatt/device/sma_battery/soc_pct": "55.2",
+        "nornwatt/device/sma_battery/max_cha_w": "3000",
     }
 
     # Same values again: nothing new.  A new field: only its config + value.
@@ -376,9 +377,9 @@ async def test_device_sensors_are_discovered_lazily_as_subdevices() -> None:
         extra={"max_cha_w": 3000},
     )})
     assert _drain(pub) == [
-        ("homeassistant/sensor/ea_dev_sma_battery_energy_kwh/config",
-         pub._device_configs["homeassistant/sensor/ea_dev_sma_battery_energy_kwh/config"]),
-        ("energy_assistant/device/sma_battery/energy_kwh", "12.500"),
+        ("homeassistant/sensor/nw_dev_sma_battery_energy_kwh/config",
+         pub._device_configs["homeassistant/sensor/nw_dev_sma_battery_energy_kwh/config"]),
+        ("nornwatt/device/sma_battery/energy_kwh", "12.500"),
     ]
 
 
@@ -391,18 +392,18 @@ async def test_chargepoint_stays_available_without_car_and_skips_soc() -> None:
     )})
     states = {t: p for t, p in _drain(pub) if not t.startswith("homeassistant/")}
     assert states == {
-        "energy_assistant/device/cp5/available": "online",
-        "energy_assistant/device/cp5/power_w": "0",
+        "nornwatt/device/cp5/available": "online",
+        "nornwatt/device/cp5/power_w": "0",
     }
     # Unreachable (no readings at all) → offline; missing state → offline.
     await pub.publish_readings({"cp5": DeviceState(device_id="cp5", available=False)})
-    assert _drain(pub) == [("energy_assistant/device/cp5/available", "offline")]
+    assert _drain(pub) == [("nornwatt/device/cp5/available", "offline")]
 
 
 # ── Chargers: vehicle / next vehicle selects; per-car charging entities ─────
 
 def test_vehicle_charger_select_and_guest_select() -> None:
-    from energy_assistant.plugins.mqtt_publisher import (
+    from nornwatt.plugins.mqtt_publisher import (
         _charger_of_option,
         _charger_select_state,
         _guest_select_config,
@@ -410,11 +411,11 @@ def test_vehicle_charger_select_and_guest_select() -> None:
 
     chargers = [("cp5", "Garage A"), ("cp4", "Garage B")]
     configs = {c["unique_id"]: c for _, c in _discovery_configs(_asset(), {}, None, chargers)}
-    sel = configs["ea_ev_scooter_charger"]
+    sel = configs["nw_ev_scooter_charger"]
     assert sel["options"] == ["Garage A", "Garage B", "No charger"]
-    assert sel["command_topic"] == "energy_assistant/vehicle/scooter/charger_select/set"
-    assert "ea_ev_scooter_location" in configs
-    assert "ea_ev_scooter_charger" not in {
+    assert sel["command_topic"] == "nornwatt/vehicle/scooter/charger_select/set"
+    assert "nw_ev_scooter_location" in configs
+    assert "nw_ev_scooter_charger" not in {
         c["unique_id"] for _, c in _discovery_configs(_asset(), {})}   # no chargers: no select
     assert _guest_select_config(chargers)[1]["options"] == ["No charger", "Garage A", "Garage B"]
 
@@ -431,7 +432,7 @@ def test_vehicle_charging_power_follows_the_charger() -> None:
     vehicle = DeviceState(device_id="scooter", soc_pct=55.0)
     charger = DeviceState(device_id="cp1", power_w=7400.0, extra={"plugged": True})
     msgs = dict(_reading_messages(_asset(), vehicle, charger, "Garage B"))
-    base = "energy_assistant/vehicle/scooter"
+    base = "nornwatt/vehicle/scooter"
     assert msgs[f"{base}/location"] == "Garage B"
     assert msgs[f"{base}/charging_power"] == "7.40"
     assert msgs[f"{base}/charging_now"] == "ON"
@@ -450,15 +451,15 @@ async def test_charger_select_commands_call_back() -> None:
 
     pub = EvMqttPublisher(None, [_asset()], noop, noop, noop,
                           chargers=[("cp5", "Garage A")], on_select_charger=on_select)
-    await pub._dispatch("energy_assistant/vehicle/scooter/charger_select/set", "Garage A")
-    await pub._dispatch("energy_assistant/guest/charger_select/set", "Garage A")
-    await pub._dispatch("energy_assistant/guest/charger_select/set", "No charger")
-    await pub._dispatch("energy_assistant/vehicle/scooter/charger_select/set", "Carport")
+    await pub._dispatch("nornwatt/vehicle/scooter/charger_select/set", "Garage A")
+    await pub._dispatch("nornwatt/guest/charger_select/set", "Garage A")
+    await pub._dispatch("nornwatt/guest/charger_select/set", "No charger")
+    await pub._dispatch("nornwatt/vehicle/scooter/charger_select/set", "Carport")
     assert calls == [("scooter", "cp5"), (None, "cp5"), (None, None)]
 
 
 async def test_guest_mode_select() -> None:
-    from energy_assistant.plugins.mqtt_publisher import _guest_mode_select_config
+    from nornwatt.plugins.mqtt_publisher import _guest_mode_select_config
 
     assert _guest_mode_select_config()[1]["options"] == ["PV", "Charge now"]
     modes = []
@@ -471,14 +472,14 @@ async def test_guest_mode_select() -> None:
 
     pub = EvMqttPublisher(None, [], noop, noop, noop, chargers=[("cp5", "Garage A")],
                           on_set_guest_mode=on_mode)
-    await pub._dispatch("energy_assistant/guest/mode/set", "Charge now")
-    await pub._dispatch("energy_assistant/guest/mode/set", "Turbo")
+    await pub._dispatch("nornwatt/guest/mode/set", "Charge now")
+    await pub._dispatch("nornwatt/guest/mode/set", "Turbo")
     assert modes == ["instant"]
     await pub.publish_readings({"cp5": DeviceState(
         device_id="cp5", extra={"guest_here": True, "guest_mode": "instant"})})
     queued = dict(pub._queue.get_nowait()[:2] for _ in range(pub._queue.qsize()))
-    assert queued["energy_assistant/guest/charger_select"] == "Garage A"
-    assert queued["energy_assistant/guest/mode"] == "Charge now"
+    assert queued["nornwatt/guest/charger_select"] == "Garage A"
+    assert queued["nornwatt/guest/mode"] == "Charge now"
 
 
 class _Msg:
@@ -515,22 +516,22 @@ class _RetainedClient:
 
 async def test_stale_vehicle_topics_are_the_retained_ones_no_longer_published() -> None:
     client = _RetainedClient([
-        _Msg("homeassistant/sensor/ea_ev_ev_bandit_soc/config"),       # former id
-        _Msg("homeassistant/switch/ea_ev_ev_bandit_weekly_mon_enabled/config"),
-        _Msg("homeassistant/sensor/ea_ev_bandit_soc/config"),          # still published
-        _Msg("homeassistant/sensor/ea_ev_gone_soc/config", b""),        # already cleared
-        _Msg("homeassistant/sensor/ea_dev_meter_power_w/config"),       # not a vehicle
+        _Msg("homeassistant/sensor/nw_ev_ev_bandit_soc/config"),       # former id
+        _Msg("homeassistant/switch/nw_ev_ev_bandit_weekly_mon_enabled/config"),
+        _Msg("homeassistant/sensor/nw_ev_bandit_soc/config"),          # still published
+        _Msg("homeassistant/sensor/nw_ev_gone_soc/config", b""),        # already cleared
+        _Msg("homeassistant/sensor/nw_dev_meter_power_w/config"),       # not a vehicle
         _Msg("homeassistant/sensor/zigbee_thing/config"),               # someone else's
-        _Msg("homeassistant/sensor/ea_ev_live_soc/config", retain=False),
+        _Msg("homeassistant/sensor/nw_ev_live_soc/config", retain=False),
     ])
 
     stale = await _stale_vehicle_topics(
-        client, {"homeassistant/sensor/ea_ev_bandit_soc/config"}, quiet_s=0.05
+        client, {"homeassistant/sensor/nw_ev_bandit_soc/config"}, quiet_s=0.05
     )
 
     assert stale == {
-        "homeassistant/sensor/ea_ev_ev_bandit_soc/config",
-        "homeassistant/switch/ea_ev_ev_bandit_weekly_mon_enabled/config",
+        "homeassistant/sensor/nw_ev_ev_bandit_soc/config",
+        "homeassistant/switch/nw_ev_ev_bandit_weekly_mon_enabled/config",
     }
     assert client.subscribed == client.unsubscribed == ["homeassistant/+/+/config"]
 
@@ -539,14 +540,14 @@ async def test_discovery_removes_stale_vehicle_entities_before_publishing() -> N
     pub = _noop_pub([])
     pub._assets = [_asset()]
     pub._remove_stale_vehicles = True
-    old = "homeassistant/sensor/ea_ev_old_car_soc/config"
+    old = "homeassistant/sensor/nw_ev_old_car_soc/config"
     client = _RetainedClient([_Msg(old)])
 
     await pub._publish_discovery(client)
 
     topics = [t for t, _p, _r in client.published]
     assert client.published[0] == (old, "", True)
-    own = f"homeassistant/sensor/ea_ev_{_asset().asset_id}_soc/config"
+    own = f"homeassistant/sensor/nw_ev_{_asset().asset_id}_soc/config"
     assert topics.index(old) < topics.index(own)
 
     # A dry run leaves other instances' entities alone.
@@ -554,3 +555,29 @@ async def test_discovery_removes_stale_vehicle_entities_before_publishing() -> N
     client = _RetainedClient([_Msg(old)])
     await pub._publish_discovery(client)
     assert old not in [t for t, _p, _r in client.published]
+
+
+async def test_legacy_topics_are_energy_assistant_leftovers() -> None:
+    client = _RetainedClient([
+        _Msg("homeassistant/sensor/ea_electricity_price/config",
+             b'{"state_topic": "energy_assistant/prices/state"}'),
+        _Msg("homeassistant/sensor/ea_dev_meter_power_w/config",
+             b'{"device": {"identifiers": ["energy_assistant_device_meter"]}}'),
+        _Msg("homeassistant/sensor/ea_other_integration/config", b'{"state_topic": "x/y"}'),
+        _Msg("homeassistant/sensor/nw_electricity_price/config",
+             b'{"state_topic": "nornwatt/prices/state"}'),
+        _Msg("homeassistant/sensor/ea_gone/config", b""),                 # already cleared
+        _Msg("energy_assistant/status", b"offline"),
+        _Msg("energy_assistant/device/meter/power_w", b"12"),
+        _Msg("energy_assistant/device/meter/live", b"1", retain=False),
+    ])
+
+    found = await _legacy_topics(client, quiet_s=0.05)
+
+    assert found == {
+        "homeassistant/sensor/ea_electricity_price/config",
+        "homeassistant/sensor/ea_dev_meter_power_w/config",
+        "energy_assistant/status",
+        "energy_assistant/device/meter/power_w",
+    }
+    assert client.subscribed == client.unsubscribed

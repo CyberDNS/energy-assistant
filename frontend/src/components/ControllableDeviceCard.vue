@@ -21,7 +21,7 @@ function fmt(v, dec = 1) {
 
 const MODE_COLOR = {
   'run':              '#4caf7d',
-  'charge_from_pv':   '#8bc34a',  // EV PV surplus — yellow-green
+  'charge_from_pv':   '#c98500',  // EV PV surplus — solar amber
   'charge_from_grid': '#00acc1',  // EV Phase 1 — teal
   'charge_phase2':    '#f57c00',  // EV Phase 2 mandatory — deep orange
   'force_charging':   '#f57c00',  // EV force charge (max speed) — deep orange

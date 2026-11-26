@@ -6,7 +6,7 @@
 **/__pycache__
 .pytest_cache
 frontend/node_modules
-src/energy_assistant/frontend
+src/nornwatt/frontend
 notebooks
 example-data
 tests

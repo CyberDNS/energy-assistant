@@ -58,7 +58,7 @@ def test_control_is_switched_on_per_device(observing_app, page) -> None:  # noqa
     expect = sync_api.expect
 
     page.goto(base + "/")
-    expect(page.get_by_test_id("observing-banner")).to_contain_text("Energy Assistant is observing")
+    expect(page.get_by_test_id("observing-banner")).to_contain_text("Nornwatt is observing")
 
     page.goto(base + "/#/devices/home_battery")
     control = page.get_by_test_id("device-control")

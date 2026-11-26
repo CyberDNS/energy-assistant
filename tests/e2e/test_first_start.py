@@ -1,6 +1,6 @@
 """Browser test: a fresh install, set up entirely in the web UI.
 
-The real Energy Assistant (not a mocked API) starts with no config.yaml at
+The real Nornwatt (not a mocked API) starts with no config.yaml at
 all, next to a stand-in for Home Assistant's REST API.  In Chromium:
 
 1. Home shows the first-start page (no devices yet), no error;
@@ -33,9 +33,9 @@ import pytest
 
 sync_api = pytest.importorskip("playwright.sync_api")
 
-from energy_assistant.server import Application
+from nornwatt.server import Application
 
-FRONTEND = Path(__file__).resolve().parents[2] / "src" / "energy_assistant" / "frontend"
+FRONTEND = Path(__file__).resolve().parents[2] / "src" / "nornwatt" / "frontend"
 
 STATES = [
     {
@@ -103,10 +103,10 @@ def _app_in_thread(tmp_path: Path, monkeypatch) -> Iterator[str]:
     if not (FRONTEND / "index.html").exists():
         pytest.skip("frontend not built (cd frontend && npm run build)")
     port = _free_port()
-    monkeypatch.setenv("ENERGY_ASSISTANT_PORT", str(port))
-    monkeypatch.setenv("ENERGY_ASSISTANT_DRY_RUN", "1")
+    monkeypatch.setenv("NORNWATT_PORT", str(port))
+    monkeypatch.setenv("NORNWATT_DRY_RUN", "1")
     monkeypatch.delenv("SUPERVISOR_TOKEN", raising=False)
-    monkeypatch.delenv("ENERGY_ASSISTANT_API_TOKEN", raising=False)
+    monkeypatch.delenv("NORNWATT_API_TOKEN", raising=False)
     app = Application(config_path=tmp_path / "config.yaml", db_path=tmp_path / "data" / "history.db")
     loop = asyncio.new_event_loop()
     started = threading.Event()

@@ -102,7 +102,7 @@ const nodes = computed(() => props.tiles.map((t) => {
 </template>
 
 <style scoped>
-.flow { --flow-solar: #d99a00; --flow-grid: var(--danger); --flow-home: #5f6fc4; --flow-battery: var(--primary); --flow-car: #0f97b0; }
+.flow { --flow-solar: var(--brand-bolt); --flow-grid: var(--series-import); --flow-home: var(--series-home); --flow-battery: var(--series-battery); --flow-car: var(--series-car); }
 .flow svg { display: block; width: 100%; max-width: 640px; height: auto; margin: 0 auto; }
 .flow-track { stroke: var(--border); stroke-width: 3; }
 .flow-dash { stroke-width: 3.5; stroke-dasharray: 2 11; animation: flow-in linear infinite; }

@@ -12,7 +12,7 @@
 # rebuilding it.
 #
 # Images are published to:
-#   ghcr.io/cyberdns/energy-assistant
+#   ghcr.io/cyberdns/nornwatt
 
 name: Publish Docker image
 
@@ -26,7 +26,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: cyberdns/energy-assistant
+  IMAGE_NAME: cyberdns/nornwatt
 
 jobs:
   build-and-push:
@@ -77,7 +77,7 @@ jobs:
             type=raw,value=edge,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=semver,pattern={{version}}
           labels: |
-            org.opencontainers.image.title=Energy Assistant
+            org.opencontainers.image.title=Nornwatt
             org.opencontainers.image.description=Open-source, vendor-neutral energy management platform
             org.opencontainers.image.vendor=CyberDNS
 
@@ -168,7 +168,7 @@ jobs:
             type=raw,value=edge,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=semver,pattern={{version}}
           labels: |
-            org.opencontainers.image.title=Energy Assistant
+            org.opencontainers.image.title=Nornwatt
             org.opencontainers.image.description=Open-source, vendor-neutral energy management platform
             org.opencontainers.image.vendor=CyberDNS
 

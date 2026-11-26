@@ -28,7 +28,7 @@ import pytest
 sync_api = pytest.importorskip("playwright.sync_api")
 
 # Where `npm run build` puts the UI (frontend/vite.config.ts).
-FRONTEND = Path(__file__).resolve().parents[2] / "src" / "energy_assistant" / "frontend"
+FRONTEND = Path(__file__).resolve().parents[2] / "src" / "nornwatt" / "frontend"
 RANGES = ["24 h", "3 d", "7 d", "30 d", "90 d", "1 y"]
 MAX_SWITCH_S = 2.0
 

@@ -1,0 +1,316 @@
+"""Tests for YamlConfigLoader and device_loader.build() with Messkonzept 8."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from textwrap import dedent
+
+import pytest
+
+from nornwatt.config.yaml import YamlConfigLoader
+from nornwatt.core.config import AppConfig
+from nornwatt.core.device_model import (
+    DeviceCategory,
+    DeviceConfigError,
+    parse_devices,
+)
+from nornwatt.core.topology import TopologyNode
+from nornwatt.loader.device_loader import build
+from nornwatt.plugins.differential.device import DifferentialDevice
+from nornwatt.plugins.flat_rate.tariff import FlatRateTariff
+from nornwatt.plugins.homeassistant_sensor.device import HASensorDevice
+
+# ---------------------------------------------------------------------------
+# YamlConfigLoader tests
+# ---------------------------------------------------------------------------
+
+
+class TestYamlConfigLoader:
+    def test_missing_file_returns_empty_config(self, tmp_path: Path) -> None:
+        loader = YamlConfigLoader(tmp_path / "nonexistent.yaml")
+        cfg = loader.load()
+        assert isinstance(cfg, AppConfig)
+        assert cfg.devices == {}
+        assert cfg.tariffs == {}
+
+    def test_rejects_the_assets_section(self, tmp_path: Path) -> None:
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(dedent("""\
+            assets:
+              aquarium_cooler: { type: threshold, device: aquarium_cooler }
+              ev_car: { device: cp5, capacity_kwh: 50 }
+        """))
+        with pytest.raises(DeviceConfigError) as exc:
+            YamlConfigLoader(config_file).load()
+        [msg] = exc.value.errors
+        assert msg.startswith("the 'assets:' section was removed")
+        assert "'category: vehicle'" in msg and "'category: thermal_load'" in msg
+
+    def test_rejects_threshold_homeassistant(self, tmp_path: Path) -> None:
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(dedent("""\
+            devices:
+              - id: aquarium_cooler
+                category: thermal_load
+                type: threshold_homeassistant
+        """))
+        with pytest.raises(DeviceConfigError, match="aquarium_cooler: type 'threshold_homeassistant' "
+                                                    "was replaced"):
+            YamlConfigLoader(config_file).load()
+
+    def test_parses_backends(self, tmp_path: Path) -> None:
+        yaml_text = dedent("""\
+            backends:
+              homeassistant:
+                url: "http://192.168.1.10:8123"
+                token: t
+              mqtt:
+                host: "192.168.1.11"
+        """)
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(yaml_text)
+
+        cfg = YamlConfigLoader(config_file).load()
+        assert cfg.backends.homeassistant is not None
+        assert cfg.backends.homeassistant.url == "http://192.168.1.10:8123"
+        assert cfg.backends.mqtt is not None and cfg.backends.mqtt.port == 1883
+
+    def test_iobroker_backend_is_ignored_with_a_warning(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("backends:\n  iobroker:\n    host: h\n")
+        cfg = YamlConfigLoader(config_file).load()
+        assert not hasattr(cfg.backends, "iobroker")
+        assert "backends.iobroker is no longer used" in caplog.text
+
+    def test_removed_iobroker_types_are_rejected(self, tmp_path: Path) -> None:
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(dedent("""\
+            tariffs:
+              household: { type: tibber_iobroker }
+            devices:
+              - { id: zen, category: battery, type: zendure_iobroker }
+        """))
+        with pytest.raises(DeviceConfigError) as exc:
+            YamlConfigLoader(config_file).load()
+        removed = "was removed with the ioBroker support"
+        assert exc.value.errors == [
+            f"devices: zen: type 'zendure_iobroker' {removed} — use zendure",
+            f"tariffs: household: type 'tibber_iobroker' {removed} — use tibber (tariff) or tibber_cloud (meter)",
+        ]
+
+    def test_parses_tariffs(self, tmp_path: Path) -> None:
+        yaml_text = dedent("""\
+            tariffs:
+              export_tariff:
+                type: flat_rate
+                import_price_eur_per_kwh: 0.082
+        """)
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(yaml_text)
+
+        cfg = YamlConfigLoader(config_file).load()
+        assert "export_tariff" in cfg.tariffs
+        assert cfg.tariffs["export_tariff"]["import_price_eur_per_kwh"] == pytest.approx(0.082)
+
+    def test_parses_devices(self, tmp_path: Path) -> None:
+        yaml_text = dedent("""\
+            devices:
+              main_grid_meter:
+                category: meter
+                type: tasmota
+                host: 192.168.1.46
+                profile: iskra_mt175
+        """)
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(yaml_text)
+
+        cfg = YamlConfigLoader(config_file).load()
+        spec = cfg.devices["main_grid_meter"]
+        assert spec.category is DeviceCategory.METER
+        assert spec.type == "tasmota"
+        assert spec.settings["host"] == "192.168.1.46"
+
+    def test_topology_section_is_rejected(self, tmp_path: Path) -> None:
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("topology:\n  - main_grid_meter: {}\n")
+        with pytest.raises(DeviceConfigError, match="metered_by"):
+            YamlConfigLoader(config_file).load()
+
+    def test_role_is_rejected(self, tmp_path: Path) -> None:
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("devices:\n  - id: m\n    role: meter\n    type: tasmota\n")
+        with pytest.raises(DeviceConfigError, match="'role:' was replaced by 'category:'"):
+            YamlConfigLoader(config_file).load()
+
+    def test_secret_tag_resolves_from_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("NORNWATT_SECRET_MYTOKEN", "secret-value-123")
+        yaml_text = dedent("""\
+            tariffs:
+              tibber:
+                type: tibber
+                token: !secret mytoken
+        """)
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(yaml_text)
+
+        cfg = YamlConfigLoader(config_file).load()
+        assert cfg.tariffs["tibber"]["token"] == "secret-value-123"
+
+
+# ---------------------------------------------------------------------------
+# device_loader.build() tests — Messkonzept 8 integration
+# ---------------------------------------------------------------------------
+
+
+def _messkonzept8_config(tmp_path: Path) -> AppConfig:
+    """Build an AppConfig representing the Messkonzept 8 setup."""
+    yaml_text = dedent("""\
+        backends:
+          homeassistant:
+            url: "http://192.168.1.5:8123"
+            token: t
+
+        tariffs:
+          export_tariff:
+            type: flat_rate
+            import_price_eur_per_kwh: 0.082
+          household_tariff:
+            type: flat_rate
+            import_price_eur_per_kwh: 0.30
+          heatpump_tariff:
+            type: flat_rate
+            import_price_eur_per_kwh: 0.15
+
+        devices:
+          main_grid_meter:
+            category: meter
+            type: generic_homeassistant
+            capabilities:
+              power_w: { import_entity: sensor.grid_import, export_entity: sensor.grid_export }
+            tariff: export_tariff
+
+          household_meter:
+            category: meter
+            type: generic_homeassistant
+            metered_by: main_grid_meter
+            capabilities:
+              power_w: { entity: sensor.household_power }
+            tariff: household_tariff
+
+          heatpump:
+            category: consumer
+            type: differential
+            metered_by: main_grid_meter
+            minuend: main_grid_meter
+            subtrahend: household_meter
+            min_w: 0.0
+            tariff: heatpump_tariff
+    """)
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(yaml_text)
+    return YamlConfigLoader(config_file).load()
+
+
+class TestDeviceLoaderMesskonzept8:
+    def test_all_three_devices_registered(self, tmp_path: Path) -> None:
+        cfg = _messkonzept8_config(tmp_path)
+        registry, tariffs, topology = build(cfg)
+
+        assert len(registry) == 3
+        assert registry.get("main_grid_meter") is not None
+        assert registry.get("household_meter") is not None
+        assert registry.get("heatpump") is not None
+
+    def test_device_categories(self, tmp_path: Path) -> None:
+        cfg = _messkonzept8_config(tmp_path)
+        registry, _, _ = build(cfg)
+
+        assert registry.get("main_grid_meter").category == DeviceCategory.METER
+        assert registry.get("household_meter").category == DeviceCategory.METER
+        assert registry.get("heatpump").category == DeviceCategory.CONSUMER
+
+    def test_device_types(self, tmp_path: Path) -> None:
+        cfg = _messkonzept8_config(tmp_path)
+        registry, _, _ = build(cfg)
+
+        assert isinstance(registry.get("main_grid_meter"), HASensorDevice)
+        assert isinstance(registry.get("household_meter"), HASensorDevice)
+        assert isinstance(registry.get("heatpump"), DifferentialDevice)
+
+    def test_all_three_tariffs_built(self, tmp_path: Path) -> None:
+        cfg = _messkonzept8_config(tmp_path)
+        _, tariffs, _ = build(cfg)
+
+        assert "export_tariff" in tariffs
+        assert "household_tariff" in tariffs
+        assert "heatpump_tariff" in tariffs
+        assert isinstance(tariffs["export_tariff"], FlatRateTariff)
+
+    def test_topology_root_is_main_grid_meter(self, tmp_path: Path) -> None:
+        cfg = _messkonzept8_config(tmp_path)
+        _, _, topology = build(cfg)
+
+        assert topology is not None
+        assert isinstance(topology, TopologyNode)
+        assert topology.device_id == "main_grid_meter"
+
+    def test_topology_children(self, tmp_path: Path) -> None:
+        cfg = _messkonzept8_config(tmp_path)
+        _, _, topology = build(cfg)
+
+        assert topology is not None
+        child_ids = {c.device_id for c in topology.children}
+        assert child_ids == {"household_meter", "heatpump"}
+
+    def test_by_category_queries(self, tmp_path: Path) -> None:
+        cfg = _messkonzept8_config(tmp_path)
+        registry, _, _ = build(cfg)
+
+        meters = registry.by_category(DeviceCategory.METER)
+        consumers = registry.by_category(DeviceCategory.CONSUMER)
+
+        assert [m.device_id for m in meters] == ["main_grid_meter", "household_meter"]
+        assert len(consumers) == 1
+        assert consumers[0].device_id == "heatpump"
+
+    def test_missing_backend_skips_ha_devices(self, tmp_path: Path) -> None:
+        """Without a Home Assistant backend, generic_homeassistant devices are skipped."""
+        from nornwatt.core.config import AppConfig
+
+        cfg = AppConfig(
+            devices=parse_devices({
+                "main_grid_meter": {
+                    "category": "meter",
+                    "type": "generic_homeassistant",
+                    "capabilities": {"power_w": {"entity": "sensor.p"}},
+                }
+            })
+        )
+        registry, _, _ = build(cfg)
+        assert registry.get("main_grid_meter") is None
+
+
+# ---------------------------------------------------------------------------
+# The shipped example configs load and validate
+# ---------------------------------------------------------------------------
+
+_REPO = Path(__file__).resolve().parents[2]
+
+
+@pytest.mark.parametrize("name", ["config.yaml.example", "config_messkonzept8.yaml.example"])
+def test_example_config_is_valid(name: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    from nornwatt.core.topology import build_topology
+    from nornwatt.loader.device_loader import validate_plugins
+
+    for secret in ("HA_TOKEN", "MQTT_USER", "MQTT_PASSWORD", "TIBBER_TOKEN", "TIBBER_HOME_ID",
+                   "TIBBER_PULSE_PASSWORD", "ZENDURE_CLOUD_KEY"):
+        monkeypatch.setenv(f"NORNWATT_SECRET_{secret}", "x")
+    cfg = YamlConfigLoader(_REPO / name).load()
+    validate_plugins(cfg.devices)
+    root = build_topology(cfg.devices)
+    assert root is not None and root.device_id == "main_grid_meter"
+    assert root.find("household_meter") is not None

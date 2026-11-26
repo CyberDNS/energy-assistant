@@ -1,6 +1,6 @@
 # Release model
 
-This document describes the release strategy for Energy Assistant, including
+This document describes the release strategy for Nornwatt, including
 how versions are managed, images are published, and release notes are produced.
 
 ---
@@ -29,7 +29,7 @@ later whether/when to promote that exact version to prod.
 
 Images are published to **GHCR**:
 ```
-ghcr.io/cyberdns/energy-assistant:<tag>
+ghcr.io/cyberdns/nornwatt:<tag>
 ```
 
 ---
@@ -48,7 +48,7 @@ tag v0.2.0 pushed ─────► draft GitHub Release (auto-generated notes)
                               ▼
                     release: published event ─────────────► :edge, :v0.2.0
                                                               PR opens in
-                                                              energy-assistant-edge
+                                                              nornwatt-edge
 
     (some time later, once v0.2.0 has proven stable on edge)
                               │
@@ -57,7 +57,7 @@ tag v0.2.0 pushed ─────► draft GitHub Release (auto-generated notes)
                               │
                               ▼
                     :latest retagged to v0.2.0 (no rebuild)
-                    PR opens in energy-assistant (prod folder)
+                    PR opens in nornwatt (prod folder)
 ```
 
 - `.github/workflows/docker-publish.yml` builds and pushes images on `main`
@@ -103,7 +103,7 @@ this repo's GHCR image) lives in `CyberDNS/hassio-addons-repository`, not here.
 Every push to `main`:
 - publishes a fresh `:dev` Docker image and `:sha-<short-sha>`,
 - opens a PR in `CyberDNS/hassio-addons-repository` updating
-  `energy-assistant-dev/config.yaml` and `CHANGELOG.md`.
+  `nornwatt-dev/config.yaml` and `CHANGELOG.md`.
 
 No manual steps needed.
 
@@ -120,15 +120,15 @@ No manual steps needed.
 5. Rewrite the release body in the GitHub Releases UI into user-friendly
    language, then **publish** it.
 6. Publishing triggers a PR in `CyberDNS/hassio-addons-repository` updating
-   `energy-assistant-edge/` with the version and the curated notes.
+   `nornwatt-edge/` with the version and the curated notes.
 
 ### Promoting to prod
 Once a version has been running on edge long enough to be considered stable:
 1. Go to `CyberDNS/hassio-addons-repository` → Actions → **Promote to prod**.
-2. Run it with `addon: energy-assistant` and the version to promote (e.g.
+2. Run it with `addon: nornwatt` and the version to promote (e.g.
    `0.2.0`) — it must be the version currently on edge.
 3. Automation retags `:latest` in GHCR to point at the exact same image
-   (no rebuild) and opens a PR updating `energy-assistant/` (prod) with the
+   (no rebuild) and opens a PR updating `nornwatt/` (prod) with the
    version and changelog entry copied from edge.
 
 ---
@@ -139,14 +139,14 @@ Once a version has been running on edge long enough to be considered stable:
 - No formal release notes are required.
 - Each commit to `main` is visible in the commit log.
 - The sync workflow adds a brief entry in the HA add-on
-  `energy-assistant-dev/CHANGELOG.md` pointing to the commit.
+  `nornwatt-dev/CHANGELOG.md` pointing to the commit.
 
 ### edge channel (tags)
 - `release.yml` creates a **draft** GitHub Release with notes generated from
   merged PRs since the previous tag — a starting point, not the final text.
 - A maintainer rewrites the body into user-friendly language and publishes
   the release. Auto-generated commit/PR-title dumps never reach end users.
-- Publishing triggers the sync to `energy-assistant-edge/CHANGELOG.md`,
+- Publishing triggers the sync to `nornwatt-edge/CHANGELOG.md`,
   which copies the curated release body verbatim.
 
 ### prod channel (promoted versions)
@@ -168,9 +168,9 @@ application channel structure:
 
 | Add-on folder              | Tracks                          | `config.yaml` version   |
 |-----------------------------|----------------------------------|--------------------------|
-| `energy-assistant-dev/`    | `:dev` image                     | `0.1.0-dev`              |
-| `energy-assistant-edge/`   | `:edge` image                    | version from the tag     |
-| `energy-assistant/`        | `:latest` image (promoted)       | version last promoted    |
+| `nornwatt-dev/`    | `:dev` image                     | `0.1.0-dev`              |
+| `nornwatt-edge/`   | `:edge` image                    | version from the tag     |
+| `nornwatt/`        | `:latest` image (promoted)       | version last promoted    |
 
 ### How add-on versions are updated
 

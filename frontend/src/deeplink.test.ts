@@ -42,14 +42,14 @@ describe('deep links', () => {
   })
 
   it('maps the remembered Config tab of the old UI to Settings', async () => {
-    localStorage.setItem('energy-assistant.lastTab', '/config')
+    localStorage.setItem('nornwatt.lastTab', '/config')
     const d = await load('/')
     d.applyInitialRoute()
     expect(window.location.hash).toBe('#/settings')
   })
 
   it('never restores a page into an embedded view', async () => {
-    localStorage.setItem('energy-assistant.lastTab', '/plan')
+    localStorage.setItem('nornwatt.lastTab', '/plan')
     const d = await load('/?embed=1')
     d.applyInitialRoute()
     expect(window.location.hash).toBe('')

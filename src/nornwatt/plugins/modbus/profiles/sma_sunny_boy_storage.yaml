@@ -1,0 +1,104 @@
+# SMA Sunny Boy Storage (SBS 2.5 / 3.7 / 5.0 / 6.0) — Modbus TCP profile.
+#
+# Prerequisite: the Modbus TCP server must be switched on in the inverter
+# (Sunny Explorer / web UI: "External communication → Modbus → TCP server").
+#
+# Addresses, types and sentinels follow SMA's Modbus register list for the
+# Sunny Boy Storage.  Verify them against the list for your firmware with
+#   python scripts/probe_modbus.py --host <inverter-ip>
+# before relying on the values.
+
+name: "SMA Sunny Boy Storage"
+
+defaults:
+  port: 502
+  unit_id: 3          # SMA factory default
+  word_order: big
+
+# SMA marks "value not available" with a fixed raw pattern per data type.
+nan:
+  s16: 0x8000
+  u16: 0xFFFF
+  s32: 0x80000000
+  u32: 0xFFFFFFFF
+
+registers:
+  # Active power at the AC connection.  SMA sign: positive = feeding out
+  # (battery discharging), negative = drawing (battery charging).
+  power_ac:
+    table: input
+    address: 30775
+    type: s32
+  # Battery state of charge, %.
+  soc:
+    table: input
+    address: 30845
+    type: u32
+  # Maximum charge / discharge power currently allowed by the inverter, W.
+  max_charge:
+    table: holding
+    address: 40189
+    type: u32
+  max_discharge:
+    table: holding
+    address: 40191
+    type: u32
+  # Active power limit, % of rated power.  Older Nornwatt versions
+  # capped discharge with it; it is now held at 100 % so it never blocks the
+  # battery management below.  Write-only (reads return 0x8000), not polled.
+  active_power_limit:
+    table: holding
+    address: 40016
+    type: s16
+  # Battery management (CmpBMS), write-only: operating mode (2424 default,
+  # 2289 charge battery), charge / discharge power window (W) and the target
+  # power at the inverter's own energy meter (W).  Same registers as the evcc
+  # template for the SBS 3.7/5.0/6.0; verified on an SBS 3.7.
+  bms_op_mode:
+    table: holding
+    address: 40236
+    type: u32
+  bms_charge_min_w:
+    table: holding
+    address: 40793
+    type: u32
+  bms_charge_max_w:
+    table: holding
+    address: 40795
+    type: u32
+  bms_discharge_min_w:
+    table: holding
+    address: 40797
+    type: u32
+  bms_discharge_max_w:
+    table: holding
+    address: 40799
+    type: u32
+  bms_grid_setpoint_w:
+    table: holding
+    address: 40801
+    type: s32
+
+state:
+  # Platform sign: positive = consuming (charging), so SMA's value is negated.
+  power_w: {register: power_ac, scale: -1}
+  soc_pct: soc
+  extra:
+    max_cha_w: max_charge
+    max_dsch_w: max_discharge
+
+# Charge and discharge are commanded through the battery management (see
+# BmsOperatingMode in control.py): a charge command charges exactly that
+# power, from PV or the grid; a discharge command lets the inverter cover the
+# load at its own meter up to that power; idle holds.  When Nornwatt
+# starts, reloads or stops, the inverter is handed back to its own
+# self-consumption — it does not fall back on its own.
+control:
+  strategy: bms_operating_mode
+  mode: bms_op_mode
+  charge_min: bms_charge_min_w
+  charge_max: bms_charge_max_w
+  discharge_min: bms_discharge_min_w
+  discharge_max: bms_discharge_max_w
+  grid_setpoint: bms_grid_setpoint_w
+  power_limit: active_power_limit

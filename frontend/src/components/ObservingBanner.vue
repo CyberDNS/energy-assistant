@@ -6,7 +6,7 @@ import { computed, inject, onMounted } from 'vue'
 import { RouterLink } from 'vue-router'
 import { useProjectedSavings } from '../composables/useProjectedSavings'
 
-// Home, while every device Energy Assistant can control is only observed
+// Home, while every device Nornwatt can control is only observed
 // (issue #134): what it would have saved so far with control.
 const status = inject('status') as Ref<Status | null>
 const { projected, load } = useProjectedSavings()
@@ -22,7 +22,7 @@ const eur = (v: number) => `${v < -0.005 ? '−' : ''}${Math.abs(v).toFixed(2)} 
   <section v-if="allObserved" class="panel full observing" data-testid="observing-banner">
     <Eye class="size-5 shrink-0" />
     <div class="min-w-0 flex-1">
-      <span class="font-medium">Energy Assistant is observing.</span>
+      <span class="font-medium">Nornwatt is observing.</span>
       It plans your devices but controls none of them.
       <template v-if="saving != null">
         Projected saving so far: <b data-testid="observing-saving">{{ eur(saving) }}</b> (simulated).

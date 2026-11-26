@@ -47,7 +47,7 @@ export default defineComponent({
       }
     }, { immediate: true })
 
-    // Observe mode (issue #134): a device Energy Assistant commands starts in
+    // Observe mode (issue #134): a device Nornwatt commands starts in
     // observe (plans, sends nothing); an entry without control: is active.
     const controlled = computed(() => (schema.value.controlled_categories ?? []).includes(form.category))
     watch(controlled, (yes) => {
@@ -57,8 +57,8 @@ export default defineComponent({
     const controlSpec = {
       kind: 'str', label: 'Control', default: 'active', choices: ['observe', 'active'],
       choice_labels: { observe: 'Observe only', active: 'Control it' },
-      description: 'Observe only: Energy Assistant plans this device and shows what it would do and save, '
-        + 'but sends it nothing. Control it: Energy Assistant sends the commands.',
+      description: 'Observe only: Nornwatt plans this device and shows what it would do and save, '
+        + 'but sends it nothing. Control it: Nornwatt sends the commands.',
     }
 
     // Presets (core/presets.py): a ready-made device for a common integration.
@@ -237,7 +237,7 @@ export default defineComponent({
               <option v-if="form.type && !plugins.some(p => p.type === form.type)" :value="form.type">{{ form.type }} (not for this kind of device)</option>
             </select>
           </label>
-          <div class="cfg-hint">{{ plugin?.description || 'How Energy Assistant talks to the device.' }} · <code class="cfg-key">type{{ form.type ? ': ' + form.type : '' }}</code></div>
+          <div class="cfg-hint">{{ plugin?.description || 'How Nornwatt talks to the device.' }} · <code class="cfg-key">type{{ form.type ? ': ' + form.type : '' }}</code></div>
         </div>
         <SchemaField name="label" :spec="basics.label" :model-value="form.label || undefined" @update:model-value="form.label = $event ?? ''" />
         <SchemaField name="tariff" :spec="basics.tariff" :model-value="form.tariff || undefined" @update:model-value="form.tariff = $event ?? null" />

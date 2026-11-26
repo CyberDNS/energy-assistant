@@ -30,7 +30,7 @@ interface HAState {
   route: HARoute | null
 }
 
-const KIOSK_KEY = 'energy-assistant.haKiosk'
+const KIOSK_KEY = 'nornwatt.haKiosk'
 const INSET_EDGES = ['top', 'right', 'bottom', 'left'] as const
 
 const state = reactive<HAState>({

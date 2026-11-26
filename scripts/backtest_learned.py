@@ -20,10 +20,10 @@ import asyncio
 import statistics
 from datetime import datetime, timedelta
 
-from energy_assistant.config.yaml import YamlConfigLoader
-from energy_assistant.core.learned_model import fit
-from energy_assistant.loader.device_loader import make_build_context
-from energy_assistant.plugins import registry
+from nornwatt.config.yaml import YamlConfigLoader
+from nornwatt.core.learned_model import fit
+from nornwatt.loader.device_loader import make_build_context
+from nornwatt.plugins import registry
 
 
 async def _fallback_kwh(provider, day) -> float:

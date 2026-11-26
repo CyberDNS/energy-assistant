@@ -88,7 +88,7 @@ devices:
     # host: 192.168.1.50                       # the bridge's IP or hostname
     # password: !secret tibber_pulse_password  # code printed on the bridge
     # Or read a Tasmota IR head on the meter directly (pick the profile of
-    # your meter script, or map fields by hand; see the README):
+    # your meter script, or map fields by hand; see docs/devices.md):
     # type: tasmota
     # host: 192.168.1.51
     # profile: iskra_mt175

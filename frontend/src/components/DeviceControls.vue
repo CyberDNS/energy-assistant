@@ -5,7 +5,7 @@ import { computed, inject } from 'vue'
 import DeviceControl from './DeviceControl.vue'
 
 // The observe/active switches that concern one device (issue #134): its own
-// when Energy Assistant commands it, else those of the devices it is
+// when Nornwatt commands it, else those of the devices it is
 // controlled through — the thermal load a switch executes (the aquarium
 // cooler on its plug), the charger a car charges at (``control_targets`` of
 // /api/status).

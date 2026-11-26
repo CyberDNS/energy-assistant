@@ -1,0 +1,40 @@
+title: SolarEdge battery (SolarEdge Modbus Multi integration)
+category: battery
+integration: SolarEdge Modbus Multi (custom, WillCodeForCats)
+url: https://github.com/WillCodeForCats/solaredge-modbus-multi
+verified: false
+description: >-
+  Uses the inverter's Remote Control storage mode: every behaviour has a
+  storage command mode, with the charge / discharge limit as the power.
+  Enable "Storage Control" in the integration and set Storage Default Mode to
+  Maximize Self Consumption: a command times out after an hour without a
+  change (the safe direction if Nornwatt stops).  Check that the
+  battery's DC power is positive while charging (else set invert_sign).
+variables:
+  prefix:
+    label: Entity prefix (the integration's name prefix)
+    example: solaredge
+device:
+  type: homeassistant_battery
+  capabilities:
+    power_w: { entity: "sensor.{prefix}_b1_dc_power" }
+    soc_pct: { entity: "sensor.{prefix}_b1_state_of_energy" }
+    power_setpoint:
+      control: modes
+      mode: "select.{prefix}_i1_storage_command_mode"
+      modes:
+        charge:
+          option: Charge from Solar Power and Grid
+          power: "number.{prefix}_i1_storage_charge_limit"
+          set: &remote
+            "select.{prefix}_i1_storage_control_mode": Remote Control
+            "number.{prefix}_i1_storage_command_timeout": 3600
+        discharge:
+          option: Discharge to Maximize Export
+          power: "number.{prefix}_i1_storage_discharge_limit"
+          set: *remote
+        absorb_surplus: { option: Charge from Solar Power, set: *remote }
+        self_consumption: { option: Maximize Self Consumption, set: *remote }
+        hold: { option: Solar Power Only (Off), set: *remote }
+      release: self_consumption
+  params: { capacity_kwh: 9.7, max_charge_kw: 5, max_discharge_kw: 5, min_soc_pct: 5 }

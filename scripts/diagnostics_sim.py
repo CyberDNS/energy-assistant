@@ -43,19 +43,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import pulp
 
-from energy_assistant.core.device_model import DeviceCategory
-from energy_assistant.config.yaml import YamlConfigLoader
-from energy_assistant.core.ledger import BatteryCostLedger
-from energy_assistant.core.models import (
+from nornwatt.core.device_model import DeviceCategory
+from nornwatt.config.yaml import YamlConfigLoader
+from nornwatt.core.ledger import BatteryCostLedger
+from nornwatt.core.models import (
     DeviceState,
     ForecastPoint,
     ForecastQuantity,
     StorageConstraints,
 )
-from energy_assistant.core.optimizer import OptimizationContext
-from energy_assistant.core.plugin_registry import BuildContext
-from energy_assistant.loader.device_loader import build as build_from_config
-from energy_assistant.plugins.milp_highs import MilpHigsOptimizer
+from nornwatt.core.optimizer import OptimizationContext
+from nornwatt.core.plugin_registry import BuildContext
+from nornwatt.loader.device_loader import build as build_from_config
+from nornwatt.plugins.milp_highs import MilpHigsOptimizer
 
 # Import shared helpers from the existing visualize_optimizer script.
 import visualize_optimizer as _vo

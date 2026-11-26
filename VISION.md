@@ -1,4 +1,4 @@
-# Energy Assistant
+# Nornwatt
 
 ## Vision
 
@@ -25,7 +25,7 @@ a single country's grid regulations, or a mandatory cloud subscription. They
 optimize in isolation — the EV charger does not know what the battery is doing,
 and neither knows what the heat pump is paying for electricity.
 
-Energy Assistant solves this by providing a single, open, self-hosted platform
+Nornwatt solves this by providing a single, open, self-hosted platform
 that understands the full picture — devices, energy flows, metering topology,
 tariff structures, and physical constraints — and optimizes across all of them
 simultaneously.
@@ -54,7 +54,7 @@ simultaneously.
 ## Architecture Principles
 
 ### Modularity First
-Every capability in Energy Assistant is a module. Sources, consumers, optimizers,
+Every capability in Nornwatt is a module. Sources, consumers, optimizers,
 forecasters, storage backends, and UI components all implement well-defined
 interfaces and can be added, removed, or replaced independently. The core
 platform provides orchestration and communication — nothing more.
@@ -67,7 +67,7 @@ forecasting). Plugins are discovered and loaded at runtime, with no changes
 required to the core.
 
 ### A Spectrum of Integration Complexity
-Not every integration requires a plugin. Energy Assistant supports a continuous
+Not every integration requires a plugin. Nornwatt supports a continuous
 spectrum from pure configuration to full Python plugins:
 ```
 Simple ◄────────────────────────────────────────► Complex
@@ -96,7 +96,7 @@ the user explicitly configures it.
 
 ### Stable Internal APIs
 All interfaces between modules are versioned and documented. A plugin written
-for one version of Energy Assistant will continue to work across future
+for one version of Nornwatt will continue to work across future
 versions within the same major version. Breaking changes are communicated
 clearly and managed through a deprecation process.
 
@@ -124,7 +124,7 @@ correctly handle arbitrage, opportunity cost, and cross-device interactions.
 
 ### Configuration Structure
 
-An Energy Assistant configuration is divided into a few top-level sections,
+A Nornwatt configuration is divided into a few top-level sections,
 each with a distinct responsibility. See `DOMAIN_MODEL.md` for the full
 reference.
 
@@ -173,7 +173,7 @@ contributions are available.
 
 ### Generic Connectors
 
-Three connector types are first-class citizens in Energy Assistant, covering
+Three connector types are first-class citizens in Nornwatt, covering
 the vast majority of home automation backends without requiring any custom
 code:
 
@@ -189,7 +189,7 @@ without writing any code.
 
 ### Derived Device Power
 
-Not every device has a dedicated sensor. Energy Assistant supports devices
+Not every device has a dedicated sensor. Nornwatt supports devices
 whose power is derived from two other devices via `type: differential`.
 
 A common real-world use case is deriving heat pump consumption from the
@@ -286,7 +286,7 @@ and model quality.
 
 ### The Two Control Loops
 
-Energy Assistant operates two complementary loops that bridge the gap
+Nornwatt operates two complementary loops that bridge the gap
 between forecasts and reality.
 
 #### Planning Loop (slow)

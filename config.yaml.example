@@ -18,7 +18,7 @@ backends:
     token: !secret ha_token
   mqtt:
     # Broker for openwb_mqtt, zendure (connection: local) and the Home
-    # Assistant MQTT discovery entities Energy Assistant publishes.
+    # Assistant MQTT discovery entities Nornwatt publishes.
     host: 192.168.x.x
     port: 1883
     username: !secret mqtt_user
@@ -257,9 +257,9 @@ server:
   history_retention_days: 8
   # Optional: token for read-only access from outside Home Assistant ingress
   # (REST GET requests and the MCP endpoint at /mcp). Without it the API has
-  # no authentication — fine as long as only ingress can reach it. See README
-  # "Remote read-only access". Generate one with: openssl rand -hex 32
-  # api_token: !secret energy_assistant_api_token
+  # no authentication — fine as long as only ingress can reach it. See
+  # docs/api.md. Generate one with: openssl rand -hex 32
+  # api_token: !secret nornwatt_api_token
   # Addresses that keep full access without a token (default: the HA ingress
   # proxy 172.30.32.2 and localhost).
   # trusted_hosts: ["172.30.32.2", "127.0.0.1", "::1"]
@@ -338,7 +338,7 @@ devices:
     metered_by: household_meter
     profile: sma_sunny_boy_storage
     host: 192.168.x.x
-    # control: observe              # plan only, send nothing (see README "Observe first");
+    # control: observe              # plan only, send nothing (see docs/control.md);
     #                               # not set = active (controlled)
     params:
       capacity_kwh: 7.4
@@ -352,7 +352,7 @@ devices:
       # cycle_life: 6000
       # no_grid_charge: true          # charge from PV surplus only
       # own_meter: grid_connection    # its own Energy Meter sits at the grid connection
-      #                               # (savings: how it would run without Energy Assistant)
+      #                               # (savings: how it would run without Nornwatt)
 
   # --- EV charger (openWB, MQTT simpleAPI on backends.mqtt) ---
   # A charging session starts when a car is plugged in: the default vehicle,

@@ -10,6 +10,7 @@ import GuestCard from '../components/GuestCard.vue'
 import ObservingBanner from '../components/ObservingBanner.vue'
 import PowerChargeStatus from '../components/PowerChargeStatus.vue'
 import PlotlyChart from '../components/PlotlyChart.js'
+import { series, withAlpha } from '../lib/chartTheme'
 import { useCars } from '../composables/useCars'
 import { usePowerFlow } from '../composables/usePowerFlow'
 import { useToday } from '../composables/useToday'
@@ -33,14 +34,15 @@ onUnmounted(() => clearInterval(timer))
 const nowMarker = computed(() => {
   const x = plotTime(now.value.toISOString())
   return {
-    shapes: [{ type: 'line', xref: 'x', yref: 'paper', x0: x, x1: x, y0: 0, y1: 1, line: { color: '#8d9891', width: 1.5, dash: 'dot' } }],
+    shapes: [{ type: 'line', xref: 'x', yref: 'paper', x0: x, x1: x, y0: 0, y1: 1, line: { color: series().neutral, width: 1.5, dash: 'dot' } }],
     annotations: [{ x, xref: 'x', yref: 'paper', y: 1.02, yanchor: 'bottom', text: 'now', showarrow: false, font: { size: 10 } }],
   }
 })
 
 // ── today: measured so far (solid) and planned ahead (dashed) ──
-const C = { solar: '#d99a00', home: '#5f6fc4', soc: '#12805c' }
 const todayTraces = computed(() => {
+  const c = series()
+  const C = { solar: c.solar, home: c.home, soc: c.battery }
   const nowMs = now.value.getTime()
   const past = measured.value
   const ahead = planned.value.filter(p => new Date(p.t).getTime() >= nowMs - 15 * 60_000)
@@ -49,7 +51,7 @@ const todayTraces = computed(() => {
   const line = (name: string, rows: typeof past, key: 'solarKw' | 'homeKw', color: string, future: boolean, fill = false) => ({
     name: future ? `${name}, expected` : name, mode: 'lines', x: x(rows), y: rows.map(p => p[key]),
     line: { color, width: future ? 1.6 : 2, dash: future ? 'dot' : 'solid', shape: 'hv' },
-    ...(fill ? { fill: 'tozeroy', fillcolor: future ? 'rgba(217,154,0,.10)' : 'rgba(217,154,0,.25)' } : {}),
+    ...(fill ? { fill: 'tozeroy', fillcolor: withAlpha(color, future ? 0.1 : 0.25) } : {}),
     legendgroup: name, showlegend: !future,
     hovertemplate: `%{x|%H:%M}  %{y:.2f} kW<extra>${future ? `${name}, expected` : name}</extra>`,
   })
@@ -86,12 +88,13 @@ const todayLayout = computed(() => {
 // ── prices ahead ──
 const priceTraces = computed(() => {
   if (!prices.value.length) return []
+  const color = series().import
   const x = prices.value.map(p => plotTime(p.t))
   const y = (estimated: boolean) => prices.value.map(p => (p.estimated === estimated ? p.price * 100 : null))
   return [
-    { name: 'Import price', mode: 'lines', x, y: y(false), line: { color: '#c2553f', width: 2, shape: 'hv' }, connectgaps: false,
+    { name: 'Import price', mode: 'lines', x, y: y(false), line: { color, width: 2, shape: 'hv' }, connectgaps: false,
       hovertemplate: '%{x|%a %H:%M}  %{y:.1f} ct/kWh<extra></extra>' },
-    { name: 'Estimated', mode: 'lines', x, y: y(true), line: { color: '#c2553f', width: 1.6, dash: 'dot', shape: 'hv' }, connectgaps: false,
+    { name: 'Estimated', mode: 'lines', x, y: y(true), line: { color, width: 1.6, dash: 'dot', shape: 'hv' }, connectgaps: false,
       hovertemplate: '%{x|%a %H:%M}  %{y:.1f} ct/kWh<extra>estimated</extra>' },
   ]
 })
@@ -139,9 +142,9 @@ const kwh = (v: number | null | undefined) => (v == null ? '—' : `${fmt(v, v <
 <template>
   <div v-if="firstStart" class="home">
     <section class="panel full welcome" aria-label="Get started" data-testid="first-start">
-      <h2>Welcome to Energy Assistant</h2>
+      <h2>Welcome to Nornwatt</h2>
       <p class="text-muted-foreground text-sm">
-        Nothing is set up yet. Add your devices and Energy Assistant starts planning: when to charge
+        Nothing is set up yet. Add your devices and Nornwatt starts planning: when to charge
         the battery and the car, and when to run the loads, at the lowest cost.
       </p>
       <ol class="steps">

@@ -8,7 +8,7 @@ import { deviceLink, learnedDeviceId } from '../lib/deviceLinks'
 import { LEARNED_KINDS, learnedHeadline, learnedKind, learnedStatus } from '../lib/learned'
 import { vehicles } from '../stores/inventory'
 
-// Everything Energy Assistant learns, at a glance: which models exist,
+// Everything Nornwatt learns, at a glance: which models exist,
 // whether planning uses them and how accurate they are.  The charts of a
 // model are on its device's page.
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -51,7 +51,7 @@ const name = (item: any) => item.label ?? labelOf(learnedDeviceId(item))
       <h2>Nothing is learned yet</h2>
       <p>
         Give a consumer a learned forecast, or add a battery or a load kept between two thresholds
-        (aquarium cooler, AC, …), and what Energy Assistant learns about it appears here.
+        (aquarium cooler, AC, …), and what Nornwatt learns about it appears here.
       </p>
       <RouterLink class="btn btn-primary" to="/settings/devices">Open device settings</RouterLink>
     </div>

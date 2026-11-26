@@ -1,8 +1,8 @@
 # Synchronise CyberDNS/hassio-addons-repository after source-repo events.
 #
 # Trigger behaviour:
-#   push to main       → open/update PR for energy-assistant-dev  (dev channel)
-#   release published  → open/update PR for energy-assistant-edge (edge channel)
+#   push to main       → open/update PR for nornwatt-dev  (dev channel)
+#   release published  → open/update PR for nornwatt-edge (edge channel)
 #
 # There is no direct path to the prod channel here. Promoting an already
 # published (and validated) edge version to prod is a separate, manual step —
@@ -43,7 +43,7 @@ jobs:
       contents: read
 
     steps:
-      - name: Checkout energy-assistant (source)
+      - name: Checkout nornwatt (source)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -64,10 +64,10 @@ jobs:
 
           if [[ "${{ github.event_name }}" == "release" ]]; then
             CHANNEL="edge"
-            ADDON_FOLDER="energy-assistant-edge"
+            ADDON_FOLDER="nornwatt-edge"
             VERSION="${RELEASE_TAG#v}"
-            PR_TITLE="chore(energy-assistant-edge): bump to ${RELEASE_TAG}"
-            PR_BODY="Automated sync from CyberDNS/energy-assistant release [${RELEASE_TAG}](${RELEASE_URL})."
+            PR_TITLE="chore(nornwatt-edge): bump to ${RELEASE_TAG}"
+            PR_BODY="Automated sync from CyberDNS/nornwatt release [${RELEASE_TAG}](${RELEASE_URL})."
 
             {
               echo "changelog_entry<<EOF_ENTRY"
@@ -76,14 +76,14 @@ jobs:
             } >> "$GITHUB_OUTPUT"
           else
             CHANNEL="dev"
-            ADDON_FOLDER="energy-assistant-dev"
+            ADDON_FOLDER="nornwatt-dev"
             VERSION="${BASE_VERSION}-dev"
-            PR_TITLE="chore(energy-assistant-dev): sync dev snapshot ${SHORT_SHA}"
-            PR_BODY="Automated sync from CyberDNS/energy-assistant commit [${SHORT_SHA}](https://github.com/CyberDNS/energy-assistant/commit/${GITHUB_SHA}) on \`main\`."
+            PR_TITLE="chore(nornwatt-dev): sync dev snapshot ${SHORT_SHA}"
+            PR_BODY="Automated sync from CyberDNS/nornwatt commit [${SHORT_SHA}](https://github.com/CyberDNS/nornwatt/commit/${GITHUB_SHA}) on \`main\`."
 
             {
               echo "changelog_entry<<EOF_ENTRY"
-              echo "Dev snapshot from \`main\` (commit [${SHORT_SHA}](https://github.com/CyberDNS/energy-assistant/commit/${GITHUB_SHA}))."
+              echo "Dev snapshot from \`main\` (commit [${SHORT_SHA}](https://github.com/CyberDNS/nornwatt/commit/${GITHUB_SHA}))."
               echo "EOF_ENTRY"
             } >> "$GITHUB_OUTPUT"
           fi
@@ -124,17 +124,17 @@ jobs:
             echo "Creating new add-on folder: ${ADDON_FOLDER}"
             mkdir -p "$TARGET"
 
-            DEV_CONFIG="hassio-addons-repository/energy-assistant-dev/config.yaml"
+            DEV_CONFIG="hassio-addons-repository/nornwatt-dev/config.yaml"
             if [[ -f "$DEV_CONFIG" ]]; then
               cp "$DEV_CONFIG" "${TARGET}/config.yaml"
               for f in icon.png logo.png README.md Dockerfile; do
-                [[ -f "hassio-addons-repository/energy-assistant-dev/$f" ]] && \
-                  cp "hassio-addons-repository/energy-assistant-dev/$f" "${TARGET}/$f"
+                [[ -f "hassio-addons-repository/nornwatt-dev/$f" ]] && \
+                  cp "hassio-addons-repository/nornwatt-dev/$f" "${TARGET}/$f"
               done
             fi
 
-            SLUG="energy-assistant-edge"
-            NAME="Energy Assistant (edge)"
+            SLUG="nornwatt-edge"
+            NAME="Nornwatt (edge)"
             DESC="Open-source, vendor-neutral energy management platform for homeowners (edge channel — validated pre-release builds)"
             SLUG="${SLUG}" NAME="${NAME}" DESC="${DESC}" \
               yq e '.slug = env(SLUG) | .name = env(NAME) | .description = env(DESC)' \

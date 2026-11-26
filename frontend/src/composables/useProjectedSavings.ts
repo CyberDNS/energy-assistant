@@ -1,7 +1,7 @@
 import { ref } from 'vue'
 import { fetchSavings } from '../api.js'
 
-// Projected savings (observe mode, issue #134): what Energy Assistant would
+// Projected savings (observe mode, issue #134): what Nornwatt would
 // have saved had it controlled the devices it only observes — a simulation,
 // see core/projection.py.  ``null`` before the first projected slot.
 /* eslint-disable @typescript-eslint/no-explicit-any */

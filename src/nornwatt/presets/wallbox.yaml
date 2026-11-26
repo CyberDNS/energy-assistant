@@ -1,0 +1,37 @@
+title: Wallbox charger (Wallbox integration)
+category: charger
+integration: Wallbox (Home Assistant core)
+url: https://www.home-assistant.io/integrations/wallbox/
+verified: false
+description: >-
+  Charging current (A) plus the Pause/resume switch.  Nornwatt follows
+  the PV surplus itself by changing the current.  Entity ids are built from
+  the device name; check them under Settings → Entities.  The power sensor is
+  in kW (converted).  Not yet checked on a real Wallbox.
+variables:
+  prefix:
+    label: Entity prefix (device name)
+    example: wallbox_pulsar_plus
+device:
+  type: homeassistant_charger
+  settings: { phases: 3 }
+  capabilities:
+    power_w: { entity: "sensor.{prefix}_charging_power" }
+    plugged:
+      entity: "sensor.{prefix}_status_description"
+      "on":
+        - Charging
+        - Paused
+        - Scheduled
+        - Waiting for car demand
+        - Waiting
+        - Locked, car connected
+        - Waiting in queue by Power Sharing
+        - Waiting in queue by Power Boost
+        - Waiting in queue by Eco-Smart
+    power_setpoint:
+      control: current
+      current: "number.{prefix}_maximum_charging_current"
+      enable: "switch.{prefix}_pause_resume"
+      max_current_a: 32
+  params: { min_power_kw: 4.14, max_power_kw: 11 }

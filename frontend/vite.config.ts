@@ -14,14 +14,14 @@ export default defineConfig({
   build: {
     // Into the Python package: the server serves it from there, in a dev
     // checkout and in the wheel alike (see server/__init__.py).
-    outDir: '../src/energy_assistant/frontend',
+    outDir: '../src/nornwatt/frontend',
     emptyOutDir: true,
     chunkSizeWarningLimit: 1200,
   },
   server: {
-    // `npm run dev` against a running Energy Assistant (default: local server).
+    // `npm run dev` against a running Nornwatt (default: local server).
     proxy: {
-      '/api': { target: process.env.EA_API ?? 'http://localhost:8088', changeOrigin: true },
+      '/api': { target: process.env.NORNWATT_API ?? 'http://localhost:8088', changeOrigin: true },
     },
   },
   test: {

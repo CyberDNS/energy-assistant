@@ -1,15 +1,18 @@
 import { ref, computed } from 'vue'
 import { fetchSavings } from '../api.js'
+import { series } from '../lib/chartTheme.ts'
 
 // Savings against a simulated uncontrolled house (see core/savings.py).
 // All values in €.
 
-const C_SAVING   = '#4caf7d'
-const C_LOSS     = '#e07070'
-const C_UNCTRL   = '#9aa5a0'
-const C_REAL     = '#6b7bb5'
-const C_CAR      = '#d08a2e'
-const C_PRICE    = '#ad7b00'
+// Series colours of the theme (styles/main.css), read when a chart is built.
+function colors() {
+  const c = series()
+  return {
+    saving: c.saving, loss: c.import, uncontrolled: c.neutral, real: c.battery,
+    car: c.car, price: c.solar, device: c.home,
+  }
+}
 
 const HOUR_MS = 3600000
 const DAY_MS  = 24 * HOUR_MS
@@ -114,7 +117,7 @@ export function useSavings(initial = RANGES[0]) {
     const y = perSlot ? slots.value.map(r => r.saving) : buckets.value.map(b => b.real)
     return [{
       name: 'Saving', type: 'bar', x: perSlot ? slotX.value : x.value, y,
-      marker: { color: y.map(v => (v >= 0 ? C_SAVING : C_LOSS)) },
+      marker: { color: y.map(v => (v >= 0 ? colors().saving : colors().loss)) },
       hovertemplate: perSlot ? SLOT_HOVER : HOVER.value,
     }]
   })
@@ -128,7 +131,7 @@ export function useSavings(initial = RANGES[0]) {
   const priceTrace = () => ({
     name: 'Import price', mode: 'lines', x: slotX.value, yaxis: 'y2',
     y: (slots.value ?? []).map(s => s.import_price),
-    line: { shape: 'hv', width: 1.3, color: C_PRICE, dash: 'dot' },
+    line: { shape: 'hv', width: 1.3, color: colors().price, dash: 'dot' },
     hovertemplate: '%{x|%H:%M}  %{y:.3f} €/kWh<extra>Import price</extra>',
   })
 
@@ -138,11 +141,11 @@ export function useSavings(initial = RANGES[0]) {
     const r = slots.value ?? []
     return [
       { name: 'Uncontrolled', mode: 'lines', x: slotX.value, y: r.map(s => s.uncontrolled_stored_kwh),
-        line: { shape: 'hv', width: 2, color: C_UNCTRL, dash: 'dash' }, customdata: storedText('uncontrolled'),
+        line: { shape: 'hv', width: 2, color: colors().uncontrolled, dash: 'dash' }, customdata: storedText('uncontrolled'),
         hovertemplate: '%{x|%H:%M}  %{y:.2f} kWh<br>%{customdata}<extra>Uncontrolled</extra>' },
       { name: 'Real (shaded: difference)', mode: 'lines', x: slotX.value, y: r.map(s => s.real_stored_kwh),
         fill: 'tonexty', fillcolor: 'rgba(107,123,181,.18)',
-        line: { shape: 'hv', width: 2.5, color: C_REAL }, customdata: storedText('real'),
+        line: { shape: 'hv', width: 2.5, color: colors().real }, customdata: storedText('real'),
         hovertemplate: '%{x|%H:%M}  %{y:.2f} kWh<br>%{customdata}<extra>Real</extra>' },
       priceTrace(),
     ]
@@ -152,7 +155,6 @@ export function useSavings(initial = RANGES[0]) {
   // device), built from the groups the server reports.  Short windows show
   // what the group did per slot; longer ones the group's saving per bar.
   const groups = computed(() => data.value?.groups ?? [])
-  const C_DEVICE = '#2f8f83'
   const groupSaving = id => totals.value?.components?.[id] ?? 0
   const breakdown = computed(() => {
     const comps = totals.value?.components ?? {}
@@ -168,11 +170,11 @@ export function useSavings(initial = RANGES[0]) {
     if (![...realK, ...uncK].some(v => v > 0.01)) return []
     return [
       { name: 'Uncontrolled car', mode: 'lines', x: slotX.value, y: cumulative(uncK),
-        line: { shape: 'hv', width: 2, color: C_CAR, dash: 'dash' },
+        line: { shape: 'hv', width: 2, color: colors().car, dash: 'dash' },
         hovertemplate: '%{x|%H:%M}  %{y:.1f} kWh<extra>Uncontrolled car</extra>' },
       { name: 'Real car (shaded: difference)', mode: 'lines', x: slotX.value, y: cumulative(realK),
         fill: 'tonexty', fillcolor: 'rgba(208,138,46,.18)',
-        line: { shape: 'hv', width: 2.5, color: C_CAR },
+        line: { shape: 'hv', width: 2.5, color: colors().car },
         hovertemplate: '%{x|%H:%M}  %{y:.1f} kWh<extra>Real car</extra>' },
       priceTrace(),
     ]
@@ -194,10 +196,10 @@ export function useSavings(initial = RANGES[0]) {
         customdata: r.map(s => kw(d(s).unc_kwh, s.hours)),
         hovertemplate: '%{x|%H:%M}  %{customdata:.2f} kW<extra>Running, thermostat</extra>' },
       { name: 'Simulated thermostat', mode: 'lines', x: slotX.value, y: r.map(s => d(s).unc_value),
-        line: { shape: 'linear', width: 2, color: C_UNCTRL, dash: 'dash' },
+        line: { shape: 'linear', width: 2, color: colors().uncontrolled, dash: 'dash' },
         hovertemplate: '%{x|%H:%M}  %{y:.2f} ' + (g.unit ?? '') + '<extra>Thermostat</extra>' },
       { name: 'Measured', mode: 'lines', x: slotX.value, y: r.map(s => d(s).real_value),
-        line: { shape: 'linear', width: 2.5, color: C_DEVICE },
+        line: { shape: 'linear', width: 2.5, color: colors().device },
         hovertemplate: '%{x|%H:%M}  %{y:.2f} ' + (g.unit ?? '') + '<extra>Measured</extra>' },
     ]
   }
@@ -209,7 +211,7 @@ export function useSavings(initial = RANGES[0]) {
     const y = buckets.value.map(b => b.components?.[g.id] ?? 0)
     return [{
       name: 'Saving', type: 'bar', x: x.value, y,
-      marker: { color: y.map(v => (v >= 0 ? C_SAVING : C_LOSS)) }, hovertemplate: HOVER.value,
+      marker: { color: y.map(v => (v >= 0 ? colors().saving : colors().loss)) }, hovertemplate: HOVER.value,
     }]
   }
 
@@ -232,7 +234,7 @@ export function useSavings(initial = RANGES[0]) {
     } else {
       traces = deviceSlotTraces(g)
       const lim = y => ({ type: 'line', xref: 'paper', x0: 0, x1: 1, y0: y, y1: y,
-                          line: { color: C_LOSS, width: 1, dash: 'dot' } })
+                          line: { color: colors().loss, width: 1, dash: 'dot' } })
       layout_ = {
         ...layout(),
         yaxis: { title: g.unit || 'value' },
@@ -263,12 +265,12 @@ export function useSavings(initial = RANGES[0]) {
       start == null || b.stored_position_end == null ? null : booked[i] + b.stored_position_end - start)
     const traces = [{
       name: 'Saving', mode: 'lines', x: x.value, y: booked,
-      line: { color: C_SAVING, width: 2.5, shape: 'hv' },
+      line: { color: colors().saving, width: 2.5, shape: 'hv' },
       fill: 'tozeroy', fillcolor: 'rgba(76,175,125,.12)', hovertemplate: HOVER.value,
     }]
     if (withStored.some(v => v != null)) traces.push({
       name: 'Incl. stored energy', mode: 'lines', x: x.value, y: withStored,
-      line: { color: C_SAVING, width: 1.5, shape: 'hv', dash: 'dot' }, hovertemplate: HOVER.value,
+      line: { color: colors().saving, width: 1.5, shape: 'hv', dash: 'dot' }, hovertemplate: HOVER.value,
     })
     return traces
   })
@@ -276,10 +278,10 @@ export function useSavings(initial = RANGES[0]) {
   const costTraces = computed(() => [
     { name: 'Uncontrolled house', type: 'bar', x: x.value,
       y: buckets.value.map(b => b.uncontrolled_cost),
-      marker: { color: C_UNCTRL }, hovertemplate: HOVER.value },
+      marker: { color: colors().uncontrolled }, hovertemplate: HOVER.value },
     { name: 'Real house', type: 'bar', x: x.value,
       y: buckets.value.map(b => b.real_cost),
-      marker: { color: C_REAL }, hovertemplate: HOVER.value },
+      marker: { color: colors().real }, hovertemplate: HOVER.value },
   ])
 
   // One layout object per chart: Plotly writes the computed axis ranges
@@ -289,7 +291,7 @@ export function useSavings(initial = RANGES[0]) {
       type: 'date', tickangle: 0, tickmode: 'linear',
       tick0: '2000-01-03', ...range.value.tick,
     },
-    yaxis: { title: '€', zeroline: true, zerolinecolor: '#9aa5a0' },
+    yaxis: { title: '€', zeroline: true, zerolinecolor: colors().uncontrolled },
     ...extra,
   })
   const savingLayout     = computed(() => layout({ showlegend: false }))

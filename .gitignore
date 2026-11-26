@@ -11,7 +11,7 @@ build/
 
 # Web UI: dependencies and the Vite build (frontend/ → the Python package)
 node_modules/
-src/energy_assistant/frontend/
+src/nornwatt/frontend/
 
 # Testing
 .pytest_cache/
@@ -25,17 +25,17 @@ htmlcov/
 # OS
 .DS_Store
 
-# Energy Assistant — sensitive files (NEVER commit these)
+# Nornwatt — sensitive files (NEVER commit these)
 secrets.yaml
 secrets.yaml.bak
 *.key
 *.pem
 
-# Energy Assistant — local device configuration (user/device-specific, not for git)
+# Nornwatt — local device configuration (user/device-specific, not for git)
 config.yaml
 config.yaml.bak
 
-# Energy Assistant — runtime data (SQLite databases, generated at runtime)
+# Nornwatt — runtime data (SQLite databases, generated at runtime)
 data/
 *.db
 logs/

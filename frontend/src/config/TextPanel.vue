@@ -3,7 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { fetchConfigText, saveConfigText } from '../api.js'
 
 // config.yaml as text: for what the forms do not cover, and the way out when
-// the file cannot be read at all (invalid YAML).  While Energy Assistant runs,
+// the file cannot be read at all (invalid YAML).  While Nornwatt runs,
 // only a valid file is accepted; while it waits for a configuration, every
 // save is kept and its remaining problems are listed.
 const emit = defineEmits<{ notice: [message: string | null], saved: [] }>()

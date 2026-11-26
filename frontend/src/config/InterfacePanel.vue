@@ -51,7 +51,7 @@ function setKiosk(value: boolean) {
         <span>
           <span class="cfg-name">Use the whole screen in Home Assistant</span>
           <span class="cfg-hint block">
-            Opened from the Home Assistant sidebar, Energy Assistant hides Home Assistant's own sidebar and header
+            Opened from the Home Assistant sidebar, Nornwatt hides Home Assistant's own sidebar and header
             and shows its menu instead. The "Home Assistant" button at the bottom of the menu brings Home Assistant's
             sidebar back. Turn this off to keep both side by side.
           </span>

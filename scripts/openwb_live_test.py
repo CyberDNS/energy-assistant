@@ -35,11 +35,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from energy_assistant.config.yaml import YamlConfigLoader  # noqa: E402
-from energy_assistant.core.models import DeviceCommand  # noqa: E402
-from energy_assistant.core.plugin_registry import BuildContext  # noqa: E402
-from energy_assistant.plugins import registry  # noqa: E402
-from energy_assistant.plugins.openwb_mqtt.device import _normalize_mode  # noqa: E402
+from nornwatt.config.yaml import YamlConfigLoader  # noqa: E402
+from nornwatt.core.models import DeviceCommand  # noqa: E402
+from nornwatt.core.plugin_registry import BuildContext  # noqa: E402
+from nornwatt.plugins import registry  # noqa: E402
+from nornwatt.plugins.openwb_mqtt.device import _normalize_mode  # noqa: E402
 
 PHASES = 3
 VOLTAGE = 230.0

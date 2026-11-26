@@ -4,7 +4,8 @@ import type { Status } from '@/composables/usePowerFlow'
 import { PanelLeft } from '@lucide/vue'
 import { computed, inject, watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
-import logo from '@/assets/logo.svg'
+import BrandMark from '@/components/BrandMark.vue'
+import BrandWordmark from '@/components/BrandWordmark.vue'
 import HomeAssistantIcon from '@/components/HomeAssistantIcon.vue'
 import {
   Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent, SidebarGroupLabel,
@@ -41,10 +42,10 @@ function openHomeAssistant() {
     <SidebarHeader class="pt-[calc(var(--device-inset-top)+0.5rem)]">
       <SidebarMenu>
         <SidebarMenuItem>
-          <SidebarMenuButton size="lg" as-child tooltip="Energy Assistant">
+          <SidebarMenuButton size="lg" as-child tooltip="Nornwatt">
             <RouterLink to="/">
-              <img :src="logo" alt="" class="size-8 shrink-0">
-              <span class="truncate text-base font-semibold tracking-tight">Energy Assistant</span>
+              <BrandMark class="!size-8 shrink-0" aria-hidden="true" />
+              <BrandWordmark class="!h-[15px] !w-[107px] shrink-0" />
             </RouterLink>
           </SidebarMenuButton>
         </SidebarMenuItem>
@@ -94,7 +95,7 @@ function openHomeAssistant() {
         :is="versionUrl ? 'a' : 'span'" v-if="versionInfo"
         :href="versionUrl ?? undefined" target="_blank" rel="noopener"
         class="text-muted-foreground hover:text-foreground truncate px-2 text-xs tabular-nums group-data-[collapsible=icon]:hidden"
-        :title="`Energy Assistant ${versionInfo.version}`" data-testid="app-version"
+        :title="`Nornwatt ${versionInfo.version}`" data-testid="app-version"
       >
         v{{ versionInfo.version }}
       </component>

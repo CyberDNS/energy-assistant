@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# ── Energy Assistant — production container image ───────────────────────────
+# ── Nornwatt — production container image ───────────────────────────
 # Multi-stage build: build the web UI with Node, compile/install the Python
 # dependencies in a builder stage, then copy only the installed package into a
 # minimal runtime image.
@@ -23,7 +23,7 @@ COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci --no-audit --no-fund
 
 COPY frontend/ ./
-# Writes to /build/src/energy_assistant/frontend (see frontend/vite.config.ts)
+# Writes to /build/src/nornwatt/frontend (see frontend/vite.config.ts)
 RUN npm run build
 
 # --------------------------------------------------------------------------
@@ -50,7 +50,7 @@ RUN pip install --no-cache-dir uv
 # (maximises Docker layer cache — source changes don't invalidate deps)
 COPY pyproject.toml uv.lock* README.md ./
 COPY src/ ./src/
-COPY --from=frontend /build/src/energy_assistant/frontend ./src/energy_assistant/frontend
+COPY --from=frontend /build/src/nornwatt/frontend ./src/nornwatt/frontend
 
 # Install the package and its runtime dependencies into an isolated prefix
 RUN uv pip install --system --no-cache .
@@ -60,14 +60,14 @@ RUN uv pip install --system --no-cache .
 # --------------------------------------------------------------------------
 FROM python:${PYTHON_VERSION}-slim AS runtime
 
-LABEL org.opencontainers.image.title="Energy Assistant"
+LABEL org.opencontainers.image.title="Nornwatt"
 LABEL org.opencontainers.image.description="Open-source, vendor-neutral energy management platform"
-LABEL org.opencontainers.image.source="https://github.com/CyberDNS/energy-assistant"
+LABEL org.opencontainers.image.source="https://github.com/CyberDNS/nornwatt"
 LABEL org.opencontainers.image.licenses="MIT"
 
 # Create a non-root user for security
-RUN groupadd --gid 1000 energyassistant \
-    && useradd --uid 1000 --gid energyassistant --no-create-home energyassistant
+RUN groupadd --gid 1000 nornwatt \
+    && useradd --uid 1000 --gid nornwatt --no-create-home nornwatt
 
 WORKDIR /app
 
@@ -75,14 +75,14 @@ WORKDIR /app
 # Copying /usr/local/lib captures all Python site-packages regardless of the
 # exact Python micro-version directory name.
 COPY --from=builder /usr/local/lib /usr/local/lib
-COPY --from=builder /usr/local/bin/energy-assistant /usr/local/bin/energy-assistant
+COPY --from=builder /usr/local/bin/nornwatt /usr/local/bin/nornwatt
 
 # Runtime data and config directories
 # Config is expected to be mounted at /config/config.yaml
 # Data (SQLite DB) is persisted at /data
-RUN mkdir -p /config /data && chown energyassistant:energyassistant /config /data
+RUN mkdir -p /config /data && chown nornwatt:nornwatt /config /data
 
-USER energyassistant
+USER nornwatt
 
 # Default environment
 ENV LOG_LEVEL=INFO
@@ -92,8 +92,8 @@ ENV LOG_LEVEL=INFO
 # the cached layers above.
 ARG GIT_COMMIT=""
 ARG BUILD_CHANNEL=""
-ENV ENERGY_ASSISTANT_COMMIT=${GIT_COMMIT} \
-    ENERGY_ASSISTANT_CHANNEL=${BUILD_CHANNEL}
+ENV NORNWATT_COMMIT=${GIT_COMMIT} \
+    NORNWATT_CHANNEL=${BUILD_CHANNEL}
 
 # API port (default in application is 8088; override via config.yaml server.port)
 EXPOSE 8088
@@ -103,4 +103,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8088/health')" || exit 1
 
 # Entrypoint: pass config path and db path from well-known container locations
-ENTRYPOINT ["energy-assistant", "/config/config.yaml", "--db", "/data/history.db"]
+ENTRYPOINT ["nornwatt", "/config/config.yaml", "--db", "/data/history.db"]

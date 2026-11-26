@@ -4,7 +4,7 @@ import { setDeviceControl } from '../api.js'
 import { Switch } from '@/components/ui/switch'
 import { useProjectedSavings } from '../composables/useProjectedSavings'
 
-// Observe mode (issue #134): whether Energy Assistant controls this device or
+// Observe mode (issue #134): whether Nornwatt controls this device or
 // only observes it, with a switch to change it and, while observing, what
 // control would have saved so far (simulated).
 const props = defineProps<{
@@ -58,33 +58,33 @@ async function confirm() {
       <label class="flex items-center gap-2 text-sm">
         <Switch
           :model-value="!observing" :disabled="saving || asking != null"
-          :aria-label="via ? `Let Energy Assistant control ${via}` : 'Let Energy Assistant control this device'"
+          :aria-label="via ? `Let Nornwatt control ${via}` : 'Let Nornwatt control this device'"
           data-testid="control-switch"
           @update:model-value="ask($event)"
         />
-        {{ via ? `Let Energy Assistant control ${via}` : 'Let Energy Assistant control this device' }}
+        {{ via ? `Let Nornwatt control ${via}` : 'Let Nornwatt control this device' }}
       </label>
     </div>
 
     <p v-if="via" class="panel-hint">This device is controlled through {{ via }}; the switch applies to both.</p>
     <p v-if="observing" class="panel-hint">
-      Energy Assistant plans this device and logs what it would send, but sends it nothing:
+      Nornwatt plans this device and logs what it would send, but sends it nothing:
       it keeps running on its own logic.
       <template v-if="saving_eur != null">
         With control it would have saved <b data-testid="projected-saving">{{ eur(saving_eur) }}</b>
         since {{ since }} (simulated).
       </template>
     </p>
-    <p v-else class="panel-hint">Energy Assistant sends this device its commands according to the plan.</p>
+    <p v-else class="panel-hint">Nornwatt sends this device its commands according to the plan.</p>
 
     <div v-if="asking" class="confirm" role="alertdialog" data-testid="control-confirm">
       <p v-if="asking === 'active'">
-        From the next control step (within a minute) Energy Assistant takes over this device and
+        From the next control step (within a minute) Nornwatt takes over this device and
         sends it commands according to the plan: it may charge, discharge, stop or switch it
         against its own logic. You can switch back to observing at any time.
       </p>
       <p v-else>
-        Energy Assistant stops sending commands and hands the device back to its own logic right
+        Nornwatt stops sending commands and hands the device back to its own logic right
         away. It keeps planning it and shows what control would have saved.
       </p>
       <ul v-if="errors.length" class="ev-error">

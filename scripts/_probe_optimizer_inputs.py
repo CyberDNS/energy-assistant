@@ -5,11 +5,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from energy_assistant.config.yaml import YamlConfigLoader
-from energy_assistant.loader.device_loader import build as build_from_config
-from energy_assistant.core.models import ForecastPoint, ForecastQuantity
-from energy_assistant.plugins import registry as plugin_registry
-from energy_assistant.core.plugin_registry import BuildContext
+from nornwatt.config.yaml import YamlConfigLoader
+from nornwatt.loader.device_loader import build as build_from_config
+from nornwatt.core.models import ForecastPoint, ForecastQuantity
+from nornwatt.plugins import registry as plugin_registry
+from nornwatt.core.plugin_registry import BuildContext
 
 
 async def main() -> None:
