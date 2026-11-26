@@ -297,6 +297,16 @@ class ControlIntent(BaseModel):
     UI to display the SoC trajectory chart.
     """
 
+    # ── Explanation (MILP optimizer, see plugins/milp_highs/explain.py) ──
+    reason: str | None = None
+    """Why the plan does this in this slot, in a sentence or two."""
+    binding_constraints: list[str] = Field(default_factory=list)
+    """Constraints that limit this slot (``min_soc``, ``max_charge_power``,
+    ``grid_limit``, ``ev_deadline``, …; see ``explain.CONSTRAINT_LABELS``)."""
+    energy_value_eur_per_kwh: float | None = None
+    """Batteries: what one more kWh stored at the end of this slot is worth
+    to the plan (€/kWh; shadow price of the state of charge)."""
+
 
 def intent_display_mode(intent: ControlIntent, is_threshold: bool = False) -> str:
     """Derive a human-readable mode string from an intent's numeric fields.
@@ -405,6 +415,12 @@ class PlanFlow(BaseModel):
     """Primary-zone import price (€/kWh)."""
     export_price: float | None = None
     """Feed-in price (€/kWh)."""
+    marginal_price_eur_per_kwh: float | None = None
+    """What one more kWh of demand in this slot would cost the plan
+    (€/kWh; shadow price of the energy balance): the import price while
+    importing, the feed-in price while exporting, in between when a battery
+    is the marginal source, above the import price when a grid limit or
+    power charge binds."""
 
 
 class EnergyPlan(BaseModel):

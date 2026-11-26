@@ -252,6 +252,10 @@ th.num, td.num { text-align:right; font-variant-numeric:tabular-nums; }
 .ctrl-label { font-weight:600; font-size:.88rem; }
 .ctrl-live { font-size:.82rem; color:var(--muted-foreground); }
 .ctrl-next { font-size:.75rem; color:var(--primary); margin-left:auto; }
+.ctrl-why { display:inline-flex; align-items:center; padding:2px; border-radius:4px; color:var(--muted-foreground); background:none; border:none; cursor:pointer; }
+.ctrl-why:hover, .ctrl-why[data-state=open] { color:var(--primary); }
+.ctrl-reason { z-index:50; max-width:min(360px, 90vw); padding:8px 10px; border-radius:6px; font-size:.8rem; line-height:1.35;
+  background:var(--popover); color:var(--popover-foreground); border:1px solid var(--border); box-shadow:0 4px 12px rgba(0,0,0,.15); }
 
 /* ── responsive ── */
 @media (max-width: 1000px) {

@@ -3,6 +3,9 @@ import { defineComponent, computed, h, onMounted, onUnmounted, ref, watch } from
 import Plotly from 'plotly.js-basic-dist-min'
 import { baseLayout, themeAxes } from '../lib/chartTheme.ts'
 import { isDark } from '../composables/useTheme.ts'
+import { wrapLines } from '../lib/format.ts'
+import { Info } from '@lucide/vue'
+import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
 
 const PLT_OPT = { displayModeBar: false, responsive: true, scrollZoom: false, doubleClick: false }
 
@@ -43,7 +46,9 @@ function buildPowerTraces(device) {
     x: xs,
     y: ys,
     marker: { color: colors },
-    hovertemplate: '%{x|%H:%M}  %{y:.3f} kW<extra></extra>',
+    // The plan's reason for the slot (plugins/milp_highs/explain.py).
+    customdata: steps.map(s => (s.reason ? '<br>' + wrapLines(s.reason).join('<br>') : '')),
+    hovertemplate: '%{x|%H:%M}  %{y:.3f} kW%{customdata}<extra></extra>',
   }]
 
   // Planned state of charge: each step's value is the level at its end;
@@ -136,7 +141,7 @@ const MiniChart = defineComponent({
 
 export default defineComponent({
   name: 'ControllableDeviceRow',
-  components: { MiniChart },
+  components: { MiniChart, Info, PopoverRoot, PopoverTrigger, PopoverPortal, PopoverContent },
   props: { device: { type: Object, required: true } },
 
   setup(props) {
@@ -186,7 +191,9 @@ export default defineComponent({
       return `→ ${nc.mode.replace(/_/g, ' ')} in ${m < 60 ? m + ' min' : fmt(m / 60, 1) + ' h'}`
     })
 
-    return { chart, chartLayout, modePillClass, modeLabel, liveValue, nextChange }
+    const currentReason = computed(() => props.device.plan?.current_reason ?? null)
+
+    return { chart, chartLayout, modePillClass, modeLabel, liveValue, nextChange, currentReason }
   },
 })
 </script>
@@ -197,6 +204,17 @@ export default defineComponent({
       <span class="ctrl-label">{{ device.label }}</span>
       <span class="ctrl-live">{{ liveValue }}</span>
       <span :class="modePillClass">{{ modeLabel }}</span>
+      <!-- Why the plan does this now: behind a button, tap or click to read. -->
+      <PopoverRoot v-if="currentReason">
+        <PopoverTrigger class="ctrl-why" aria-label="Why?" title="Why?">
+          <Info :size="15" />
+        </PopoverTrigger>
+        <PopoverPortal>
+          <PopoverContent side="bottom" align="start" :side-offset="4" class="ctrl-reason">
+            {{ currentReason }}
+          </PopoverContent>
+        </PopoverPortal>
+      </PopoverRoot>
       <span v-if="nextChange" class="ctrl-next">{{ nextChange }}</span>
     </div>
     <MiniChart :traces="chart.traces" :layout="chartLayout" />

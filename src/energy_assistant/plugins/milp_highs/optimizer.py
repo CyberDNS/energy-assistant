@@ -103,6 +103,7 @@ from ...core.models import (
 from ...core.optimizer import OptimizationContext
 from ...core.power_charge import INTERVAL_H, PowerChargeContext, interval_start, month_key
 from ...core.thermal_model import ThermalModel, device_mode
+from .explain import ExplainInputs, explain, solve_duals
 
 _log = logging.getLogger(__name__)
 
@@ -571,12 +572,69 @@ class MilpHigsOptimizer:
             for t, ts in enumerate(timestamps)
         ]
 
+        all_intents = intents + ev_intents + threshold_intents
+        await self._explain(
+            prob, all_intents, flows,
+            ExplainInputs(
+                variables=variables,
+                batteries=batteries,
+                ev_goals=ev_goals,
+                threshold_devices=threshold_devices,
+                timestamps=timestamps,
+                slot_starts=slot_starts,
+                dur_h=dur_h,
+                prices=prices,
+                export_prices=export_prices,
+                terminal_value=terminal_value_basis,
+                mandatory_overlap_h={
+                    (goal.device_id, t): h
+                    for goal in ev_goals
+                    if goal.connected and goal.phase2_required_kwh > 0.01
+                    for t in range(n_steps)
+                    if (h := _mandatory_overlap_h(goal, slot_starts[t], dur_h[t])) > 0
+                },
+            ),
+        )
+
         return EnergyPlan(
             horizon_hours=horizon_h,
             step_minutes=self._step_min,
-            intents=intents + ev_intents + threshold_intents,
+            intents=all_intents,
             flows=flows,
         )
+
+    async def _explain(
+        self,
+        prob: pulp.LpProblem,
+        intents: list[ControlIntent],
+        flows: list[PlanFlow],
+        inputs: ExplainInputs,
+    ) -> None:
+        """Fill in the reasons, binding constraints and shadow prices of the
+        plan (``explain.py``).  Leaves them empty when the duals are
+        unavailable; never fails the plan."""
+        t0 = time.monotonic()
+        duals = await asyncio.to_thread(solve_duals, prob)
+        if duals is None:
+            return
+        try:
+            result = explain(duals, inputs)
+        except Exception:  # noqa: BLE001 — explanations are optional
+            _log.warning("MilpHigsOptimizer: explaining the plan failed", exc_info=True)
+            return
+        slot = {ts: t for t, ts in enumerate(inputs.timestamps)}
+        for flow in flows:
+            t = slot.get(flow.timestep)
+            if t is not None and t < len(result.marginal):
+                flow.marginal_price_eur_per_kwh = result.marginal[t]
+        for intent in intents:
+            r = result.reasons.get((intent.device_id, slot.get(intent.timestep, -1)))
+            if r is None:
+                continue
+            intent.reason = r.reason
+            intent.binding_constraints = r.binding
+            intent.energy_value_eur_per_kwh = r.energy_value
+        _log.debug("MilpHigsOptimizer: plan explained in %.2fs", time.monotonic() - t0)
 
     # ------------------------------------------------------------------
     # Model construction
