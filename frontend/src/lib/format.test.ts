@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { fmt, fmtAgo, fmtPower, fmtPrice } from './format'
+import { fmt, fmtAgo, fmtPower, fmtPrice, wrapLines } from './format'
 
 describe('format', () => {
   it('switches from W to kW at 1000 W, keeping the sign', () => {
@@ -24,5 +24,15 @@ describe('format', () => {
     expect(fmtAgo('2026-11-22T11:59:48Z', now)).toBe('12s ago')
     expect(fmtAgo('2026-11-22T11:55:00Z', now)).toBe('5 min ago')
     expect(fmtAgo(null, now)).toBeNull()
+  })
+
+  it('wraps tooltip text at spaces', () => {
+    expect(wrapLines('Charging from grid at €0.10/kWh for use from 09:00', 25)).toEqual([
+      'Charging from grid at',
+      '€0.10/kWh for use from',
+      '09:00',
+    ])
+    expect(wrapLines('short')).toEqual(['short'])
+    expect(wrapLines(null)).toEqual([])
   })
 })

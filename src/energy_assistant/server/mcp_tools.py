@@ -28,7 +28,8 @@ EV chargers, PV, dynamic tariffs). Nothing here changes the installation.
 
 Good starting points:
 - get_status: live grid power, prices, device states, current setpoints.
-- get_plan: the active optimizer plan (per-slot flows, SoC, prices, intents).
+- get_plan: the active optimizer plan (per-slot flows, SoC, prices, intents),
+  with a reason per device and slot (why it charges, discharges or holds).
 - get_savings / get_savings_slots: savings against a simulated uncontrolled
   house, per rolling window or per accounting slot with all cost components.
 - get_history: measured power/SoC per 5 minutes (kept ~2 weeks) or per hour
@@ -85,7 +86,10 @@ def build_mcp_server(api: FastAPI) -> MCPServer:
     @mcp.tool(annotations=_READ_ONLY)
     async def get_plan() -> dict[str, Any]:
         """The active optimizer plan: per-slot flows (load, PV, storage, EV,
-        stored energy, prices), predicted economics and the control intents."""
+        stored energy, prices, marginal price), predicted economics and the
+        control intents, each with the reason for it ('reason'), the
+        constraints limiting it ('binding_constraints') and, for batteries,
+        the value of one more kWh stored ('energy_value_eur_per_kwh')."""
         return await get("/api/plan", detail="true")
 
     @mcp.tool(annotations=_READ_ONLY)

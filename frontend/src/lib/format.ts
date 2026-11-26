@@ -23,3 +23,20 @@ export function fmtAgo(iso: string | null | undefined, now = Date.now()): string
   const sec = Math.max(0, Math.round((now - new Date(iso).getTime()) / 1000))
   return sec < 90 ? `${sec}s ago` : `${Math.round(sec / 60)} min ago`
 }
+
+/** *text* broken at spaces into lines of at most ~*width* characters
+ *  (a longer word gets a line of its own) — for chart tooltips. */
+export function wrapLines(text: string | null | undefined, width = 60): string[] {
+  const lines: string[] = []
+  let line = ''
+  for (const word of (text ?? '').split(' ').filter(Boolean)) {
+    if (line && line.length + 1 + word.length > width) {
+      lines.push(line)
+      line = word
+    } else {
+      line = line ? `${line} ${word}` : word
+    }
+  }
+  if (line) lines.push(line)
+  return lines
+}
