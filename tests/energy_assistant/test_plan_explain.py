@@ -114,10 +114,14 @@ async def test_explanation_does_not_change_the_plan(monkeypatch) -> None:
     explained = await MilpHigsOptimizer(step_minutes=60).optimize(_ctx(now))
     monkeypatch.setattr(optimizer_module, "solve_duals", lambda prob: None)
     plain = await MilpHigsOptimizer(step_minutes=60).optimize(_ctx(now))
-    assert [i.power_kw for i in explained.intents] == [i.power_kw for i in plain.intents]
-    assert [i.stored_energy_kwh for i in explained.intents] == [
-        i.stored_energy_kwh for i in plain.intents
-    ]
+    # The optimizer reads the wall clock, so the two solves start a few
+    # milliseconds apart and can differ in the last rounded digit.
+    assert [i.power_kw for i in explained.intents] == pytest.approx(
+        [i.power_kw for i in plain.intents], abs=1e-3
+    )
+    assert [i.stored_energy_kwh for i in explained.intents] == pytest.approx(
+        [i.stored_energy_kwh for i in plain.intents], abs=1e-3
+    )
     # Without duals the plan simply carries no reasons.
     assert all(i.reason is None and i.binding_constraints == [] for i in plain.intents)
     assert all(f.marginal_price_eur_per_kwh is None for f in plain.flows)
