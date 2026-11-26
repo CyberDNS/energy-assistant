@@ -22,7 +22,15 @@ export const fetchLedger   = ()           => call('/api/ledger')
 export const fetchVehicles     = ()           => call('/api/vehicles')
 export const fetchControllable = ()           => call('/api/controllable')
 export const fetchConfig   = ()           => call('/api/config')
-export const fetchLearned  = ()           => call('/api/learned')
+// { summary: true }: status and model parameters only (no chart data);
+// { deviceId }: only that device's models.
+/** @param {{ summary?: boolean, deviceId?: string | null }} [opts] */
+export const fetchLearned  = ({ summary = false, deviceId = null } = {}) => {
+  const q = new URLSearchParams()
+  if (summary) q.set('summary', 'true')
+  if (deviceId != null) q.set('device_id', deviceId)
+  return call(q.size ? `/api/learned?${q}` : '/api/learned')
+}
 export const fetchSavings  = (hours)      => call(`/api/savings?hours=${hours}`)
 export const refitLearned  = (id)         => call(`/api/learned/${encodeURIComponent(id)}/refit`, { method: 'POST' })
 

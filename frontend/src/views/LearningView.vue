@@ -18,7 +18,7 @@ const error = ref('')
 
 onMounted(async () => {
   try {
-    items.value = await fetchLearned()
+    items.value = await fetchLearned({ summary: true })
   } catch (e) {
     error.value = String((e as Error).message ?? e)
   } finally {

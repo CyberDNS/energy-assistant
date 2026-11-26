@@ -248,6 +248,10 @@ class TestLearner:
         assert diag["status"] == "learned"
         assert diag["rates"]["drift_per_h"] == pytest.approx(0.2, abs=0.02)
         assert diag["configured"]["running_per_h"][COOL] == pytest.approx(-0.417)
+        assert diag["series"]
+        summary = await learner.diagnostics(detail=False)
+        assert "series" not in summary
+        assert {k: v for k, v in diag.items() if k != "series"} == summary
         point = diag["series"][10]
         assert {"t", "value", "model", "on", "ambient"} <= set(point)
         errors = [abs(p["value"] - p["model"]) for p in diag["series"]]
@@ -340,6 +344,17 @@ class TestApi:
             (item,) = (await c.get("/api/learned")).json()
             assert item["status"] == "learned"
             assert (await c.post("/api/learned/thermal%3Anope/refit")).status_code == 404
+
+            # The Learning overview: no chart data.
+            (item,) = (await c.get("/api/learned", params={"summary": "true"})).json()
+            assert item["status"] == "learned" and "series" not in item
+            # A device page: only that device's models.
+            (item,) = (await c.get("/api/learned", params={"device_id": "aquarium"})).json()
+            assert item["series"] and item["device_id"] == "aquarium"
+            assert (await c.get("/api/learned", params={"device_id": "fridge"})).json() == []
+            # Large responses are compressed.
+            r = await c.get("/api/learned", headers={"Accept-Encoding": "gzip"})
+            assert r.headers.get("content-encoding") == "gzip" and r.json()[0]["series"]
 
 
 async def test_ha_client_get_history_parses_minimal_response() -> None:

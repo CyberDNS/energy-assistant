@@ -167,10 +167,17 @@ class LearnedPvForecast:
         )
         return model
 
-    async def diagnostics(self, horizon: timedelta = timedelta(hours=48)) -> dict[str, Any]:
-        """Model parameters, measured vs. model per day and the forecast."""
+    async def diagnostics(
+        self, horizon: timedelta = timedelta(hours=48), *, detail: bool = True
+    ) -> dict[str, Any]:
+        """Model parameters, measured vs. model per day and the forecast.
+
+        With ``detail=False`` only the status and model parameters, without
+        the days and the forecast (the Learning overview)."""
         await self._ensure_model()
         model = self._model
+        if not detail:
+            return self._diagnostics_summary(model)
         tz = self._local_tz()
         if self._snapshot is None and model is not None:
             try:
@@ -179,18 +186,9 @@ class LearnedPvForecast:
                 self._last_error = str(exc)
         days: list[dict[str, Any]] = []
         if model is not None and self._snapshot is not None:
-            train, measured = self._snapshot
-            pred = model.predict(train)
-            suspect = set(model.suspect_days)
-            per_day: dict[date, list[float]] = {}
-            for s, p, m in zip(train.start, pred, measured):
-                d = per_day.setdefault(s.astimezone(tz).date(), [0.0, 0.0])
-                d[0] += m
-                d[1] += p
-            for d in sorted(per_day)[-_DIAG_DAYS:]:
-                days.append({"date": d.isoformat(), "kwh": round(per_day[d][0], 2),
-                             "model_kwh": round(per_day[d][1], 2),
-                             "status": "suspect" if d.isoformat() in suspect else "used"})
+            # Predicting the whole training history is CPU work (~17k hours):
+            # keep it off the event loop so control and the API stay responsive.
+            days = await asyncio.to_thread(_diag_days, model, self._snapshot, tz)
 
         forecast: dict[str, Any] = {"points": [], "days": []}
         weather = await self._current_weather() if model is not None else None
@@ -210,6 +208,9 @@ class LearnedPvForecast:
                 totals[d] = totals.get(d, 0.0) + p.value
             forecast["days"] = [{"date": d.isoformat(), "kwh": round(v, 1)} for d, v in sorted(totals.items())]
 
+        return {**self._diagnostics_summary(model), "days": days, "forecast": forecast}
+
+    def _diagnostics_summary(self, model: PvModel | None) -> dict[str, Any]:
         return {
             "id": self._id,
             "kind": "pv",
@@ -224,8 +225,6 @@ class LearnedPvForecast:
             "intraday": self._intraday_state,
             "last_error": self._last_error,
             "model": model.to_dict() if model else None,
-            "days": days,
-            "forecast": forecast,
         }
 
     # ------------------------------------------------------------ internals
@@ -364,3 +363,24 @@ class LearnedPvForecast:
             tmp.replace(self._model_path)
         except OSError as exc:
             _log.warning("%s: could not persist model: %s", self._id, exc)
+
+
+def _diag_days(
+    model: PvModel, snapshot: tuple[WeatherSeries, list[float]], tz: tzinfo
+) -> list[dict[str, Any]]:
+    """Measured vs. model energy per local day of the training history (the
+    last ``_DIAG_DAYS``), for the Learning chart."""
+    train, measured = snapshot
+    pred = model.predict(train)
+    suspect = set(model.suspect_days)
+    per_day: dict[date, list[float]] = {}
+    for s, p, m in zip(train.start, pred, measured):
+        d = per_day.setdefault(s.astimezone(tz).date(), [0.0, 0.0])
+        d[0] += m
+        d[1] += p
+    return [
+        {"date": d.isoformat(), "kwh": round(per_day[d][0], 2),
+         "model_kwh": round(per_day[d][1], 2),
+         "status": "suspect" if d.isoformat() in suspect else "used"}
+        for d in sorted(per_day)[-_DIAG_DAYS:]
+    ]

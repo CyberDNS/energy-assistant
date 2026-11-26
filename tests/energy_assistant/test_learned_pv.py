@@ -285,6 +285,10 @@ class TestLearnedPvForecast:
         assert diag["forecast"]["points"] and diag["forecast"]["days"]
         assert diag["model"]["tilt"] == pytest.approx(35, abs=5)
 
+        summary = await provider.diagnostics(detail=False)
+        assert "days" not in summary and "forecast" not in summary
+        assert summary["model"] == diag["model"] and summary["status"] == "fitted"
+
 
 def test_registry_builds_learned_pv_and_needs_home_assistant(tmp_path: Path) -> None:
     cfg = {"type": "learned_pv", "latitude": "49,8", "longitude": 6.4,
@@ -306,7 +310,7 @@ async def test_learned_endpoint_links_the_pv_forecast_to_its_device() -> None:
     class Provider:
         forecast_id = "pv_learned"
 
-        async def diagnostics(self, horizon):
+        async def diagnostics(self, horizon, *, detail=True):
             return {"id": "pv_learned", "kind": "pv", "device_id": None,
                     "history_entity": "sensor.pv_power"}
 

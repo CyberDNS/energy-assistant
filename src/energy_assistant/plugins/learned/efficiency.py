@@ -179,8 +179,9 @@ class EfficiencyLearner:
             "configured_round_trip": round(sc.charge_efficiency * sc.discharge_efficiency, 4),
         }
 
-    async def diagnostics(self) -> dict[str, Any]:
-        """Learning-tab payload."""
+    async def diagnostics(self, *, detail: bool = True) -> dict[str, Any]:
+        """Learning-tab payload; without the cycles and the chart series with
+        ``detail=False`` (the Learning overview)."""
         if self._last_attempt is None:
             await self.refit()
         sc = self.constraints
@@ -194,7 +195,7 @@ class EfficiencyLearner:
         else:
             status = "observing"
         planned = self.apply(sc)
-        return {
+        out = {
             "id": self.id,
             "kind": "efficiency",
             "device_id": sc.device_id,
@@ -217,6 +218,11 @@ class EfficiencyLearner:
                 "discharge_efficiency": planned.discharge_efficiency,
             },
             "estimate": est.to_dict() if est else None,
+        }
+        if not detail:
+            return out
+        return {
+            **out,
             "cycles": [
                 {**c.to_dict(), "round_trip": round(c.round_trip, 4)} for c in self._cycles
             ],

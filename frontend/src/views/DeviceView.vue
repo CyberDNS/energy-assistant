@@ -53,7 +53,7 @@ async function loadPlan() {
 }
 async function loadLearned() {
   try {
-    learned.value = (await fetchLearned()).filter((i: any) => learnedDeviceId(i) === id.value)
+    learned.value = (await fetchLearned({ deviceId: id.value })).filter((i: any) => learnedDeviceId(i) === id.value)
   } catch { /* the section stays away */ }
   // A link from the Learning overview points at this section.
   if (route.hash === '#learned' && learned.value.length) {

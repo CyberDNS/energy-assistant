@@ -194,9 +194,12 @@ class ThermalLearner:
         """Why the last fit failed (or ``"unknown"``)."""
         return self._last_error or "unknown"
 
-    async def diagnostics(self) -> dict[str, Any]:
+    async def diagnostics(self, *, detail: bool = True) -> dict[str, Any]:
         """Learning-tab payload: model, configured rates, fit quality and the
-        measured vs. modelled trajectory of the fitting window."""
+        measured vs. modelled trajectory of the fitting window (left out with
+        ``detail=False``, for the Learning overview)."""
+        if not detail:
+            return self._diagnostics_summary(self.model())
         if self._snapshot is None:
             try:
                 windows = await self._windows(datetime.now(timezone.utc))
@@ -206,7 +209,25 @@ class ThermalLearner:
                 self._snapshot = {"windows": [], "model": self.model()}
         windows = self._snapshot["windows"]
         model = self.model()
-        sim = simulate(model, windows) if windows else []
+        sim = await asyncio.to_thread(simulate, model, windows) if windows else []
+        return {
+            **self._diagnostics_summary(model),
+            # One point per window, at its end: measured value, the open-loop
+            # model (restarted from the measured value every 6 h), and how
+            # much of the window each mode ran.
+            "series": [
+                {
+                    "t": (w.start + timedelta(hours=w.hours)).isoformat(),
+                    "value": w.v1,
+                    "model": round(s, 4),
+                    "on": w.on,
+                    "ambient": w.ambient,
+                }
+                for w, s in zip(windows, sim)
+            ],
+        }
+
+    def _diagnostics_summary(self, model: ThermalModel) -> dict[str, Any]:
         tc = self.constraints
         ref = (tc.bottom_threshold + tc.top_threshold) / 2.0
         mode = device_mode(tc)
@@ -239,19 +260,6 @@ class ThermalLearner:
                 "drift_per_h": configured.drift_rate(ref),
                 "running_per_h": {mode: configured.running_rate(mode, ref)},
             },
-            # One point per window, at its end: measured value, the open-loop
-            # model (restarted from the measured value every 6 h), and how
-            # much of the window each mode ran.
-            "series": [
-                {
-                    "t": (w.start + timedelta(hours=w.hours)).isoformat(),
-                    "value": w.v1,
-                    "model": round(s, 4),
-                    "on": w.on,
-                    "ambient": w.ambient,
-                }
-                for w, s in zip(windows, sim)
-            ],
         }
 
     # -- persistence -------------------------------------------------------
