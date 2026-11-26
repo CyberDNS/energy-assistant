@@ -68,8 +68,8 @@ thermal loads, switches, consumers.  Parsed into `DeviceSpec`
 | `included_in`   | no       | A consumer whose meter already contains this consumer's load |
 | `forecast`, `learning` | no | Consumption forecast (consumers) |
 
-The Config tab of the web UI edits these entries in place (see README,
-"Configuring in the UI"); the file stays the single source of truth.
+The Config tab of the web UI edits these entries in place (see
+[Configuring in the UI](docs/configuration.md#configuring-in-the-ui)); the file stays the single source of truth.
 
 ### Categories
 
@@ -82,7 +82,7 @@ The Config tab of the web UI edits these entries in place (see README,
 | `thermal_load` | `temperature_c` | `bottom_threshold`, `top_threshold`, `active_rate_per_h`, `drift_rate_per_h` (required), `direction`, `unit`, `min_runtime_h`, `min_offtime_h` | `metered_by`, `controlled_by` → switch (required) |
 | `switch`       | `switch` | `rated_power_w` (required when it controls a thermal load) | `metered_by`; controls at most one device |
 | `consumer`     | — | — | `metered_by`, `controlled_by` → switch, `included_in` → consumer |
-| `vehicle`      | `soc_pct` | `capacity_kwh` (required), `charge_limit_soc_pct`, `charge_curve`, `max_charge_kw`, `charger_ids`, `push_soc_to_charger`, … | dynamic: a charging session at a charger (see README "Vehicles and chargers") |
+| `vehicle`      | `soc_pct` | `capacity_kwh` (required), `charge_limit_soc_pct`, `charge_curve`, `max_charge_kw`, `charger_ids`, `push_soc_to_charger`, … | dynamic: a charging session at a charger (see [Vehicles and chargers](docs/devices.md#vehicles-and-chargers)) |
 | `sensor`       | — | — | — |
 
 Plugins declare which categories they can serve and which capabilities they
