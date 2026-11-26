@@ -3259,6 +3259,7 @@ class Application:
                         "pv_kw": f.pv_kw,
                         "grid_import_kw": f.grid_import_kw,
                         "grid_export_kw": f.grid_export_kw,
+                        "marginal_price_eur_per_kwh": f.marginal_price_eur_per_kwh,
                     }
                     for f in plan.flows
                     if keep(f.timestep)
@@ -3273,6 +3274,12 @@ class Application:
                         "export_allowed": i.export_allowed,
                         "reserved_kwh": i.reserved_kwh,
                         "stored_energy_kwh": i.stored_energy_kwh,
+                        # Why (plugins/milp_highs/explain.py): a sentence,
+                        # the constraints that limit the slot and, for
+                        # batteries, the value of 1 kWh stored.
+                        "reason": i.reason,
+                        "binding_constraints": i.binding_constraints,
+                        "energy_value_eur_per_kwh": i.energy_value_eur_per_kwh,
                     }
                     for i in plan.intents
                     if keep(i.timestep)
@@ -3856,9 +3863,10 @@ class Application:
                         "mode": mode,
                         "planned_kw": planned_kw,
                         "soc_pct": round(energy_kwh / asset.capacity_kwh * 100, 1),
+                        "reason": intent.reason if intent else None,
                     })
 
-                _active, from_active = _split_active(steps)
+                active, from_active = _split_active(steps)
                 # Same helper as the HA ``charging_state`` sensor.
                 current_mode = ev_current_mode(
                     plan, asset.device_id, phase2_start, now,
@@ -3878,6 +3886,8 @@ class Application:
                     "power_w": power_w,
                     "plan": {
                         "current_mode": current_mode,
+                        # Why the plan does this now (the active slot's reason).
+                        "current_reason": active["reason"] if active else None,
                         "steps": steps,
                         "next_change": _next_change(from_active),
                     },
@@ -3900,6 +3910,7 @@ class Application:
                             round(i.stored_energy_kwh / sc.capacity_kwh * 100, 1)
                             if i.stored_energy_kwh is not None else None
                         ),
+                        "reason": i.reason,
                     }
                     for i in all_intents
                 ]
@@ -3920,6 +3931,8 @@ class Application:
                     "power_w": power_w,
                     "plan": {
                         "current_mode": current_mode,
+                        # Why the plan does this now (the active slot's reason).
+                        "current_reason": active["reason"] if active else None,
                         "steps": steps,
                         "next_change": _next_change(from_active),
                     },
@@ -3943,6 +3956,7 @@ class Application:
                         "mode": intent_display_mode(i, is_threshold=True),
                         "planned_kw": i.power_kw,
                         "predicted_value": i.stored_energy_kwh,
+                        "reason": i.reason,
                     }
                     for i in all_intents
                 ]
@@ -3965,6 +3979,8 @@ class Application:
                     "power_w": power_w,
                     "plan": {
                         "current_mode": current_mode,
+                        # Why the plan does this now (the active slot's reason).
+                        "current_reason": active["reason"] if active else None,
                         "steps": steps,
                         "next_change": _next_change(from_active),
                     },
