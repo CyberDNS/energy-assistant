@@ -24,6 +24,7 @@ from energy_assistant.plugins._homeassistant.actuators import (
 )
 from energy_assistant.plugins._homeassistant.bindings import (
     ValueKind,
+    binding_specs,
     parse_binding,
 )
 from energy_assistant.plugins.homeassistant_sensor.device import HASensorDevice
@@ -126,7 +127,7 @@ def test_validation_checks_domains_and_conditional_keys() -> None:
              "capabilities": {"power_w": {"import_entity": "sensor.i"}}}
     assert errors({"grid": meter}) == [(
         "device 'grid': capabilities.power_w: key 'export_entity' is required "
-        "(Export power sensor)"
+        "(Export power sensor, ≥ 0)"
     )]
     meter["capabilities"]["power_w"]["export_entity"] = "sensor.e"
     assert errors({"grid": meter}) == []
@@ -301,3 +302,47 @@ def test_sensor_device_needs_a_binding_and_rejects_old_keys() -> None:
     with pytest.raises(DeviceConfigError, match="moved to"):
         _build("c", {"type": "generic_homeassistant", "category": "consumer",
                      "power": "sensor.x"}, FakeHAClient())
+
+
+def test_power_and_energy_bindings_switch_between_one_and_two_entities() -> None:
+    specs = binding_specs(Capability.POWER_W)
+    source = specs["source"]
+    assert source.selector and source.choices == ("single", "split")
+    assert source.to_dict("source")["selector"] is True
+    # The switch follows the keys that are set; nothing set: the default.
+    assert source.selected("source", {}, specs) == "single"
+    assert source.selected("source", {"entity": "sensor.p"}, specs) == "single"
+    assert source.selected("source", {"import_entity": "sensor.i"}, specs) == "split"
+    # Only the fields of the selected variant apply (and are required).
+    split = {"import_entity": "sensor.i"}
+    assert not specs["entity"].applies(split, specs)
+    assert not specs["invert_sign"].applies(split, specs)
+    assert specs["export_entity"].applies(split, specs)
+    assert specs["entity"].applies({}, specs)
+    assert not specs["import_entity"].advanced
+    assert specs["import_entity"].label == "Import power entity"
+    # Energy has the switch too; values without a direction do not.
+    assert "source" in binding_specs(Capability.ENERGY_IN_KWH)
+    assert "source" not in binding_specs(Capability.SOC_PCT)
+    assert "source" not in binding_specs(Capability.PHASE_POWER_W)
+    # A battery names the directions charge and discharge.
+    battery = registry.device_info("homeassistant_battery")
+    assert battery is not None
+    labels = {k: s.label for k, s in battery.bindings[Capability.POWER_W].items()}
+    assert labels["import_entity"] == "Charge power entity"
+    assert labels["export_entity"] == "Discharge power entity"
+
+
+def test_the_switch_is_never_in_the_file() -> None:
+    with pytest.raises(DeviceConfigError, match="unknown key"):
+        _binding(Capability.POWER_W, source="single", entity="sensor.a")
+    meter = {"category": "meter", "type": "homeassistant_sensor",
+             "capabilities": {"power_w": {"source": "split", "import_entity": "sensor.i",
+                                          "export_entity": "sensor.e"}}}
+    try:
+        validate_plugins(parse_devices({"grid": meter}))
+    except DeviceConfigError as exc:
+        assert exc.errors == [("device 'grid': capabilities.power_w: source is only a "
+                               "switch in the config UI: leave it out")]
+    else:
+        raise AssertionError("expected an error")

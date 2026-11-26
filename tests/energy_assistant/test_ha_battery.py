@@ -133,6 +133,53 @@ async def test_c_mode_and_power_by_sign_and_release() -> None:
     assert dev.supported_behaviours is None
 
 
+async def test_c_mode_with_separate_charge_and_discharge_power() -> None:
+    options = ["Forcible charge", "Forcible discharge", "Fixed"]
+    client = _client(select__mode=("Fixed", {"options": options}),
+                     number__cha=("0", {"unit_of_measurement": "W"}),
+                     number__dis=("0", {"unit_of_measurement": "kW"}))
+    dev = _battery(client, {
+        "control": "mode_power", "mode": "select.mode",
+        "charge_power": "number.cha", "discharge_power": "number.dis",
+        "charge_option": "Forcible charge", "discharge_option": "Forcible discharge",
+        "hold_option": "Fixed",
+    })
+    await dev.send_command(_cmd(2000))
+    await dev.send_command(_cmd(-900))
+    await dev.send_command(_cmd(0))
+    assert _writes(client) == [
+        ("set_value", "number.cha", 2000.0), ("select_option", "select.mode", "Forcible charge"),
+        ("set_value", "number.dis", 0.9), ("select_option", "select.mode", "Forcible discharge"),
+        ("select_option", "select.mode", "Fixed"),
+    ]
+
+
+def test_c_mode_power_one_or_two_numbers() -> None:
+    base = {"control": "mode_power", "mode": "select.mode", "charge_option": "a",
+            "discharge_option": "b", "hold_option": "c"}
+    with pytest.raises(DeviceConfigError, match="not both"):
+        _battery(_client(), {**base, "power": "number.p", "charge_power": "number.c",
+                             "discharge_power": "number.d"})
+    with pytest.raises(DeviceConfigError, match="needs 'discharge_power'"):
+        _battery(_client(), {**base, "charge_power": "number.c"})
+    # Validation: the form's switch follows the keys that are set.
+    def errors(setpoint: dict) -> list[str]:
+        cfg = {"category": "battery", "type": "homeassistant_battery",
+               "capabilities": {**READINGS, "power_setpoint": setpoint}, "params": PARAMS}
+        try:
+            validate_plugins(parse_devices({"bat": cfg}))
+        except DeviceConfigError as exc:
+            return exc.errors
+        return []
+
+    assert errors({**base, "charge_power": "number.c", "discharge_power": "number.d"}) == []
+    assert errors({**base, "power": "number.p"}) == []
+    assert [e for e in errors({**base, "charge_power": "number.c"})
+            if "required" in e] == [(
+        "device 'bat': capabilities.power_setpoint: key 'discharge_power' is required "
+        "(Power while discharging (no sign))")]
+
+
 async def test_d_action_with_data_deadband_and_refresh() -> None:
     client = _client()
     dev = _battery(client, {"control": "action", "action": "script.set_battery",

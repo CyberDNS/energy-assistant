@@ -9,7 +9,9 @@ Setpoint control (EA sends a watt value every tick, + = charge):
 ``control: mode_power``        C — a mode select and one unsigned power number
                                 ``mode``, ``power``, ``charge_option``,
                                 ``discharge_option``, ``hold_option``,
-                                ``release_option``
+                                ``release_option``; or a charge and a
+                                discharge power number instead of ``power``:
+                                ``charge_power``, ``discharge_power``
 ``control: action``            D — an action with the power in its data
                                 ``action``, ``data``, ``power_key``
 
@@ -57,7 +59,7 @@ _POWER = ("W", "kW")
 CONTROL_LABELS = {
     "number": "One power setpoint (+ charge / − discharge)",
     "charge_discharge": "Separate charge and discharge power",
-    "mode_power": "Working mode + one power",
+    "mode_power": "Working mode + power",
     "action": "A script or action",
     "modes": "The battery's own modes, per behaviour",
 }
@@ -108,8 +110,24 @@ POWER_SETPOINT_BINDING: dict[str, ParamSpec] = {
     "mode": ParamSpec(str, required=True, entity=True, domains=SELECT_DOMAINS,
                       label="Mode select", description="Select entity of the working mode",
                       when=_when("mode_power", "modes")),
-    "power": _number("Power number", "Power for charging and discharging (no sign)",
-                     "mode_power"),
+    "power_numbers": ParamSpec(
+        str, selector=True, choices=("single", "split"), default="single",
+        choice_labels={"single": "One power number", "split": "Separate charge and discharge"},
+        label="Power through", when=_when("mode_power"),
+        description="One power number for both directions, or one for charging and one "
+                    "for discharging"),
+    "power": ParamSpec(str, required=True, entity=True, domains=NUMBER_DOMAINS, units=_POWER,
+                       label="Power number",
+                       description="Power for charging and discharging (no sign)",
+                       when={"control": "mode_power", "power_numbers": "single"}),
+    "charge_power": ParamSpec(str, required=True, entity=True, domains=NUMBER_DOMAINS,
+                              units=_POWER, label="Charge power number",
+                              description="Power while charging (no sign)",
+                              when={"control": "mode_power", "power_numbers": "split"}),
+    "discharge_power": ParamSpec(str, required=True, entity=True, domains=NUMBER_DOMAINS,
+                                 units=_POWER, label="Discharge power number",
+                                 description="Power while discharging (no sign)",
+                                 when={"control": "mode_power", "power_numbers": "split"}),
     "charge_option": ParamSpec(str, required=True, label="Charge option", options_from=("mode", "options"), 
                                when=_when("mode_power"), description="Forced charge mode"),
     "discharge_option": ParamSpec(str, required=True, label="Discharge option", options_from=("mode", "options"), 
@@ -304,10 +322,17 @@ def parse_control(where: str, client: Any, raw: Any) -> BatteryControl:
             value_key=str(raw.get("power_key") or "power_w"), tolerance=deadband))
     mode_select = select(need("mode"))
     if control == "mode_power":
-        power = number(need("power"))
+        split = raw.get("charge_power") or raw.get("discharge_power")
+        if split and raw.get("power"):
+            raise DeviceConfigError([(f"{where}: set either 'power' or 'charge_power' + "
+                                      "'discharge_power', not both")])
+        if split:
+            charge, discharge = number(need("charge_power")), number(need("discharge_power"))
+        else:
+            charge = discharge = number(need("power"))
         modes = {
-            Behaviour.CHARGE: _Mode(need("charge_option"), power),
-            Behaviour.DISCHARGE: _Mode(need("discharge_option"), power),
+            Behaviour.CHARGE: _Mode(need("charge_option"), charge),
+            Behaviour.DISCHARGE: _Mode(need("discharge_option"), discharge),
             Behaviour.HOLD: _Mode(need("hold_option")),
         }
         return BatteryControl(where, control, mode=mode_select, modes=modes,

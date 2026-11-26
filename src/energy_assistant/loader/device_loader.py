@@ -35,6 +35,7 @@ from ..core.device_model import (
     DeviceConfigError,
     DeviceSpec,
     ParamSpec,
+    file_keys,
 )
 from ..core.plugin_registry import BuildContext
 from ..core.registry import DeviceRegistry
@@ -256,7 +257,7 @@ def _spec_errors(
     for name, value in values.items():
         spec = specs.get(name)
         if spec is None:
-            allowed = ", ".join(specs) or "none"
+            allowed = ", ".join(file_keys(specs)) or "none"
             errors.append(f"{where}: unknown {kind} {name!r}{of_plugin} (allowed: {allowed})")
         elif value is None:
             continue  # an empty key counts as left out

@@ -110,6 +110,9 @@ class ConnectionType(str, Enum):
 # ---------------------------------------------------------------------------
 
 
+_NOT_NAMED = object()
+
+
 @dataclass(frozen=True)
 class ParamSpec:
     """One model parameter of a category."""
@@ -200,6 +203,24 @@ class ParamSpec:
     """Rarely needed: the config UI keeps it under "More settings"."""
     legacy: bool = False
     """Still accepted, but only offered by the config UI where it is in use."""
+    selector: bool = False
+    """A choice between alternative sets of keys that only the config UI
+    shows (e.g. one signed entity or separate import and export entities):
+    never written to the file.  The other keys depend on it through ``when``;
+    its value is derived from which of them are set (``selected``)."""
+
+    def selected(self, key: str, values: Mapping[str, Any],
+                 specs: Mapping[str, ParamSpec]) -> Any:
+        """A selector's value for *values*: the first choice whose fields (the
+        specs whose ``when`` names *key* with that choice) hold a value, else
+        the default.  Mirrored in the config UI (``SchemaForm.selected``)."""
+        for choice in self.choices:
+            for name, spec in specs.items():
+                wanted = (spec.when or {}).get(key, _NOT_NAMED)
+                named = wanted == choice or (isinstance(wanted, tuple) and choice in wanted)
+                if named and values.get(name) not in (None, "", [], {}):
+                    return choice
+        return self.default
 
     def _check_nested(self, value: Any) -> str | None:
         """Check list items and dict keys / values against their specs."""
@@ -232,7 +253,9 @@ class ParamSpec:
         """Whether the ``when`` condition holds for the sibling *values*."""
         for key, wanted in (self.when or {}).items():
             value = values.get(key)
-            if value in (None, "") and key in specs:
+            if key in specs and specs[key].selector:
+                value = specs[key].selected(key, values, specs)
+            elif value in (None, "") and key in specs:
                 value = specs[key].default
             if wanted is None:
                 ok = value in (None, "", [], {})
@@ -311,12 +334,16 @@ class ParamSpec:
             out["advanced"] = True
         if self.legacy:
             out["legacy"] = True
+        if self.selector:
+            out["selector"] = True
         if self.kind is object:
             out["kind"] = "any"
         return out
 
     def check(self, value: Any) -> str | None:
         """Return an error text for *value*, or None when it is valid."""
+        if self.selector:
+            return "is only a switch in the config UI: leave it out"
         if self.kind is object:
             ok = isinstance(value, (str, int, float, bool, list, Mapping))
         elif self.kind is float:
@@ -384,6 +411,11 @@ CAPABILITY_TITLES = {
 }
 
 
+def file_keys(specs: Mapping[str, ParamSpec]) -> list[str]:
+    """The keys of *specs* that can be in the file (not the UI-only selectors)."""
+    return [name for name, spec in specs.items() if not spec.selector]
+
+
 def check_fields(
     values: Mapping[str, Any], specs: Mapping[str, ParamSpec], *, what: str = "key"
 ) -> list[str]:
@@ -393,7 +425,7 @@ def check_fields(
     for name, value in values.items():
         spec = specs.get(name)
         if spec is None:
-            problems.append(f"unknown {what} {name!r} (allowed: {', '.join(specs) or 'none'})")
+            problems.append(f"unknown {what} {name!r} (allowed: {', '.join(file_keys(specs)) or 'none'})")
         elif value is None:
             continue
         elif (problem := spec.check(value)) is not None:

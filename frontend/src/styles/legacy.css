@@ -436,6 +436,13 @@ th.num, td.num { text-align:right; font-variant-numeric:tabular-nums; }
 .cfg-time { display:flex; align-items:center; gap:4px; flex-wrap:wrap; }
 .cfg-ui .cfg-time select { width:auto; min-width:4.2em; }
 .cfg-time-sep { color:var(--muted-foreground); }
+/* a switch between two sets of fields (spec.selector) */
+.cfg-segmented { display:inline-flex; align-self:flex-start; flex-wrap:wrap; border:1px solid var(--border); border-radius:8px; padding:2px; gap:2px; background:var(--muted); }
+.cfg-segment { padding:5px 10px; font:inherit; font-size:.85rem; border:0; border-radius:6px; background:transparent;
+  color:var(--muted-foreground); cursor:pointer; }
+.cfg-segment:hover { color:var(--foreground); }
+.cfg-segment:focus-visible { outline:2px solid var(--primary); outline-offset:1px; }
+.cfg-segment.is-on { background:var(--card); color:var(--foreground); font-weight:600; box-shadow:0 1px 2px rgb(0 0 0 / 12%); }
 .cfg-check { width:18px; height:18px; margin:8px 0; accent-color:var(--primary); }
 .cfg-table td.cfg-table-off { min-width:60px; }
 .cfg-table td:has(> .cfg-check) { min-width:60px; }
