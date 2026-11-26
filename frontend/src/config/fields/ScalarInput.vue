@@ -16,6 +16,7 @@ export default defineComponent({
   setup(props, { emit }) {
     const kind = computed(() => {
       const s = props.spec
+      if (s.selector) return 'segmented'
       if (s.choices) return 'choice'
       if (s.widget === 'checkbox' || s.widget === 'exclusive') return 'checkbox'
       if (s.kind === 'bool') return 'bool'
@@ -53,7 +54,13 @@ export default defineComponent({
 </script>
 
 <template>
-  <select v-if="kind === 'choice'" :value="modelValue ?? spec.default ?? ''" :aria-label="ariaLabel"
+  <div v-if="kind === 'segmented'" class="cfg-segmented" role="radiogroup" :aria-label="ariaLabel">
+    <button v-for="c in spec.choices" :key="c" type="button" role="radio" :aria-checked="(modelValue ?? spec.default) === c"
+            :class="['cfg-segment', { 'is-on': (modelValue ?? spec.default) === c }]" @click="set(c)">
+      {{ spec.choice_labels?.[c] ?? c }}
+    </button>
+  </div>
+  <select v-else-if="kind === 'choice'" :value="modelValue ?? spec.default ?? ''" :aria-label="ariaLabel"
           @change="pick($event.target.value)">
     <option v-if="spec.default == null" value="">{{ spec.required ? '— choose' : '— not set' }}</option>
     <option v-for="c in spec.choices" :key="c" :value="c">{{ spec.choice_labels?.[c] ?? c }}{{ c === spec.default ? ' (default)' : '' }}</option>

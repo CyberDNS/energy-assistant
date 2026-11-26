@@ -49,7 +49,7 @@ def test_variables_are_filled_in() -> None:
 
 def test_schema_carries_labels_and_key_choices() -> None:
     spec = registry.device_info("homeassistant_battery").to_dict()["bindings"]["power_setpoint"]
-    assert spec["control"]["choice_labels"]["mode_power"] == "Working mode + one power"
+    assert spec["control"]["choice_labels"]["mode_power"] == "Working mode + power"
     assert spec["modes"]["keys"]["choices"][:2] == ["charge", "discharge"]
     assert spec["modes"]["keys"]["choice_labels"]["absorb_surplus"] == "Store PV surplus only"
 

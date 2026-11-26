@@ -28,6 +28,9 @@ Examples::
           discharge_option: Forcible discharge
           hold_option: Fixed charge/discharge
           release_option: Maximise self consumption
+        # … or one power number per direction instead of `power`:
+        #   charge_power: number.battery_forcible_charge_power
+        #   discharge_power: number.battery_forcible_discharge_power
 
     # mode control — the battery follows surplus and load itself
         power_setpoint:
@@ -50,7 +53,7 @@ from ...core.device_model import Capability as Cap
 from ...core.device_model import DeviceCategory as C
 from ...core.device_model import DeviceConfigError
 from ...core.plugin_registry import BuildContext, PluginRegistry
-from .._homeassistant.bindings import binding_specs, parse_bindings
+from .._homeassistant.bindings import CHARGE_DISCHARGE, binding_specs, parse_bindings
 from .control import POWER_SETPOINT_BINDING, parse_control
 
 _log = logging.getLogger(__name__)
@@ -68,7 +71,8 @@ def register(registry: PluginRegistry) -> None:
         categories={C.BATTERY},
         bindable={*_READINGS, Cap.POWER_SETPOINT},
         bindings={
-            **{cap: binding_specs(cap) for cap in _READINGS},
+            Cap.POWER_W: binding_specs(Cap.POWER_W, directions=CHARGE_DISCHARGE),
+            Cap.SOC_PCT: binding_specs(Cap.SOC_PCT),
             Cap.POWER_SETPOINT: POWER_SETPOINT_BINDING,
         },
         settings={},

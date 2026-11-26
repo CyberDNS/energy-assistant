@@ -345,10 +345,12 @@ only.  One type per category; each capability is **bound** to entities:
 
 **Bindings** (every reading): `entity`, or `attribute` of it (e.g. a climate's
 `current_temperature`), or `import_entity` + `export_entity` (value = import −
-export), or `entities` per phase; `invert_sign`, `scale`, and for on/off
+export; a battery's charge and discharge), or `entities` per phase; `invert_sign`, `scale`, and for on/off
 values `on: [states that count as on]`.  Units come from the entity: kW, Wh,
 °F, mi are converted.  The config UI only suggests entities of a fitting
-domain; a missing entity is logged once and makes the value unavailable.
+domain, and for power and energy asks with a switch whether the value comes
+from one signed entity or from one entity per direction, then shows only
+those fields.  A missing entity is logged once and makes the value unavailable.
 Home Assistant is read over one websocket: states are kept in memory, so a
 control tick reads nothing over the network.
 
@@ -358,7 +360,8 @@ battery or charger a power *and* what it is for: `charge`, `discharge`,
 
 - *Setpoint control* (`number`, `charge_discharge`, `current`, `power`,
   `action`, `mode_power`): Energy Assistant decides the power every tick, also
-  when following the PV surplus.
+  when following the PV surplus.  `mode_power` takes one `power` number for
+  both directions, or `charge_power` + `discharge_power`.
 - *Mode control* (`modes`): each behaviour maps to one of the device's own
   modes (`option` of the `mode` select), with an optional power or current
   number and fixed values (`set: {entity: value}`).  The device follows
