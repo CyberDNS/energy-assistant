@@ -427,7 +427,9 @@ class StorageControlContributor:
 
     The realtime slice optimizer (``realtime_slice_optimizer``) applies the
     same rules: ``idle`` never discharges, and a planned discharge follows
-    the live load only up to ``DISCHARGE_FOLLOW_HEADROOM`` × the plan.
+    the live load up to ``DISCHARGE_FOLLOW_HEADROOM`` × the plan, or up to
+    the device limit while the import price is above what the plan says the
+    stored energy is worth.
 
     The actual setpoint sent to the device respects physical limits
     declared in ``StorageConstraints`` (``max_charge_kw``).
@@ -987,6 +989,8 @@ class ControlLoop:
                     planned_w=planned_w,
                     reserved_kwh=(intent.reserved_kwh if intent is not None and intent.reserved_kwh is not None else 0.0),
                     prev_setpoint_w=self._last_storage_setpoints_w.get(contributor.device_id, 0.0),
+                    energy_value_eur_per_kwh=(intent.energy_value_eur_per_kwh if intent is not None else None),
+                    discharge_efficiency=contributor._constraints.discharge_efficiency,
                 )
             )
 

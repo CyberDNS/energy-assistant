@@ -234,3 +234,64 @@ def test_build_learners_reads_mode():
     configured = {"bat": DeviceSpec(id="bat", category=DeviceCategory.BATTERY, type="zendure")}
     assert build_efficiency_learners([_sc()], configured, FakeStorage([]), None)["bat"].mode == "configured"
     assert build_efficiency_learners([_sc()], {}, None, None) == {}
+
+
+# -- battery quirks (as seen on an SMA home battery) --------------------------
+
+
+def _snap_to_full(samples, hold_from=96.0):
+    """The reading lags near the top while charging and snaps to 100 % once
+    the charge has finished: every charge to full has a SoC jump."""
+    out = []
+    for i, (t, p, soc) in enumerate(samples):
+        charging_to_full = soc >= hold_from and any(q > 0 for _, q, _ in samples[i:i + 20])
+        out.append((t, p, min(soc, hold_from) if charging_to_full and soc < 100 else soc))
+    return out
+
+
+def full_cycle(eta: float = 0.9, start: datetime = T0, **kw):
+    """Rest at full, discharge 1.5 kW for 2 h, recharge 3 kW to full, rest."""
+    out_kwh = 1.5 * 2
+    charge_h = out_kwh / eta / eta / 3.0
+    return simulate([(1, 0), (2, -1500), (1, 0), (charge_h, 3000), (1, 0)],
+                    eta=eta, soc0=100.0, start=start, **kw)
+
+
+def test_full_to_full_cycle_survives_the_snap_to_100():
+    s = _snap_to_full(full_cycle(0.9))
+    # the snap is a jump the measured power cannot explain ...
+    assert any(b[2] - a[2] > 3 for a, b in pairwise(s))
+    cycles = find_cycles(s, CAP, standby_w=50, min_soc_pct=10, max_soc_pct=100)
+    # ... but full is full on both ends
+    assert len(cycles) == 1
+    assert cycles[0].at_limit
+    assert cycles[0].round_trip == pytest.approx(0.81, abs=0.02)
+
+
+def test_jump_still_drops_a_cycle_away_from_full():
+    # day_cycle rests at 10 %: a jump inside keeps it out (also when min SoC is 10)
+    s = day_cycle(0.9, jump_at=2.0)
+    assert find_cycles(s, CAP, standby_w=50, min_soc_pct=10, max_soc_pct=100) == []
+
+
+def test_trickle_discharge_counts_as_energy_out():
+    # part of the discharge at 40 W (below the standby threshold) for 10 h
+    charged = 3.0 * 1.5 * 0.9
+    trickle_kwh = 0.4
+    dis_h = (charged * 0.9 - trickle_kwh) / 1.5
+    s = simulate(
+        [(1, 0), (1.5, 3000), (1, 0), (10, -40), (dis_h, -1500), (1, 0)],
+        eta=0.9, standby_w=26,
+    )
+    cycles = find_cycles(s, CAP, standby_w=50)
+    assert len(cycles) == 1
+    assert cycles[0].energy_out_kwh == pytest.approx(charged * 0.9, abs=0.01)
+    assert cycles[0].round_trip == pytest.approx(0.81, abs=0.02)
+
+
+def test_missing_soc_reading_does_not_split_history():
+    # 5-minute history, as the learner reads it; one bucket without SoC
+    s = day_cycle(0.9)[::10]
+    assert len(find_cycles(s, CAP, standby_w=50)) == 1
+    s = [(t, p, None if i == 25 else soc) for i, (t, p, soc) in enumerate(s)]
+    assert len(find_cycles(s, CAP, standby_w=50)) == 1

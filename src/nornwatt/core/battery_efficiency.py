@@ -8,8 +8,8 @@ SoC readings are coarse (whole percent) and a BMS re-calibrates them every
 now and then, so a plain "energy in vs. SoC change" balance over a short
 interval is useless.  Instead the estimator uses **closed cycles**:
 
-* A *rest point* is a moment the battery has been idle (``|P| ≤ standby_w``)
-  for a while, so the SoC reading has settled.
+* A *rest point* is a moment the battery has been idle (no counted
+  power, see below) for a while, so the SoC reading has settled.
 * A *cycle* runs from one rest point to a later one with the **same** SoC
   reading, and moved real energy in both directions in between.  Stored
   energy is the same at both ends, so whatever came out divided by whatever
@@ -17,11 +17,17 @@ interval is useless.  Instead the estimator uses **closed cycles**:
   reading's rounding.
 * A cycle with a SoC jump inside (a change the measured power cannot
   explain: BMS re-calibration) is dropped, because one of its two
-  readings was wrong.
+  readings was wrong.  Except a cycle from *full* to *full*: a BMS
+  calibrates to 100 % at the end of a charge, so both readings are right
+  whatever it corrected in between (many batteries snap from the mid 90s
+  to 100 % there, so every charge to full has a jump).
 
-Power at or below ``standby_w`` is left out on both sides: the battery's own
-standby draw is fixed household load for the planner and the savings
-accounting, not a storage loss.
+Charging power at or below ``standby_w`` is left out: the battery's own
+standby draw (always a draw, so positive) is fixed household load for the
+planner and the savings accounting, not a storage loss.  Discharging is
+counted down to a small noise floor: a battery trickling 20-50 W into the
+house for hours delivers real energy, and leaving it out makes the round
+trip look far worse than it is.
 
 The estimate is ``Σ out / Σ in`` over the cycles of the last days (so a cycle
 counts by its throughput), after dropping cycles far from the median.  It is
@@ -55,6 +61,9 @@ _REST = timedelta(minutes=10)
 _JUMP_PCT = 3.0
 """SoC change (percentage points) beyond what the measured power explains,
 between two samples, that marks a BMS re-calibration."""
+
+_DISCHARGE_NOISE_W = 10.0
+"""Discharge power below this is measurement noise, not energy delivered."""
 
 _SOC_TOL = 0.5
 """Two readings within this many percentage points count as the same SoC."""
@@ -173,7 +182,9 @@ def find_cycles(
 ) -> list[CycleWindow]:
     """Closed cycles in time-ordered ``(timestamp, power_w, soc_pct)`` samples.
 
-    ``power_w`` is AC power, positive while charging.  *min_throughput_kwh*
+    ``power_w`` is AC power, positive while charging.  A sample without a
+    SoC reading keeps the previous one (the BMS reports SoC less often than
+    power), so it does not split the history.  *min_throughput_kwh*
     (default 15 % of the capacity) is how much energy a cycle must move
     in **each** direction: small cycles are dominated by the SoC rounding.
     """
@@ -184,12 +195,17 @@ def find_cycles(
     stretches: list[_Stretch] = []
     cur: _Stretch | None = None
     prev: tuple[datetime, float, float] | None = None
+    last_soc: float | None = None
 
     for ts, power, soc in samples:
+        if soc is None:
+            soc = last_soc
         if power is None or soc is None:
             continue
-        p = float(power) if abs(float(power)) > standby_w else 0.0
-        soc = float(soc)
+        soc = last_soc = float(soc)
+        p = float(power)
+        if (p > 0 and p <= standby_w) or (p < 0 and -p <= min(_DISCHARGE_NOISE_W, standby_w)):
+            p = 0.0
         if prev is None or ts - prev[0] > _MAX_GAP or ts <= prev[0]:
             if cur is not None:
                 cur.close_rest()
@@ -229,8 +245,11 @@ def find_cycles(
     if cur is not None:
         cur.close_rest()
 
+    def at_full(s: float) -> bool:
+        return s >= min(max_soc_pct, 100.0) - 1.0
+
     def at_limit(s: float) -> bool:
-        return s <= min_soc_pct + 1.0 or s >= min(max_soc_pct, 100.0) - 1.0
+        return s <= min_soc_pct + 1.0 or at_full(s)
 
     # For each rest point, the first later rest point at the same SoC with
     # enough throughput both ways; then as many of those cycles as fit
@@ -245,7 +264,7 @@ def find_cycles(
                 e_in, e_out = b.e_in - a.e_in, b.e_out - a.e_out
                 if e_in < min_kwh or e_out < min_kwh:
                     continue
-                if b.jumps == a.jumps:
+                if b.jumps == a.jumps or (at_full(a.soc) and at_full(b.soc)):
                     candidates.append(CycleWindow(
                         start=a.ts, end=b.ts, soc_pct=a.soc,
                         energy_in_kwh=e_in, energy_out_kwh=e_out,
