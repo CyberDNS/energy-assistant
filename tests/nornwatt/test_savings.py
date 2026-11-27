@@ -168,6 +168,25 @@ class TestBatteries:
         _run(tracker, [_sample(m, -2.0) for m in range(62)])
         assert tracker.state.unc["bat"].stored_kwh == pytest.approx(MIN + 1.6, abs=0.03)
 
+    def test_uncontrolled_battery_loses_its_self_consumption_like_the_real_one(self) -> None:
+        """No load, both batteries idle at 5 kWh; the real one's SoC falls by its 50 W
+        draw.  Without the draw in the simulation the uncontrolled house would
+        keep 0.05 kWh more per hour, and use it later at the import price."""
+        drained = BAT.model_copy(update={"self_consumption_w": 50.0})
+        tracker = SavingsTracker([drained], step_minutes=60)
+        samples = [_sample(m, 0.0, stored=5.0 - 0.05 * m / 60) for m in range(61)]
+        _run(tracker, samples)
+        assert tracker.state.unc["bat"].stored_kwh == pytest.approx(5.0 - 0.05, abs=1e-3)
+        assert tracker.state.real["bat"].stored_kwh == pytest.approx(5.0 - 0.05, abs=1e-3)
+        # The value stays in both ledgers (the lost kWh's cost goes with the rest).
+        assert tracker.state.unc["bat"].value_eur == pytest.approx(
+            tracker.state.real["bat"].value_eur)
+
+    def test_without_self_consumption_the_uncontrolled_battery_keeps_its_energy(self) -> None:
+        tracker = SavingsTracker([BAT], step_minutes=60)
+        _run(tracker, [_sample(m, 0.0, stored=5.0 - 0.05 * m / 60) for m in range(61)])
+        assert tracker.state.unc["bat"].stored_kwh == pytest.approx(5.0, abs=1e-6)
+
     def test_battery_on_the_grid_point_meter_only_gets_surplus_left_there(self) -> None:
         """2 kWh household surplus while the heat pump draws 1.5 kWh: the
         SMA-like battery sees only 0.5 kWh, the other one the full surplus."""

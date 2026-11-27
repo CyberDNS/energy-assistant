@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta, timezone
+from itertools import pairwise
 
 import pytest
 
@@ -1391,3 +1392,42 @@ class TestTerminalValueAbovePvRefill:
         # plan ends at the level the PV can top up.
         assert sum(-i.power_kw for i in intents[:8] if i.power_kw < 0) > 1.0
         assert intents[-1].stored_energy_kwh == pytest.approx(5.5, abs=0.3)
+
+
+class TestSelfConsumption:
+    """Constant self-consumption drains the stored energy in the plan (#158)."""
+
+    async def test_idle_battery_loses_its_self_consumption(self) -> None:
+        optimizer = MilpHigsOptimizer(step_minutes=60)
+        now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        bat = _battery("bat", capacity_kwh=10.0).model_copy(update={"self_consumption_w": 100.0})
+        ctx = OptimizationContext(
+            device_states={"bat": _state("bat", soc_pct=50.0)},
+            storage_constraints=[bat],
+            forecasts={ForecastQuantity.PRICE: _hourly_prices(now, [0.30] * 12)},
+            horizon=timedelta(hours=12),
+        )
+        plan = await optimizer.optimize(ctx)
+        stored = [i.stored_energy_kwh for i in plan.intents if i.device_id == "bat"]
+        assert all(i.power_kw == 0.0 for i in plan.intents)
+        # 0.1 kWh per full hour (slot 0 is partial), nothing else moves
+        drops = [a - b for a, b in pairwise(stored)]
+        assert drops and all(x == pytest.approx(0.1, abs=1e-3) for x in drops)
+        assert stored[0] < 5.0
+
+    async def test_battery_at_min_soc_takes_its_draw_from_the_grid(self) -> None:
+        """Pinned at its minimum the battery cannot supply the draw: the plan
+        stays feasible and the stored energy stays at the minimum."""
+        optimizer = MilpHigsOptimizer(step_minutes=60)
+        now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        bat = _battery("bat", capacity_kwh=10.0, min_soc_pct=50.0, max_soc_pct=50.0).model_copy(
+            update={"self_consumption_w": 100.0})
+        ctx = OptimizationContext(
+            device_states={"bat": _state("bat", soc_pct=50.0)},
+            storage_constraints=[bat],
+            forecasts={ForecastQuantity.PRICE: _hourly_prices(now, [0.30] * 12)},
+            horizon=timedelta(hours=12),
+        )
+        plan = await optimizer.optimize(ctx)
+        stored = [i.stored_energy_kwh for i in plan.intents if i.device_id == "bat"]
+        assert stored and all(s == pytest.approx(5.0, abs=0.01) for s in stored)

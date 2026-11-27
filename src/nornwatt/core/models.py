@@ -157,6 +157,16 @@ class StorageConstraints(BaseModel):
     """Battery power up to this magnitude (W) is the system's own standby
     draw or sensor noise, not a charge or discharge.  The savings accounting
     treats it as fixed load in both the real and the unplanned site."""
+    self_consumption_w: float = 0.0
+    """Constant draw from the *stored* energy (W), at all times: battery
+    management, inverter, communication.  Next to the proportional
+    conversion loss (``charge_efficiency`` / ``discharge_efficiency``)::
+
+        stored energy:  ΔE = η_c·charged − discharged/η_d − self_consumption_w·Δt
+        battery side:   P_battery = P_ac/η_d + self_consumption_w   (discharging)
+
+    The planner, the savings accounting's uncontrolled house and the control
+    of battery-side commanded devices all use it."""
 
     @property
     def degradation_cost_per_kwh(self) -> float:

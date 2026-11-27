@@ -117,6 +117,10 @@ _DEFAULT_PRICE_EUR_KWH = 0.30
 # integer energy coefficients, improving LP numerical conditioning.
 _WH = 1000.0
 
+# Premium on a battery's self-consumption taken from the grid (€/Wh, on top
+# of the import price) — see the SoC dynamics in _build_model.
+_SELF_GRID_PREMIUM = 0.25 / _WH
+
 # Cost of importing beyond the grid connection limit (€/kWh).  A
 # lexicographic priority far above any energy price: flexible loads are
 # always planned below the limit; only a forecast inflexible load above it
@@ -749,6 +753,20 @@ class MilpHigsOptimizer:
         u: dict[tuple[str, int], pulp.LpVariable] = {}  # binary: 1 = charging
         e: dict[tuple[str, int], pulp.LpVariable] = {}  # stored energy (Wh)
 
+        # Constant self-consumption (StorageConstraints.self_consumption_w):
+        # drawn from the stored energy every step.  At its minimum SoC the
+        # battery cannot supply it; then it comes from the grid (sg[b, t], at
+        # the import price — the inverter recharges the battery).  "Only at
+        # the minimum" is not linear (a binary per step made the model several
+        # times slower), so the grid part carries a premium instead
+        # (_SELF_GRID_PREMIUM): running the battery management from the grid
+        # to keep stored energy would only pay where the stored energy is
+        # worth that much more than the import, and reaching the minimum
+        # costs the plan little (25 W × 0.25 €/kWh ≈ 0.6 ct/h).
+        sg: dict[tuple[str, int], pulp.LpVariable] = {}
+        self_wh = {(sc.device_id, t): sc.self_consumption_w * dur[t]
+                   for sc in batteries if sc.self_consumption_w > 0 for t in T}
+
         for sc in batteries:
             b = sc.device_id
             for t in T:
@@ -756,6 +774,9 @@ class MilpHigsOptimizer:
                 d[(b, t)] = pulp.LpVariable(f"d__{b}__{t}", lowBound=0)
                 u[(b, t)] = pulp.LpVariable(f"u__{b}__{t}", cat="Binary")
                 e[(b, t)] = pulp.LpVariable(f"e__{b}__{t}", lowBound=bat_e_min_wh[b], upBound=bat_e_max_wh[b])
+                if (b, t) in self_wh:
+                    sg[(b, t)] = pulp.LpVariable(f"self_grid__{b}__{t}", lowBound=0,
+                                                 upBound=self_wh[(b, t)])
 
         # ── EV charging variables (energy in Wh) ──────────────────────
         # ev[asset_id, t]      — AC energy charged into the EV in step t (Wh).
@@ -948,11 +969,14 @@ class MilpHigsOptimizer:
             if ev_on else 0
         )
 
+        self_grid_cost = pulp.lpSum(_SELF_GRID_PREMIUM * v for v in sg.values()) if sg else 0
+
         prob += (
             grid_cost
             + grid_limit_cost
             + power_cost
             + degradation_cost
+            + self_grid_cost
             + priority_tiebreak
             + pv_priority_tiebreak
             + ev_grid_tiebreak
@@ -974,7 +998,8 @@ class MilpHigsOptimizer:
                 + pulp.lpSum(
                     run[(tc.device_id, t)] * thresh_rated_w[tc.device_id] * dur[t]
                     for tc in active_threshold_devices
-                ),
+                )
+                + pulp.lpSum(sg[(sc.device_id, t)] for sc in batteries if (sc.device_id, t) in sg),
                 f"grid_balance__{t}",
             )
             if sec_wh:
@@ -1117,12 +1142,15 @@ class MilpHigsOptimizer:
                 if sc.no_grid_charge:
                     prob += site_imp[t] <= big_m[t] * (1 - u[(b, t)]), f"no_grid_charge__{b}__{t}"
 
-                # SoC dynamics (all in Wh; efficiency η is dimensionless — unchanged)
+                # SoC dynamics (all in Wh; efficiency η is dimensionless — unchanged),
+                # minus the constant self-consumption the grid does not cover.
                 e_prev = e_init_wh if t == 0 else e[(b, t - 1)]
+                drain = (self_wh[(b, t)] - sg[(b, t)]) if (b, t) in sg else 0
                 prob += (
-                    e[(b, t)] == e_prev + eta_c * c[(b, t)] - d[(b, t)] / eta_d,
+                    e[(b, t)] == e_prev + eta_c * c[(b, t)] - d[(b, t)] / eta_d - drain,
                     f"soc__{b}__{t}",
                 )
+
 
         # ── EV PV slots: no grid import while the car charges from PV ────
         # A PV-labelled slot (ev_on=1, ev_grid=0) executes as openWB PV mode,

@@ -10,10 +10,13 @@ from itertools import pairwise
 import pytest
 
 from nornwatt.core.battery_efficiency import (
+    BalanceEstimate,
     CycleWindow,
     EfficiencyEstimate,
     estimate,
+    find_balance_windows,
     find_cycles,
+    fit_balance,
 )
 from nornwatt.core.device_model import DeviceCategory, DeviceSpec, parse_devices
 from nornwatt.core.models import StorageConstraints
@@ -295,3 +298,92 @@ def test_missing_soc_reading_does_not_split_history():
     assert len(find_cycles(s, CAP, standby_w=50)) == 1
     s = [(t, p, None if i == 25 else soc) for i, (t, p, soc) in enumerate(s)]
     assert len(find_cycles(s, CAP, standby_w=50)) == 1
+
+
+# -- energy balance: efficiency and self-consumption (#158) -------------------
+
+
+def drained_days(days: int, *, eta: float = 0.9, self_w: float = 30.0,
+                 start: datetime = T0, step: timedelta = timedelta(minutes=5)):
+    """*days* days of a battery with per-direction efficiency *eta* and a
+    constant draw *self_w* from the stored energy: each day a charge and a
+    discharge of varying size with long rests between.  SoC in whole
+    percent, 5-minute samples (as the learner reads them)."""
+    out = []
+    stored = CAP * 0.3
+    t = start
+    for day in range(days):
+        charge_h = 1.0 + 0.4 * (day % 3)       # 3–5.4 kWh at 3 kW
+        dis_h = 1.5 + 0.5 * (day % 4)          # 1.5–3 kWh at 1 kW
+        phases = [(6, 0), (charge_h, 3000), (4, 0), (dis_h, -1000)]
+        phases.append((24 - sum(h for h, _ in phases), 0))
+        for hours, power in phases:
+            for _ in range(round(hours * 3600 / step.total_seconds())):
+                out.append((t, float(power), float(round(stored / CAP * 100))))
+                dt_h = step.total_seconds() / 3600
+                kwh = power / 1000 * dt_h
+                stored += kwh * eta if kwh > 0 else kwh / eta
+                stored = max(0.0, stored - self_w / 1000 * dt_h)
+                t += step
+    return out
+
+
+def test_balance_learns_efficiency_and_self_consumption():
+    s = drained_days(10, eta=0.9, self_w=30.0)
+    windows = find_balance_windows(s, CAP, standby_w=50)
+    assert len(windows) >= 10
+    est = fit_balance(windows, CAP)
+    assert est is not None and est.confident
+    assert est.efficiency == pytest.approx(0.9, abs=0.015)
+    assert est.self_consumption_w == pytest.approx(30.0, abs=8.0)
+
+
+def test_balance_without_self_consumption_finds_none():
+    est = fit_balance(find_balance_windows(drained_days(10, self_w=0.0), CAP, standby_w=50), CAP)
+    assert est is not None
+    assert est.efficiency == pytest.approx(0.9, abs=0.015)
+    assert est.self_consumption_w == pytest.approx(0.0, abs=6.0)
+
+
+def test_balance_is_not_confident_when_the_model_does_not_fit():
+    # This battery runs empty (and stays there) — the windows do not follow the model.
+    est = fit_balance(find_balance_windows(drained_days(10, eta=0.85, self_w=60.0), CAP,
+                                           standby_w=50), CAP)
+    assert est is not None and not est.confident
+    assert est.rms_error_kwh > 0.03 * CAP
+
+
+def test_balance_needs_enough_data():
+    est = fit_balance(find_balance_windows(drained_days(2), CAP, standby_w=50), CAP)
+    assert est is not None and not est.confident
+
+
+def test_balance_roundtrip_dict():
+    est = fit_balance(find_balance_windows(drained_days(10), CAP, standby_w=50), CAP)
+    assert BalanceEstimate.from_dict(est.to_dict()) == est
+
+
+def test_learner_prefers_the_energy_balance_and_keeps_the_configured_asymmetry(tmp_path):
+    samples = drained_days(10, eta=0.9, self_w=30.0)
+    now = samples[-1][0] + timedelta(minutes=1)
+    sc = StorageConstraints(
+        device_id="bat", capacity_kwh=CAP, max_charge_kw=3, max_discharge_kw=3,
+        charge_efficiency=0.98, discharge_efficiency=0.92,
+    )
+    path = tmp_path / "efficiency_bat.json"
+    learner = EfficiencyLearner(sc, FakeStorage(samples), mode="learned", history_days=14,
+                                model_path=path)
+    asyncio.run(learner.refit(now))
+    assert learner.method == "balance" and learner.in_use
+    planned = learner.apply(sc)
+    assert planned.self_consumption_w == pytest.approx(30.0, abs=8.0)
+    assert planned.charge_efficiency * planned.discharge_efficiency == pytest.approx(0.81, abs=0.03)
+    assert planned.charge_efficiency > planned.discharge_efficiency  # ratio kept
+    summary = learner.summary()
+    assert summary["method"] == "balance" and summary["balance"]["confident"]
+    diag = asyncio.run(learner.diagnostics())
+    assert diag["planned"]["self_consumption_w"] == planned.self_consumption_w
+    assert diag["balance_windows"]
+    # Persisted: a restart has the estimate before its first refit.
+    again = EfficiencyLearner(sc, FakeStorage([]), mode="learned", model_path=path)
+    assert again.method == "balance"

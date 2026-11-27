@@ -506,6 +506,8 @@ _BATTERY_PARAMS = {
                            choices=("zone", "grid_connection"),
                            description="Meter the battery regulates on without Nornwatt: its zone's, or the grid connection point's (then PV a separately billed load uses is not available to it)"),
     "standby_w": ParamSpec(float, default=50, advanced=True, label="Standby threshold (W)", minimum=0, description="Power treated as standby/noise (W)"),
+    "self_consumption_w": ParamSpec(float, default=0, label="Self consumption (W)", minimum=0,
+                                    description="Constant draw from the stored energy, at all times (battery management, inverter); learned with efficiency: learned"),
 }
 
 def _check_charge_curve(value: Any) -> str | None:
