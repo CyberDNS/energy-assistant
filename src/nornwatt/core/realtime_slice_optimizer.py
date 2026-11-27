@@ -29,6 +29,15 @@ against that price again; it only deviates for physical reasons.
 - A discharge intent may follow the live load, but only up to
   ``DISCHARGE_FOLLOW_HEADROOM`` × the planned power, so a small planned
   discharge does not become a full load-following discharge.
+- Beyond that the battery covers load the forecast did not expect only when
+  that is worth more than keeping the energy *by the plan's own value*: the
+  plan states what one more kWh stored is worth (the intent's
+  ``energy_value_eur_per_kwh``), so a delivered kWh is worth that ÷ the
+  discharge efficiency.  When the live import price is above it (by
+  ``FOLLOW_VALUE_MARGIN_EUR_PER_KWH``), the battery may discharge up to its
+  limit, each extra kWh priced at its value, so the battery whose energy is
+  worth least covers the extra first.  The next plan starts from the lower
+  SoC and re-balances the rest of the horizon.
 
 PV surplus is one shared pool
 -----------------------------
@@ -55,6 +64,13 @@ DISCHARGE_FOLLOW_HEADROOM = 1.25
 """A discharge intent may deliver up to this multiple of its planned power
 when the live load is higher than forecast (export-allowed intents excepted)."""
 
+FOLLOW_VALUE_MARGIN_EUR_PER_KWH = 0.02
+"""How far the import price must be above the value of the stored energy
+before a discharge intent covers load beyond its follow headroom."""
+
+DISCHARGE_TRACK_EUR_PER_KWH = 0.05
+"""Tie-breaker keeping a discharge intent near its planned power."""
+
 PLAN_SHORTFALL_EUR_PER_KWH = 10.0
 """Cost of a charge intent falling short of its planned power.
 
@@ -77,6 +93,18 @@ class StorageSliceInput:
     planned_w: float
     reserved_kwh: float
     prev_setpoint_w: float = 0.0
+    energy_value_eur_per_kwh: float | None = None
+    """What one more kWh stored is worth to the plan (the intent's value);
+    ``None``: unknown, the discharge stays within the follow headroom."""
+    discharge_efficiency: float = 1.0
+
+
+def _delivered_value(inp: StorageSliceInput) -> float | None:
+    """€ per kWh delivered that the plan gives up by discharging now."""
+    if inp.energy_value_eur_per_kwh is None:
+        return None
+    eta = inp.discharge_efficiency if inp.discharge_efficiency > 0 else 1.0
+    return max(0.0, inp.energy_value_eur_per_kwh) / eta
 
 
 def _solver() -> pulp.LpSolver:
@@ -125,6 +153,8 @@ def optimize_storage_slice(
     slew_neg: dict[str, pulp.LpVariable] = {}
     absorb_ids: list[str] = []
     discharge_cap_w: dict[str, float] = {}
+    """Discharge within the plan (incl. follow headroom): the load target."""
+    beyond_cost = 0.0
 
     for inp in inputs:
         did = inp.device_id
@@ -160,7 +190,24 @@ def optimize_storage_slice(
         else:
             # Follow the live load, but within the plan's discharge budget.
             discharge_cap_w[did] = min(max_d, -inp.planned_w * DISCHARGE_FOLLOW_HEADROOM)
-        prob += d[did] <= discharge_cap_w[did], f"discharge_cap__{did}"
+        value_w = _delivered_value(inp)
+        if (
+            is_discharge and not inp.export_allowed and value_w is not None
+            and imp_p > value_w + FOLLOW_VALUE_MARGIN_EUR_PER_KWH
+            and max_d > discharge_cap_w[did]
+        ):
+            # Unforecast load is worth covering (see "Plan fidelity"): up to
+            # the device limit, the part beyond the headroom priced at what
+            # the stored energy is worth to the plan.
+            beyond = pulp.LpVariable(f"beyond__{did}", lowBound=0.0)
+            prob += d[did] <= max_d, f"discharge_cap__{did}"
+            prob += beyond >= d[did] - discharge_cap_w[did], f"beyond_plan__{did}"
+            # The beyond part is priced at its value instead of the plan
+            # tracking tie-breaker it also incurs (that would add up to
+            # 0.05 €/kWh and keep the battery capped near break-even).
+            beyond_cost += (value_w - DISCHARGE_TRACK_EUR_PER_KWH) * beyond / 1000.0
+        else:
+            prob += d[did] <= discharge_cap_w[did], f"discharge_cap__{did}"
 
         # A grid-charge intent delivers its planned power, within the
         # device's current limits (see "Plan fidelity" above).
@@ -261,7 +308,7 @@ def optimize_storage_slice(
     for inp in inputs:
         did = inp.device_id
         if inp.planned_w < -1.0:
-            track_cost += 0.05 * (dev_pos[did] + dev_neg[did]) / 1000.0
+            track_cost += DISCHARGE_TRACK_EUR_PER_KWH * (dev_pos[did] + dev_neg[did]) / 1000.0
             slew_cost += 0.015 * (slew_pos[did] + slew_neg[did]) / 1000.0
         else:
             under_w = PLAN_SHORTFALL_EUR_PER_KWH if inp.planned_w > 1.0 else 0.2
@@ -269,7 +316,7 @@ def optimize_storage_slice(
             slew_cost += 0.08 * (slew_pos[did] + slew_neg[did]) / 1000.0
 
     unmet_cost = 0.0 if unmet_import_w is None else 0.6 * unmet_import_w / 1000.0
-    prob += grid_cost + track_cost + slew_cost + unmet_cost, "objective"
+    prob += grid_cost + track_cost + slew_cost + unmet_cost + beyond_cost, "objective"
 
     status = prob.solve(_solver())
     if pulp.LpStatus[status] not in ("Optimal", "Feasible"):

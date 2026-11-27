@@ -20,6 +20,10 @@ from nornwatt.core.models import (
     StorageConstraints,
     ThresholdConstraints,
 )
+from nornwatt.core.realtime_slice_optimizer import (
+    StorageSliceInput,
+    optimize_storage_slice,
+)
 from nornwatt.core.registry import DeviceRegistry
 
 
@@ -668,6 +672,107 @@ def test_small_planned_discharge_is_not_turned_into_full_load_following() -> Non
     (_did, setpoint_w, _mode), = loop.describe_setpoints(live)
     assert setpoint_w is not None
     assert -250.0 - 1e-6 <= setpoint_w < -150.0
+
+
+def _valued_discharge_loop(now: datetime, power_kw: float, value: float | None) -> ControlLoop:
+    loop = ControlLoop(ledger=BatteryCostLedger())
+    sc = _constraints("bat")
+    sc.discharge_efficiency = 0.9
+    loop.register_contributor(StorageControlContributor(sc))
+    loop.update_plan(EnergyPlan(intents=[ControlIntent(
+        device_id="bat", timestep=now, power_kw=power_kw, energy_value_eur_per_kwh=value,
+    )]))
+    return loop
+
+
+def _evening(now: datetime, price: float) -> LiveSituation:
+    return LiveSituation(
+        timestamp=now,
+        grid_power_w=700.0,
+        dt_hours=5.0 / 3600.0,
+        device_states={"bat": DeviceState(device_id="bat", power_w=0.0, soc_pct=50.0)},
+        current_price_eur_per_kwh=price,
+        pv_opportunity_price_eur_per_kwh=0.08,
+    )
+
+
+def test_small_discharge_covers_unforecast_load_when_import_beats_its_value() -> None:
+    """The plan values the stored kWh at 0.43 (0.48 delivered at η 0.9); at
+    0.62 import an unforecast 700 W load is cheaper from the battery."""
+    now = datetime.now(UTC)
+    loop = _valued_discharge_loop(now, -0.1, 0.43)
+    (_did, setpoint_w, _mode), = loop.describe_setpoints(_evening(now, 0.62))
+    assert setpoint_w is not None
+    assert -700.0 - 1e-6 <= setpoint_w <= -550.0  # ≈ the load, no export
+
+
+@pytest.mark.parametrize("value", [None, 0.55])
+def test_small_discharge_keeps_its_headroom_when_the_energy_is_worth_more(value) -> None:
+    # 0.55 / 0.9 = 0.61 delivered > 0.50 import: keep it for the plan's later use
+    now = datetime.now(UTC)
+    loop = _valued_discharge_loop(now, -0.2, value)
+    (_did, setpoint_w, _mode), = loop.describe_setpoints(_evening(now, 0.50))
+    assert setpoint_w is not None
+    assert -250.0 - 1e-6 <= setpoint_w < -150.0
+
+
+def test_unforecast_load_is_covered_close_to_break_even() -> None:
+    """Seen on the sim stack: 0.4337 / 0.95 = 0.457 delivered vs 0.5015 import
+    — the tracking and slew tie-breakers must not keep the battery capped."""
+    out = optimize_storage_slice(
+        [StorageSliceInput(device_id="bat", max_charge_w=2500, max_discharge_w=2500,
+                           no_grid_charge=False, export_allowed=False, planned_w=-882,
+                           reserved_kwh=0.0, prev_setpoint_w=-1102.5,
+                           energy_value_eur_per_kwh=0.4337, discharge_efficiency=0.95)],
+        grid_power_w=1618.0, pv_surplus_w=0.0, dt_hours=5 / 3600,
+        import_price_eur_per_kwh=0.5015, export_price_eur_per_kwh=0.08,
+        cost_basis_eur_per_kwh={},
+    )
+    assert out is not None
+    assert out["bat"] == pytest.approx(-1618.0, abs=5.0)
+
+
+def test_unforecast_load_goes_to_the_battery_whose_energy_is_worth_least() -> None:
+    """Both small discharges may cover the spike; the cheaper energy goes first."""
+    def inp(did: str, value: float) -> StorageSliceInput:
+        return StorageSliceInput(
+            device_id=did, max_charge_w=3000, max_discharge_w=3000, no_grid_charge=False,
+            export_allowed=False, planned_w=-100, reserved_kwh=0.0,
+            energy_value_eur_per_kwh=value, discharge_efficiency=0.9,
+        )
+    out = optimize_storage_slice(
+        [inp("dear", 0.50), inp("cheap", 0.40)],
+        grid_power_w=1500.0, pv_surplus_w=0.0, dt_hours=5 / 3600,
+        import_price_eur_per_kwh=0.62, export_price_eur_per_kwh=0.08,
+        cost_basis_eur_per_kwh={},
+    )
+    assert out is not None
+    assert out["cheap"] <= -1200.0
+    assert -125.0 - 1e-6 <= out["dear"] <= 0.0
+    assert out["cheap"] + out["dear"] >= -1500.0 - 1e-6  # no export
+
+
+def test_tonights_case_small_battery_covers_what_the_capped_one_cannot() -> None:
+    """Zendure-like battery planned at its 800 W limit, SMA-like battery at a
+    106 W share; a 1.5 kW load spike is covered by the SMA instead of the grid."""
+    out = optimize_storage_slice(
+        [
+            StorageSliceInput(device_id="zendure", max_charge_w=1200, max_discharge_w=800,
+                              no_grid_charge=False, export_allowed=False, planned_w=-800,
+                              reserved_kwh=0.0, energy_value_eur_per_kwh=0.43,
+                              discharge_efficiency=0.9),
+            StorageSliceInput(device_id="sma", max_charge_w=3000, max_discharge_w=3000,
+                              no_grid_charge=False, export_allowed=False, planned_w=-106,
+                              reserved_kwh=0.0, energy_value_eur_per_kwh=0.43,
+                              discharge_efficiency=0.9),
+        ],
+        grid_power_w=1500.0, pv_surplus_w=0.0, dt_hours=5 / 3600,
+        import_price_eur_per_kwh=0.62, export_price_eur_per_kwh=0.08,
+        cost_basis_eur_per_kwh={},
+    )
+    assert out is not None
+    assert out["zendure"] == pytest.approx(-800.0, abs=1.0)
+    assert out["sma"] == pytest.approx(-700.0, abs=5.0)
 
 
 def test_planned_discharge_still_follows_lower_load() -> None:
