@@ -644,3 +644,50 @@ async def test_application_releases_devices_but_not_in_dry_run(caplog) -> None:
     dry = _ReleasingDevice()
     await _app_with([dry], dry_run=True)._release_devices()
     assert dry.released == 0
+
+
+@pytest.mark.parametrize(
+    ("power_w", "offset", "dsch_max"),
+    [
+        (-57.0, 0.0, 100),     # rounded up, not to the nearest step (50)
+        (-57.0, 30.0, 100),
+        (-100.0, 0.0, 100),    # already on a step
+        (-100.0, 30.0, 150),   # + the inverter's own draw
+        (-131.0, 30.0, 200),
+        (-2480.0, 30.0, 2500), # capped at max discharge
+        (-20.0, 30.0, 0),      # below half a step: hold
+    ],
+)
+async def test_sma_discharge_cap_covers_the_inverters_own_draw(
+    power_w: float, offset: float, dsch_max: int
+) -> None:
+    """The discharge limit is on the battery side; the inverter's own
+    consumption comes out of it, so the AC output reaches the setpoint only
+    with the offset added and the cap rounded up."""
+    client = _sma_client()
+    device = _controlled_sma(client, bms_discharge_offset_w=offset)
+    await device.send_command(_set_power(power_w))
+    assert _bms_values(client)[40799] == dsch_max
+
+
+def test_sma_discharge_offset_must_not_be_negative() -> None:
+    profile = load_profile(SMA)
+    with pytest.raises(ControlConfigError, match="bms_discharge_offset_w"):
+        build_strategy(profile.control.strategy, profile.control.registers,
+                       {"max_charge_kw": 3.0, "max_discharge_kw": 2.5, "bms_discharge_offset_w": -5})
+
+
+def test_sma_bms_settings_pass_config_validation() -> None:
+    from nornwatt.core.device_model import parse_devices
+    from nornwatt.loader.device_loader import validate_plugins
+
+    devices = parse_devices({"sma_battery": {
+        "category": "battery", "type": "modbus", "profile": SMA, "host": "192.0.2.10",
+        "bms_step_w": 50, "bms_discharge_offset_w": 30,
+        "params": {"capacity_kwh": 7.4, "max_charge_kw": 3.0, "max_discharge_kw": 3.0},
+    }})
+    validate_plugins(devices)   # raises on unknown settings
+    device, _ = _build({"category": "battery", "profile": SMA, "host": "192.0.2.10",
+                        "max_charge_kw": 3.0, "max_discharge_kw": 3.0,
+                        "bms_discharge_offset_w": 30})
+    assert device._strategy._dsch_offset_w == 30.0

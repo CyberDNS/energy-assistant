@@ -18,6 +18,7 @@ and registering it in ``STRATEGIES``.
 
 from __future__ import annotations
 
+import math
 from typing import Any, Protocol
 
 from ...core.models import DeviceCommand
@@ -126,7 +127,12 @@ class BmsOperatingMode:
     * ``> 0`` — charge mode with charge min = max = P: exactly P, from PV or
       the grid.
     * ``< 0`` — default mode, no charging, discharge up to |P|: the inverter
-      covers the load at its own meter up to that cap.
+      covers the load at its own meter up to that cap.  The cap is a
+      battery-side (DC) limit and the inverter's own consumption comes out
+      of it, so ``bms_discharge_offset_w`` (default 0) is added and the cap
+      is rounded **up** to the next step: the AC output then reaches |P|
+      instead of falling short by the inverter's draw (about 30 W on an
+      SBS 3.7).  A setpoint below half a step still holds.
     * ``0`` — default mode with charge and discharge max 0: hold.
 
     ``release()`` — default mode with the full limits: the inverter's own
@@ -138,7 +144,7 @@ class BmsOperatingMode:
     are parameters, not a cyclic setpoint.
 
     Device config keys: ``max_charge_kw`` and ``max_discharge_kw`` (required),
-    ``bms_step_w``.
+    ``bms_step_w``, ``bms_discharge_offset_w``.
     """
 
     controls_charge = True
@@ -156,6 +162,9 @@ class BmsOperatingMode:
         self._step_w = float(device_cfg.get("bms_step_w", 50.0))
         if self._step_w <= 0:
             raise ControlConfigError("'bms_step_w' must be positive")
+        self._dsch_offset_w = float(device_cfg.get("bms_discharge_offset_w", 0.0))
+        if self._dsch_offset_w < 0:
+            raise ControlConfigError("'bms_discharge_offset_w' must not be negative")
 
     def _writes(
         self, mode: int, cha_min: float, cha_max: float, dsch_min: float, dsch_max: float
@@ -176,12 +185,15 @@ class BmsOperatingMode:
             raise NotImplementedError(
                 f"bms_operating_mode does not support command {command.command!r}"
             )
-        power_w = round(float(command.value) / self._step_w) * self._step_w
+        value = float(command.value)
+        power_w = round(value / self._step_w) * self._step_w
         if power_w > 0:
             p = min(power_w, self._max_charge_w)
             return self._writes(self.MODE_CHARGE, p, p, 0, 0)
         if power_w < 0:
-            return self._writes(self.MODE_DEFAULT, 0, 0, 0, min(-power_w, self._max_discharge_w))
+            # DC cap: the AC power plus the inverter's own draw, rounded up.
+            cap = math.ceil((-value + self._dsch_offset_w) / self._step_w - 1e-9) * self._step_w
+            return self._writes(self.MODE_DEFAULT, 0, 0, 0, min(cap, self._max_discharge_w))
         return self._writes(self.MODE_DEFAULT, 0, 0, 0, 0)
 
     def release(self) -> list[tuple[str, float]]:
