@@ -81,7 +81,8 @@ async def test_charge_reason_names_the_price_and_the_later_use() -> None:
     assert first.power_kw > 0 and first.grid_allowed
     assert first.reason.startswith("Charging from grid at €0.10/kWh for use from ")
     use = (now + timedelta(hours=3)).astimezone().strftime("%H:%M")
-    assert f"from {use} (€0.40/kWh)" in first.reason
+    # "from 21:00", or "from tomorrow 00:00" when the use falls on the next day
+    assert f"{use} (€0.40/kWh)" in first.reason
     # 0.95 × 0.95 × 0.40 − 0.10 ≈ €0.26 per kWh charged.
     assert "gain €0.26/kWh after losses and wear" in first.reason
 
