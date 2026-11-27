@@ -45,10 +45,14 @@ from statistics import median
 from typing import Any
 
 __all__ = [
+    "BalanceEstimate",
+    "BalanceWindow",
     "CycleWindow",
     "EfficiencyEstimate",
     "estimate",
+    "find_balance_windows",
     "find_cycles",
+    "fit_balance",
 ]
 
 _MAX_GAP = timedelta(minutes=5)
@@ -171,27 +175,12 @@ class _Stretch:
             self.rest = None
 
 
-def find_cycles(
+def _stretches(
     samples: Iterable[tuple[datetime, float | None, float | None]],
     capacity_kwh: float,
-    *,
-    standby_w: float = 50.0,
-    min_soc_pct: float = 0.0,
-    max_soc_pct: float = 100.0,
-    min_throughput_kwh: float | None = None,
-) -> list[CycleWindow]:
-    """Closed cycles in time-ordered ``(timestamp, power_w, soc_pct)`` samples.
-
-    ``power_w`` is AC power, positive while charging.  A sample without a
-    SoC reading keeps the previous one (the BMS reports SoC less often than
-    power), so it does not split the history.  *min_throughput_kwh*
-    (default 15 % of the capacity) is how much energy a cycle must move
-    in **each** direction: small cycles are dominated by the SoC rounding.
-    """
-    if capacity_kwh <= 0:
-        return []
-    min_kwh = min_throughput_kwh if min_throughput_kwh is not None else 0.15 * capacity_kwh
-
+    standby_w: float,
+) -> list[_Stretch]:
+    """Contiguous runs of samples with their energy counts and rest points."""
     stretches: list[_Stretch] = []
     cur: _Stretch | None = None
     prev: tuple[datetime, float, float] | None = None
@@ -244,6 +233,31 @@ def find_cycles(
         prev = (ts, p, soc)
     if cur is not None:
         cur.close_rest()
+    return stretches
+
+
+def find_cycles(
+    samples: Iterable[tuple[datetime, float | None, float | None]],
+    capacity_kwh: float,
+    *,
+    standby_w: float = 50.0,
+    min_soc_pct: float = 0.0,
+    max_soc_pct: float = 100.0,
+    min_throughput_kwh: float | None = None,
+) -> list[CycleWindow]:
+    """Closed cycles in time-ordered ``(timestamp, power_w, soc_pct)`` samples.
+
+    ``power_w`` is AC power, positive while charging.  A sample without a
+    SoC reading keeps the previous one (the BMS reports SoC less often than
+    power), so it does not split the history.  *min_throughput_kwh*
+    (default 15 % of the capacity) is how much energy a cycle must move
+    in **each** direction: small cycles are dominated by the SoC rounding.
+    """
+    if capacity_kwh <= 0:
+        return []
+    min_kwh = min_throughput_kwh if min_throughput_kwh is not None else 0.15 * capacity_kwh
+
+    stretches = _stretches(samples, capacity_kwh, standby_w)
 
     def at_full(s: float) -> bool:
         return s >= min(max_soc_pct, 100.0) - 1.0
@@ -319,4 +333,176 @@ def estimate(
         fitted_at=fitted_at.isoformat() if fitted_at else "",
         raw_round_trip=round(raw, 4),
         window_days=round(span.total_seconds() / 86400.0, 2),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Energy balance: efficiency and constant self-consumption (#158)
+# ---------------------------------------------------------------------------
+#
+# Closed SoC cycles need two settled readings at the *same* SoC and trust the
+# reading in between to be linear in stored energy — some batteries' SoC is
+# far from that.  The energy balance only needs the stored energy at the two
+# ends of long windows, and fits both loss terms of the battery model at
+# once:
+#
+#     η·E_in − E_out/η − P_self·hours = ΔE_stored
+#
+# E_in / E_out are the measured AC energies, ΔE_stored the change of the
+# SoC reading at the window's rest points.  A single reading's error is
+# bounded and does not add up: over many windows it averages out, while the
+# losses grow with throughput and time.
+
+_BALANCE_MIN_WINDOW = timedelta(hours=12)
+"""Shortest window: the losses must be large against a reading's error."""
+
+_ETA_GRID = [0.70 + 0.0025 * i for i in range(121)]  # 0.70 … 1.00
+
+
+@dataclass(frozen=True)
+class BalanceWindow:
+    """One window between two settled rest points."""
+
+    start: datetime
+    end: datetime
+    energy_in_kwh: float
+    energy_out_kwh: float
+    delta_stored_kwh: float
+
+    @property
+    def hours(self) -> float:
+        return (self.end - self.start).total_seconds() / 3600.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "start": self.start.isoformat(),
+            "end": self.end.isoformat(),
+            "energy_in_kwh": round(self.energy_in_kwh, 4),
+            "energy_out_kwh": round(self.energy_out_kwh, 4),
+            "delta_stored_kwh": round(self.delta_stored_kwh, 4),
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> BalanceWindow:
+        return cls(
+            start=datetime.fromisoformat(d["start"]),
+            end=datetime.fromisoformat(d["end"]),
+            energy_in_kwh=float(d["energy_in_kwh"]),
+            energy_out_kwh=float(d["energy_out_kwh"]),
+            delta_stored_kwh=float(d["delta_stored_kwh"]),
+        )
+
+
+@dataclass
+class BalanceEstimate:
+    """Efficiency per direction (symmetric) and constant self-consumption."""
+
+    efficiency: float
+    self_consumption_w: float
+    windows: int
+    energy_in_kwh: float
+    days: float
+    rms_error_kwh: float
+    """Root mean square of the windows' unexplained energy."""
+    confident: bool
+    fitted_at: str = ""
+
+    @property
+    def round_trip(self) -> float:
+        return self.efficiency ** 2
+
+    def to_dict(self) -> dict[str, Any]:
+        d = asdict(self)
+        d["round_trip"] = round(self.round_trip, 4)
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> BalanceEstimate:
+        names = set(cls.__dataclass_fields__)
+        return cls(**{k: v for k, v in d.items() if k in names})
+
+
+def find_balance_windows(
+    samples: Iterable[tuple[datetime, float | None, float | None]],
+    capacity_kwh: float,
+    *,
+    standby_w: float = 50.0,
+    max_soc_pct: float = 100.0,
+    min_window: timedelta = _BALANCE_MIN_WINDOW,
+) -> list[BalanceWindow]:
+    """Windows from rest point to rest point, at least *min_window* long,
+    chained without overlap.  A window with a SoC jump inside is dropped,
+    unless both ends are at full (the BMS calibrates there)."""
+    if capacity_kwh <= 0:
+        return []
+    full = min(max_soc_pct, 100.0) - 1.0
+    out: list[BalanceWindow] = []
+    for st in _stretches(samples, capacity_kwh, standby_w):
+        rests = st.rests
+        i = 0
+        while i < len(rests):
+            a = rests[i]
+            j = next((k for k in range(i + 1, len(rests)) if rests[k].ts - a.ts >= min_window), None)
+            if j is None:
+                break
+            b = rests[j]
+            if b.jumps == a.jumps or (a.soc >= full and b.soc >= full):
+                out.append(BalanceWindow(
+                    start=a.ts, end=b.ts,
+                    energy_in_kwh=b.e_in - a.e_in, energy_out_kwh=b.e_out - a.e_out,
+                    delta_stored_kwh=(b.soc - a.soc) / 100.0 * capacity_kwh,
+                ))
+            i = j
+    return out
+
+
+def fit_balance(
+    windows: Iterable[BalanceWindow],
+    capacity_kwh: float,
+    *,
+    min_windows: int = 6,
+    min_days: float = 4.0,
+    min_throughput_capacities: float = 1.5,
+    max_rms_capacities: float = 0.03,
+    fitted_at: datetime | None = None,
+) -> BalanceEstimate | None:
+    """Least-squares fit of η (per direction, symmetric) and P_self ≥ 0.
+
+    Confident with at least *min_windows* windows over *min_days* that
+    together charged *min_throughput_capacities* × the capacity, and when
+    the model explains them: the windows' unexplained energy (RMS) stays
+    below *max_rms_capacities* × the capacity.  A battery whose SoC reading
+    does not track its energy fails that test and keeps its configured (or
+    cycle-learned) values.
+    """
+    ws = [w for w in windows if w.hours > 0]
+    if len(ws) < 2:
+        return None
+    best: tuple[float, float, float] | None = None  # (sse, eta, p_kw)
+    for eta in _ETA_GRID:
+        r = [eta * w.energy_in_kwh - w.energy_out_kwh / eta - w.delta_stored_kwh for w in ws]
+        hh = sum(w.hours ** 2 for w in ws)
+        p_kw = max(0.0, sum(ri * w.hours for ri, w in zip(r, ws, strict=True)) / hh)
+        sse = sum((ri - p_kw * w.hours) ** 2 for ri, w in zip(r, ws, strict=True))
+        if best is None or sse < best[0]:
+            best = (sse, eta, p_kw)
+    assert best is not None
+    sse, eta, p_kw = best
+    e_in = sum(w.energy_in_kwh for w in ws)
+    days = (max(w.end for w in ws) - min(w.start for w in ws)).total_seconds() / 86400.0
+    confident = (
+        len(ws) >= min_windows and days >= min_days
+        and e_in >= min_throughput_capacities * capacity_kwh
+        and _ETA_GRID[0] < eta < _ETA_GRID[-1]  # not stuck at the edge of the search
+        and math.sqrt(sse / len(ws)) <= max_rms_capacities * capacity_kwh
+    )
+    return BalanceEstimate(
+        efficiency=round(eta, 4),
+        self_consumption_w=round(p_kw * 1000.0, 1),
+        windows=len(ws),
+        energy_in_kwh=round(e_in, 3),
+        days=round(days, 2),
+        rms_error_kwh=round(math.sqrt(sse / len(ws)), 4),
+        confident=confident,
+        fitted_at=fitted_at.isoformat() if fitted_at else "",
     )

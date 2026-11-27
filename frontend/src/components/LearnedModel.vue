@@ -274,6 +274,7 @@ export default defineComponent({
     // ── battery efficiency ───────────────────────────────────────────────
     const pct = (v, dec = 1) => (v == null ? '—' : `${(v * 100).toFixed(dec)} %`)
     const est = computed(() => item.value?.estimate ?? null)
+    const bal = computed(() => item.value?.balance ?? null)
     const cyclesNewestFirst = computed(() => [...(item.value?.cycles ?? [])].reverse())
     // Cycle ends with a day of padding on both sides, so a single cycle
     // doesn't fill the axis and the reference lines stay visible.
@@ -379,7 +380,7 @@ export default defineComponent({
     return {
       item, model, isTemp, isThermal, isEfficiency, isPv, error, busy, refit,
       pvForecastTraces, azimuthText, shadedBins,
-      pct, est, cyclesNewestFirst, cycleTraces, cycleLayout, socTraces, socLayout,
+      pct, est, bal, cyclesNewestFirst, cycleTraces, cycleLayout, socTraces, socLayout,
       tUnit, rate, thermalModes, modeName, thermalForm, thermalTraces, thermalLayout,
       counts, formula, fittedAt, statusPill, fmt,
       scatterTraces, shapeTraces, seriesTraces, forecastTraces, forecastDays, excludedDays,
@@ -420,7 +421,42 @@ export default defineComponent({
         <div class="card">
           <div class="k">Plan uses</div>
           <div class="v">{{ pct(item.planned.charge_efficiency) }}</div>
-          <div class="savings-sub">per direction · {{ item.mode === 'learned' ? 'learned' : 'configured' }}</div>
+          <div class="savings-sub">
+            {{ pct(item.planned.charge_efficiency, 0) }} charge · {{ pct(item.planned.discharge_efficiency, 0) }} discharge
+            · {{ fmt(item.planned.self_consumption_w ?? 0, 0) }} W self-consumption
+            · {{ item.method === 'balance' ? 'learned (energy balance)' : item.method === 'cycles' ? 'learned (cycles)' : 'configured' }}
+          </div>
+        </div>
+      </div>
+
+      <div class="subpanel" v-if="bal">
+        <h3>Energy balance</h3>
+        <div class="kpis">
+          <div class="card">
+            <div class="k">Per direction</div>
+            <div class="v">{{ pct(bal.efficiency) }}</div>
+            <div class="savings-sub">{{ pct(bal.round_trip) }} round trip</div>
+          </div>
+          <div class="card">
+            <div class="k">Self-consumption</div>
+            <div class="v">{{ fmt(bal.self_consumption_w, 0) }} W</div>
+            <div class="savings-sub">configured {{ fmt(item.configured_self_consumption_w ?? 0, 0) }} W</div>
+          </div>
+          <div class="card">
+            <div class="k">Windows</div>
+            <div class="v">{{ bal.windows }}</div>
+            <div class="savings-sub">
+              {{ fmt(bal.energy_in_kwh) }} kWh in · {{ fmt(bal.days) }} days · ± {{ fmt(bal.rms_error_kwh, 2) }} kWh
+              · {{ bal.confident ? 'confident' : 'collecting' }}
+            </div>
+          </div>
+        </div>
+        <div class="footnote">
+          Windows of at least 12 h from rest to rest. In each, the energy charged and discharged (measured)
+          must explain the change of the stored energy: η × in − out ÷ η − self-consumption × hours.
+          Confident with 6 windows over 4 days that charged 1.5 × the capacity, and when the windows
+          fit within 3 % of the capacity — a battery whose SoC reading does not track its energy stays
+          on its configured values. Preferred over the cycles below.
         </div>
       </div>
 
@@ -485,9 +521,10 @@ export default defineComponent({
           A cycle starts and ends with the battery idle at the same SoC reading, so the stored
           energy is the same at both ends and SoC calibration errors cancel; cycles with an unexplained SoC jump
           (BMS re-calibration) are dropped. Power up to {{ fmt(item.standby_w, 0) }} W (standby) is left out.
-          Cycles are kept {{ fmt(item.history_days, 0) }} days. The plan uses the learned value with
-          <code>efficiency: learned</code> on the battery once {{ item.min_cycles }} cycles have charged
-          1.5 × the capacity; the savings accounting always uses the configured values.
+          Cycles are kept {{ fmt(item.history_days, 0) }} days. With
+          <code>efficiency: learned</code> on the battery, the plan and the savings accounting use the
+          energy balance once it is confident, else the cycles once {{ item.min_cycles }} of them have
+          charged 1.5 × the capacity.
         </div>
       </details>
     </template>

@@ -56,11 +56,12 @@ def register(registry: PluginRegistry) -> None:
                                     minimum=0, exclusive_minimum=True, default=50.0,
                                     description="SMA: setpoints are rounded to this step, so small "
                                                 "changes do not cause writes"),
-            "bms_discharge_offset_w": ParamSpec(float, advanced=True, label="Inverter own consumption (W)",
-                                                minimum=0, default=0.0,
-                                                description="SMA: added to the discharge limit, which is on "
-                                                            "the battery side, so the AC output reaches the "
-                                                            "setpoint (about 30 W on an SBS 3.7)"),
+            "bms_discharge_offset_w": ParamSpec(float, advanced=True, label="Discharge offset (W, deprecated)",
+                                                minimum=0,
+                                                description="SMA: deprecated — set the battery's "
+                                                            "self_consumption_w and discharge_efficiency "
+                                                            "instead. When set, the discharge limit is the "
+                                                            "setpoint plus this offset"),
         },
     )
 

@@ -57,8 +57,12 @@ Device behaviour both houses share
   configured one.  The real house's losses are what the SoC readings show,
   so the uncontrolled house must not run on a better battery than it.
 * Real self-discharge and SoC jumps change the real ledger's kWh but not its
-  value, so later uses of that battery's energy cost more — no correction
-  needed.
+  value, so later uses of that battery's energy cost more.
+* A battery's constant self-consumption (``self_consumption_w``, configured
+  or learned) drains both houses: in the real one it shows in the SoC
+  readings, the uncontrolled battery loses it in the simulation, the same
+  way (kWh go, value stays).  Without it the uncontrolled house would run on
+  a battery without that loss.
 
 Threshold devices
 -----------------
@@ -679,6 +683,7 @@ class SavingsTracker:
             u_charge, u_discharge, {**u_ev, **{_dev(d): e for d, e in u_dev.items()}},
         )
         slot.add_component(BATTERIES, unc.cost - real.cost)
+        self._self_consume(hours)
 
         # ── Power charges: each house's 15-minute import and month peak ──
         if self._power:
@@ -792,6 +797,16 @@ class SavingsTracker:
             stored = sample.stored_kwh.get(device_id)
             if stored is not None:
                 led.stored_kwh = max(0.0, stored)
+
+    def _self_consume(self, hours: float) -> None:
+        """The uncontrolled batteries lose their constant self-consumption,
+        as the real ones do (there it shows in the SoC readings).  Like the
+        real ledger, the kWh go and the value stays: the lost energy's cost
+        is booked when the rest is used."""
+        for device_id, led in self.state.unc.items():
+            sc = self._batteries.get(device_id)
+            if sc is not None and sc.self_consumption_w > 0:
+                led.stored_kwh = max(0.0, led.stored_kwh - sc.self_consumption_w / 1000.0 * hours)
 
     def _update_sessions(self, sample: LiveSample, previous: datetime) -> None:
         """Open a session at plug-in; close it at unplug."""

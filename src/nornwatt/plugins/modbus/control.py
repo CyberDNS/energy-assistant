@@ -128,11 +128,18 @@ class BmsOperatingMode:
       the grid.
     * ``< 0`` — default mode, no charging, discharge up to |P|: the inverter
       covers the load at its own meter up to that cap.  The cap is a
-      battery-side (DC) limit and the inverter's own consumption comes out
-      of it, so ``bms_discharge_offset_w`` (default 0) is added and the cap
-      is rounded **up** to the next step: the AC output then reaches |P|
-      instead of falling short by the inverter's draw (about 30 W on an
-      SBS 3.7).  A setpoint below half a step still holds.
+      battery-side (DC) limit, so the AC setpoint is translated with the
+      battery model (``StorageConstraints.self_consumption_w``)::
+
+          cap = |P| / discharge_efficiency + self_consumption_w
+
+      rounded **up** to the next step, so the AC output reaches |P| instead
+      of falling short by the conversion loss and the system's own draw.
+      A setpoint below half a step still holds.  ``bms_discharge_offset_w``
+      (deprecated, from before the battery model) replaces the translation
+      by ``|P| + offset`` when it is set.
+      Charging is not translated: whether the charge window is battery- or
+      AC-side is not verified.
     * ``0`` — default mode with charge and discharge max 0: hold.
 
     ``release()`` — default mode with the full limits: the inverter's own
@@ -144,7 +151,8 @@ class BmsOperatingMode:
     are parameters, not a cyclic setpoint.
 
     Device config keys: ``max_charge_kw`` and ``max_discharge_kw`` (required),
-    ``bms_step_w``, ``bms_discharge_offset_w``.
+    ``discharge_efficiency`` and ``self_consumption_w`` (the battery's
+    configured values), ``bms_step_w``, ``bms_discharge_offset_w``.
     """
 
     controls_charge = True
@@ -162,9 +170,22 @@ class BmsOperatingMode:
         self._step_w = float(device_cfg.get("bms_step_w", 50.0))
         if self._step_w <= 0:
             raise ControlConfigError("'bms_step_w' must be positive")
-        self._dsch_offset_w = float(device_cfg.get("bms_discharge_offset_w", 0.0))
-        if self._dsch_offset_w < 0:
+        legacy = device_cfg.get("bms_discharge_offset_w")
+        self._dsch_offset_w = float(legacy) if legacy is not None else None
+        if self._dsch_offset_w is not None and self._dsch_offset_w < 0:
             raise ControlConfigError("'bms_discharge_offset_w' must not be negative")
+        self._eta_d = float(device_cfg.get("discharge_efficiency", 0.95))
+        if not 0 < self._eta_d <= 1:
+            raise ControlConfigError("'discharge_efficiency' must be in (0, 1]")
+        self._self_w = max(0.0, float(device_cfg.get("self_consumption_w", 0.0)))
+
+    def _discharge_cap_w(self, ac_w: float) -> float:
+        """Battery-side discharge limit for an AC output of *ac_w* (> 0)."""
+        if self._dsch_offset_w is not None:
+            dc = ac_w + self._dsch_offset_w
+        else:
+            dc = ac_w / self._eta_d + self._self_w
+        return math.ceil(dc / self._step_w - 1e-9) * self._step_w
 
     def _writes(
         self, mode: int, cha_min: float, cha_max: float, dsch_min: float, dsch_max: float
@@ -191,8 +212,7 @@ class BmsOperatingMode:
             p = min(power_w, self._max_charge_w)
             return self._writes(self.MODE_CHARGE, p, p, 0, 0)
         if power_w < 0:
-            # DC cap: the AC power plus the inverter's own draw, rounded up.
-            cap = math.ceil((-value + self._dsch_offset_w) / self._step_w - 1e-9) * self._step_w
+            cap = self._discharge_cap_w(-value)
             return self._writes(self.MODE_DEFAULT, 0, 0, 0, min(cap, self._max_discharge_w))
         return self._writes(self.MODE_DEFAULT, 0, 0, 0, 0)
 

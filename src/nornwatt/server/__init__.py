@@ -3714,6 +3714,7 @@ class Application:
                         "discharge_efficiency": sc.discharge_efficiency,
                         "max_charge_kw":        sc.max_charge_kw,
                         "max_discharge_kw":     sc.max_discharge_kw,
+                        "self_consumption_w":   sc.self_consumption_w,
                         # Configured vs. learned round trip, and whether the
                         # plan uses the learned one (plugins/learned/efficiency).
                         "efficiency": (

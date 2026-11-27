@@ -319,7 +319,7 @@ def _controlled_sma(client: FakeModbusClient, **cfg) -> ModbusDevice:
     profile = load_profile(SMA)
     strategy = build_strategy(
         profile.control.strategy, profile.control.registers,
-        {"max_charge_kw": 3.0, "max_discharge_kw": 2.5, **cfg},
+        {"max_charge_kw": 3.0, "max_discharge_kw": 2.5, "discharge_efficiency": 1.0, **cfg},
     )
     return ModbusDevice("sma_battery", client, profile, strategy=strategy)
 
@@ -658,12 +658,11 @@ async def test_application_releases_devices_but_not_in_dry_run(caplog) -> None:
         (-20.0, 30.0, 0),      # below half a step: hold
     ],
 )
-async def test_sma_discharge_cap_covers_the_inverters_own_draw(
+async def test_sma_deprecated_discharge_offset_still_applies(
     power_w: float, offset: float, dsch_max: int
 ) -> None:
-    """The discharge limit is on the battery side; the inverter's own
-    consumption comes out of it, so the AC output reaches the setpoint only
-    with the offset added and the cap rounded up."""
+    """``bms_discharge_offset_w`` (before the battery model): |P| + offset,
+    rounded up."""
     client = _sma_client()
     device = _controlled_sma(client, bms_discharge_offset_w=offset)
     await device.send_command(_set_power(power_w))
@@ -691,3 +690,31 @@ def test_sma_bms_settings_pass_config_validation() -> None:
                         "max_charge_kw": 3.0, "max_discharge_kw": 3.0,
                         "bms_discharge_offset_w": 30})
     assert device._strategy._dsch_offset_w == 30.0
+
+
+@pytest.mark.parametrize(
+    ("power_w", "eta", "self_w", "dsch_max"),
+    [
+        (-721.0, 0.955, 25.0, 800),   # 755 + 25 = 780 → 800; AC ≈ (800 − 25) × 0.955 = 740
+        (-57.0, 0.955, 25.0, 100),    # 60 + 25 = 85 → 100
+        (-100.0, 1.0, 0.0, 100),      # lossless: the setpoint itself
+        (-2480.0, 0.9, 25.0, 2500),   # capped at max discharge
+        (-20.0, 0.9, 25.0, 0),        # below half a step: hold
+    ],
+)
+async def test_sma_discharge_limit_from_the_battery_model(
+    power_w: float, eta: float, self_w: float, dsch_max: int
+) -> None:
+    """The limit is battery-side: |P| / η_discharge + self_consumption_w, rounded up."""
+    client = _sma_client()
+    device = _controlled_sma(client, discharge_efficiency=eta, self_consumption_w=self_w)
+    await device.send_command(_set_power(power_w))
+    assert _bms_values(client)[40799] == dsch_max
+
+
+async def test_sma_charge_is_not_translated() -> None:
+    client = _sma_client()
+    device = _controlled_sma(client, discharge_efficiency=0.9, self_consumption_w=25.0)
+    await device.send_command(_set_power(1000.0))
+    values = _bms_values(client)
+    assert (values[40793], values[40795]) == (1000, 1000)

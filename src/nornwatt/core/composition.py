@@ -73,6 +73,7 @@ def _storage_constraint(spec: DeviceSpec) -> StorageConstraints:
         no_grid_charge=bool(p.get("no_grid_charge", False)),
         own_meter=str(p.get("own_meter", "zone")),
         standby_w=float(p.get("standby_w", 50.0)),
+        self_consumption_w=float(p.get("self_consumption_w", 0.0)),
     )
 
 
