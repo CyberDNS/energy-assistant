@@ -63,7 +63,7 @@ FROM python:${PYTHON_VERSION}-slim AS runtime
 LABEL org.opencontainers.image.title="Nornwatt"
 LABEL org.opencontainers.image.description="Open-source, vendor-neutral energy management platform"
 LABEL org.opencontainers.image.source="https://github.com/CyberDNS/nornwatt"
-LABEL org.opencontainers.image.licenses="MIT"
+LABEL org.opencontainers.image.licenses="Apache-2.0"
 
 # Create a non-root user for security
 RUN groupadd --gid 1000 nornwatt \
