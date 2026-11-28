@@ -491,11 +491,9 @@ _BATTERY_PARAMS = {
     "charge_efficiency": ParamSpec(float, default=0.95, description="Share of the charged energy that ends up stored", minimum=0, exclusive_minimum=True, maximum=1),
     "discharge_efficiency": ParamSpec(float, default=0.95, description="Share of the stored energy that comes out", minimum=0, exclusive_minimum=True, maximum=1),
     "efficiency": ParamSpec(str, default="configured", label="Efficiency used for planning", choices=("configured", "learned"),
-                            description="Plan with the configured or the learned round trip"),
-    "efficiency_learning": ParamSpec(dict, when={"efficiency": "learned"}, advanced=True, label="Efficiency learning", description="How the round trip is learned", fields={
+                            description="Plan with the configured or the learned efficiency and self-consumption"),
+    "efficiency_learning": ParamSpec(dict, when={"efficiency": "learned"}, advanced=True, label="Efficiency learning", description="How efficiency and self-consumption are learned", fields={
         "history_days": ParamSpec(float, minimum=1, default=14, description="Days of history used"),
-        "min_cycles": ParamSpec(float, minimum=0, default=3,
-                                description="Full cycles needed before an estimate counts"),
         "refit_interval_h": ParamSpec(float, minimum=0, exclusive_minimum=True, default=6,
                                       description="Hours between refits"),
     }),

@@ -16,7 +16,7 @@ export const LEARNED_KINDS: LearnedKind[] = [
   { id: 'thermal', title: 'Heating and cooling behaviour',
     about: 'Devices kept between a minimum and a maximum (aquarium, fridge, AC): how fast the value drifts while idle and moves while running. Lets the planner shift their runs.' },
   { id: 'storage', title: 'Battery efficiency',
-    about: 'Efficiency and constant self-consumption from the energy balance (charged and discharged energy against the change of the stored energy), with closed cycles as a fallback. Tells the planner what shifting and holding energy really costs.' },
+    about: 'Efficiency and constant self-consumption from the energy balance: the charged and discharged energy against the change of the stored energy over long windows. Tells the planner what shifting and holding energy really costs.' },
 ]
 
 export function learnedKind(item: any): LearnedKind['id'] {
@@ -30,9 +30,7 @@ export function learnedStatus(item: any): { cls: string, text: string } {
   if (item?.kind === 'efficiency') {
     if (s === 'learned') return { cls: 'pill-ok', text: 'Learned value in plan' }
     if (s === 'observing') return { cls: 'pill-warn', text: 'Learned, plan uses configured' }
-    if (s === 'collecting') return { cls: 'pill-warn', text: item.balance
-      ? `Collecting (${item.balance.windows} windows, ${(item.balance.days ?? 0).toFixed(1)} days)`
-      : `Collecting cycles (${item.estimate?.cycles ?? 0} of ${item.min_cycles})` }
+    if (s === 'collecting') return { cls: 'pill-warn', text: `Collecting (${item.balance?.windows ?? 0} windows, ${(item.balance?.days ?? 0).toFixed(1)} days)` }
     return { cls: 'pill-off', text: 'Not enough data yet' }
   }
   if (item?.kind === 'thermal') {
@@ -51,9 +49,7 @@ const num = (v: number | null | undefined, decimals = 1) => (v == null ? null : 
 export function learnedHeadline(item: any): string {
   if (item.kind === 'efficiency') {
     const b = item.balance
-    if (b) return `${(b.round_trip * 100).toFixed(1)} % round trip · ${Math.round(b.self_consumption_w)} W`
-    const rt = item.estimate?.round_trip
-    return rt == null ? 'no estimate yet' : `${(rt * 100).toFixed(1)} % round trip`
+    return b ? `${(b.round_trip * 100).toFixed(1)} % round trip · ${Math.round(b.self_consumption_w)} W` : 'no estimate yet'
   }
   if (item.kind === 'thermal') {
     const rmse = num(item.model?.rmse, 3)

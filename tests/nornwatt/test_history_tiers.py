@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from nornwatt.core.battery_efficiency import find_cycles
+from nornwatt.core.battery_efficiency import find_balance_windows
 from nornwatt.core.models import Measurement
 from nornwatt.storage.sqlite import HISTORY_5M_RETENTION, SqliteStorageBackend
 
@@ -172,9 +172,9 @@ async def test_a_new_database_has_no_raw_table(tmp_path: Path) -> None:
     assert {"history_5m", "history_1h"} <= tables and "measurements" not in tables
 
 
-async def test_battery_cycles_are_found_in_five_minute_rows(backend) -> None:
-    """The efficiency learning reads the 5-minute tier: a full cycle with a
-    known round trip must still be found, with the same energies."""
+async def test_battery_windows_are_found_in_five_minute_rows(backend) -> None:
+    """The efficiency learning reads the 5-minute tier: a rest-to-rest window
+    with known energies must still be found, with the same energies."""
     capacity = 10.0
     t = T0
     soc = 50.0
@@ -189,11 +189,12 @@ async def test_battery_cycles_are_found_in_five_minute_rows(backend) -> None:
     await run(30, 0.0, 0.0)                           # rest at 50 %
     await run(60, 3000.0, 0.45)                       # 3 kWh in  → +27 %
     await run(60, -2430.0, -0.45)                     # 2.43 kWh out → back to 50 %
-    await run(30, 0.0, 0.0)                           # rest at 50 % again
+    await run(11 * 60, 0.0, 0.0)                      # rest, 12 h after the first rest
 
     samples = await backend.query_power_soc("bat", *FAR)
-    cycles = find_cycles(samples, capacity)
+    windows = find_balance_windows(samples, capacity)
 
-    assert len(cycles) == 1
-    assert cycles[0].energy_in_kwh == pytest.approx(3.0, rel=0.02)
-    assert cycles[0].energy_out_kwh == pytest.approx(2.43, rel=0.02)
+    assert len(windows) == 1
+    assert windows[0].energy_in_kwh == pytest.approx(3.0, rel=0.02)
+    assert windows[0].energy_out_kwh == pytest.approx(2.43, rel=0.02)
+    assert windows[0].delta_stored_kwh == pytest.approx(0.0, abs=0.1)

@@ -49,7 +49,8 @@ import logging
 import os
 import time
 from collections import defaultdict
-from datetime import UTC, date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone, tzinfo
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -557,11 +558,28 @@ def _extend_forecast_points_with_daily_repeat(
     return out, estimated_ts
 
 
+ESTIMATED_PRICE_WEIGHT = 0.5
+"""How much of the template day's price swing an estimated price keeps: an
+estimate is the template day's mean plus this share of its deviation.  A
+guessed peak must not make the plan hold energy for a day and a half; the
+published prices replace the estimates as soon as they arrive."""
+
+
 def _extend_tariff_schedule_with_daily_repeat(
     schedule: list[TariffPoint],
     horizon: timedelta,
+    *,
+    now: datetime | None = None,
+    tz: tzinfo | None = None,
 ) -> tuple[list[TariffPoint], set[datetime]]:
-    """Extend a tariff schedule by repeating its latest day profile.
+    """Extend a tariff schedule with estimated prices beyond the published ones.
+
+    The template is the **most recent complete local day** of the schedule
+    (at least 80 % of the fullest day's points): the latest known day
+    pattern, the same all evening — counting days in UTC, or picking the day
+    with the most points, made the template jump at local midnight (#158).
+    An estimate keeps ``ESTIMATED_PRICE_WEIGHT`` of the template day's swing
+    around its mean.
 
     Extension is capped to the smaller of:
     - one native prediction span (derived from source data), and
@@ -576,7 +594,7 @@ def _extend_tariff_schedule_with_daily_repeat(
 
     diffs = [
         b.timestamp - a.timestamp
-        for a, b in zip(pts, pts[1:])
+        for a, b in pairwise(pts)
         if b.timestamp > a.timestamp
     ]
     if not diffs:
@@ -590,23 +608,22 @@ def _extend_tariff_schedule_with_daily_repeat(
     if extension_cap <= timedelta(0):
         return pts, set()
 
-    now = datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     target_end = min(now + horizon, pts[-1].timestamp + extension_cap)
     if pts[-1].timestamp >= target_end:
         return pts, set()
 
-    tz = pts[-1].timestamp.tzinfo or timezone.utc
+    local = tz or datetime.now().astimezone().tzinfo or UTC
     by_day: dict[date, list[TariffPoint]] = defaultdict(list)
     for p in pts:
-        by_day[p.timestamp.astimezone(tz).date()].append(p)
-    template_day = max(by_day.items(), key=lambda kv: (len(kv[1]), kv[0]))[0]
-    template = by_day.get(template_day, [])
-    template = sorted(template, key=lambda p: p.timestamp)
-    if not template:
-        return pts, set()
+        by_day[p.timestamp.astimezone(local).date()].append(p)
+    fullest = max(len(v) for v in by_day.values())
+    template_day = max(d for d, v in by_day.items() if len(v) >= 0.8 * fullest)
+    template = sorted(by_day[template_day], key=lambda p: p.timestamp)
+    mean = sum(float(p.price_eur_per_kwh) for p in template) / len(template)
 
     def _tod_seconds(ts: datetime) -> int:
-        lt = ts.astimezone(tz)
+        lt = ts.astimezone(local)
         return lt.hour * 3600 + lt.minute * 60 + lt.second
 
     template_by_tod = sorted(
@@ -614,20 +631,18 @@ def _extend_tariff_schedule_with_daily_repeat(
         key=lambda x: x[0],
     )
 
-    def _nearest_value_for_tod(sec_of_day: int) -> float:
-        best_sec, best_val = min(
+    def _estimate_for_tod(sec_of_day: int) -> float:
+        _, value = min(
             template_by_tod,
             key=lambda it: min(abs(it[0] - sec_of_day), 86400 - abs(it[0] - sec_of_day)),
         )
-        _ = best_sec
-        return best_val
+        return mean + ESTIMATED_PRICE_WEIGHT * (value - mean)
 
     out = list(pts)
     estimated_ts: set[datetime] = set()
     cursor = pts[-1].timestamp + step
     while cursor <= target_end:
-        sec = _tod_seconds(cursor)
-        out.append(TariffPoint(timestamp=cursor, price_eur_per_kwh=_nearest_value_for_tod(sec)))
+        out.append(TariffPoint(timestamp=cursor, price_eur_per_kwh=_estimate_for_tod(_tod_seconds(cursor))))
         estimated_ts.add(cursor)
         cursor += step
 
