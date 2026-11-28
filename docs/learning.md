@@ -100,7 +100,7 @@ values.
     self_consumption_w: 0
     efficiency: learned         # default: configured
     efficiency_learning:        # optional
-      history_days: 14
+      history_days: 90
       refit_interval_h: 6
 ```
 
@@ -110,3 +110,33 @@ the values on the Learning tab (Batteries) or via `GET /api/learned` and
 savings accounting's uncontrolled house use the learned values (a configured
 charge/discharge asymmetry is kept): the real house's losses are what the SoC
 readings show, so the uncontrolled house must run on the same battery.
+
+
+## Past data from Home Assistant
+
+A device can name Home Assistant entities with its past data, so learning starts
+with data instead of from zero (`core/history_import.py`):
+
+```yaml
+- id: zendure
+  category: battery
+  history:                      # optional: past data, hourly
+    power: sensor.zendure_power
+    soc: sensor.zendure_state_of_charge   # batteries and cars only
+```
+
+Their long-term statistics (hourly, kept for good by Home Assistant) are imported
+once, up to 2 years back, into Nornwatt's own hourly history. Learners and charts
+read only that history. A measured hour always wins: the import never replaces
+one, and a measured hour replaces an imported one. In the device settings
+("Past data from Home Assistant") the status shows what was imported; the
+imported hours can be removed again.
+
+Nothing is imported unchecked. Over the hours both have, the entity's power
+must follow what Nornwatt measured (correlation ≥ 0.9, scale 0.8–1.25): a
+slope near −1 is imported with the sign inverted, anything else is refused with
+the figures, and the state of charge must match within 5 points. Until Nornwatt
+has measured the device for 48 hours the import waits — except for a battery,
+whose state of charge must then rise while the power says charging. Hours that
+charged and discharged cannot be split from hourly statistics and are left out.
+Hourly rows take about 0.9 MB per device and year, so the import stays small.

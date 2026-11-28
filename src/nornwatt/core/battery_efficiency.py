@@ -97,50 +97,83 @@ class _Stretch:
             self.rest = None
 
 
+Sample = tuple
+"""``(timestamp, power_w, soc_pct)``, optionally followed by
+``(bucket_seconds, pos_w, neg_w)``: the bucket's length (default 5 minutes)
+and the means of the power's positive and negative part (so a bucket that
+both charged and discharged counts both).  A bucket's values hold from its
+timestamp to the next sample."""
+
+
 def _stretches(
-    samples: Iterable[tuple[datetime, float | None, float | None]],
+    samples: Iterable[Sample],
     capacity_kwh: float,
     standby_w: float,
 ) -> list[_Stretch]:
-    """Contiguous runs of samples with their energy counts and rest points."""
+    """Contiguous runs of samples with their energy counts and rest points.
+
+    Buckets of any length (5-minute and hourly rows) can follow each other;
+    a gap longer than the previous bucket (plus a minute) ends the run."""
     stretches: list[_Stretch] = []
     cur: _Stretch | None = None
-    prev: tuple[datetime, float, float] | None = None
+    prev: tuple[datetime, float, float, float] | None = None  # ts, in W, out W, bucket s
     last_soc: float | None = None
+    reading: float | None = None   # the last real SoC reading …
+    since_in = since_out = 0.0     # … and the energy moved since it
 
-    for ts, power, soc in samples:
+    def counted(pos: float, neg: float) -> tuple[float, float]:
+        # Standby draw while charging and noise while discharging are not energy moved.
+        return (pos if pos > standby_w else 0.0,
+                neg if neg > min(_DISCHARGE_NOISE_W, standby_w) else 0.0)
+
+    for sample in samples:
+        ts, power, soc = sample[0], sample[1], sample[2]
+        bucket_s = float(sample[3]) if len(sample) > 3 and sample[3] else _MAX_GAP.total_seconds()
+        pos, neg = (sample[4], sample[5]) if len(sample) > 5 else (None, None)
+        if power is None and pos is None and neg is None:
+            continue
+        real_soc = soc is not None
         if soc is None:
             soc = last_soc
-        if power is None or soc is None:
+        if soc is None:
             continue
         soc = last_soc = float(soc)
-        p = float(power)
-        if (p > 0 and p <= standby_w) or (p < 0 and -p <= min(_DISCHARGE_NOISE_W, standby_w)):
-            p = 0.0
-        if prev is None or ts - prev[0] > _MAX_GAP or ts <= prev[0]:
+        if pos is None and neg is None:
+            p = float(power)
+            pos, neg = max(p, 0.0), max(-p, 0.0)
+        p_in, p_out = counted(float(pos or 0.0), float(neg or 0.0))
+
+        gap = (prev is None or ts <= prev[0]
+               or (ts - prev[0]).total_seconds() > prev[3] + 60.0)
+        if gap:
             if cur is not None:
                 cur.close_rest()
             cur = _Stretch()
             stretches.append(cur)
-            cur.idle_since = ts if p == 0.0 else None
-            prev = (ts, p, soc)
+            cur.idle_since = ts if p_in == p_out == 0.0 else None
+            prev = (ts, p_in, p_out, bucket_s)
+            reading, since_in, since_out = (soc if real_soc else None), 0.0, 0.0
             continue
         assert cur is not None
         hours = (ts - prev[0]).total_seconds() / 3600.0
-        kwh = prev[1] * hours / 1000.0  # power held since the previous sample
-        if kwh > 0:
-            cur.e_in += kwh
-        else:
-            cur.e_out -= kwh
-        # Energy-based SoC change bounds: a jump is anything well beyond them.
-        explained = abs(kwh) / capacity_kwh * 100.0
-        if abs(soc - prev[2]) > explained + _JUMP_PCT:
-            cur.jumps += 1
+        e_in, e_out = prev[1] * hours / 1000.0, prev[2] * hours / 1000.0
+        cur.e_in += e_in
+        cur.e_out += e_out
+        since_in += e_in
+        since_out += e_out
+        # A jump: a change of the reading well beyond what the energy moved
+        # since the last reading explains (BMS re-calibration).
+        if real_soc:
+            if reading is not None:
+                explained = abs(since_in - since_out) / capacity_kwh * 100.0
+                if abs(soc - reading) > explained + _JUMP_PCT:
+                    cur.jumps += 1
+            reading, since_in, since_out = soc, 0.0, 0.0
 
-        if p == 0.0:
+        if p_in == p_out == 0.0:
             if cur.idle_since is None:
                 cur.idle_since = ts
-            if ts - cur.idle_since >= _REST:
+            if real_soc and ts + timedelta(seconds=bucket_s) - cur.idle_since >= _REST:
                 # Settled.  Each reading seen while idle is an anchor (the
                 # stored energy cannot change much without power); it
                 # follows its reading to the last time it was shown.
@@ -152,7 +185,7 @@ def _stretches(
         else:
             cur.idle_since = None
             cur.close_rest()
-        prev = (ts, p, soc)
+        prev = (ts, p_in, p_out, bucket_s)
     if cur is not None:
         cur.close_rest()
     return stretches
@@ -228,7 +261,7 @@ class BalanceEstimate:
 
 
 def find_balance_windows(
-    samples: Iterable[tuple[datetime, float | None, float | None]],
+    samples: Iterable[Sample],
     capacity_kwh: float,
     *,
     standby_w: float = 50.0,

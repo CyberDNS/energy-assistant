@@ -493,7 +493,7 @@ _BATTERY_PARAMS = {
     "efficiency": ParamSpec(str, default="configured", label="Efficiency used for planning", choices=("configured", "learned"),
                             description="Plan with the configured or the learned efficiency and self-consumption"),
     "efficiency_learning": ParamSpec(dict, when={"efficiency": "learned"}, advanced=True, label="Efficiency learning", description="How efficiency and self-consumption are learned", fields={
-        "history_days": ParamSpec(float, minimum=1, default=14, description="Days of history used"),
+        "history_days": ParamSpec(float, minimum=1, default=90, description="Days of history used"),
         "refit_interval_h": ParamSpec(float, minimum=0, exclusive_minimum=True, default=6,
                                       description="Hours between refits"),
     }),
@@ -714,13 +714,21 @@ CONTROLLED_CATEGORIES = frozenset({
 })
 
 
+def history_fields(category: DeviceCategory) -> tuple[str, ...]:
+    """Fields of ``history:`` (past data from Home Assistant) for *category*:
+    the power, and the state of charge of what has one."""
+    if category in (DeviceCategory.BATTERY, DeviceCategory.VEHICLE):
+        return ("power", "soc")
+    return ("power",)
+
+
 # ---------------------------------------------------------------------------
 # DeviceSpec
 # ---------------------------------------------------------------------------
 
 #: Keys of a device entry that belong to the model; all others are plugin settings.
 MODEL_KEYS = frozenset({
-    "id", "label", "category", "type", "tariff", "forecast", "learning",
+    "id", "label", "category", "type", "tariff", "forecast", "learning", "history",
     "capabilities", "params", "ha_discovery", "energy_dashboard", "control",
     *(c.value for c in ConnectionType),
 })
@@ -748,6 +756,9 @@ class DeviceSpec:
     forecast: dict[str, Any] | None = None
     learning: bool | dict[str, Any] = True
     """Default learning for consumers (see ``loader/forecast_config``)."""
+    history: dict[str, str] | None = None
+    """Home Assistant entities with this device's past data (``power``,
+    ``soc``), imported once as hourly history (``core/history_import``)."""
     ha_discovery: bool = True
     energy_dashboard: str | None = None
     """Statistic id this device was imported from (HA Energy dashboard)."""
@@ -820,6 +831,8 @@ class DeviceSpec:
             out["forecast"] = self.forecast
         if self.learning is not True:
             out["learning"] = self.learning
+        if self.history:
+            out["history"] = dict(self.history)
         if not self.ha_discovery:
             out["ha_discovery"] = False
         if self.energy_dashboard:
@@ -942,6 +955,18 @@ def parse_device(device_id: str, raw: Mapping[str, Any], errors: list[str]) -> D
     learning = raw.get("learning", True)
     if not isinstance(learning, (bool, Mapping)):
         errors.append(f"{where}: 'learning:' must be true, false or a mapping")
+    history = raw.get("history")
+    if history is not None:
+        allowed = history_fields(category)
+        if not isinstance(history, Mapping):
+            errors.append(f"{where}: 'history:' must map {', '.join(allowed)} to entities")
+        else:
+            for key, entity in history.items():
+                if key not in allowed:
+                    errors.append(f"{where}: history: unknown field {key!r} "
+                                  f"(allowed: {', '.join(allowed)})")
+                elif not isinstance(entity, str) or "." not in entity:
+                    errors.append(f"{where}: history: {key}: must be a Home Assistant entity id")
     tariff = raw.get("tariff")
     if tariff is not None and not isinstance(tariff, str):
         errors.append(f"{where}: 'tariff:' must be a tariff id")
@@ -970,6 +995,8 @@ def parse_device(device_id: str, raw: Mapping[str, Any], errors: list[str]) -> D
         included_in=connections.get(ConnectionType.INCLUDED_IN),
         forecast=dict(forecast) if forecast is not None else None,
         learning=dict(learning) if isinstance(learning, Mapping) else learning,
+        history={str(k): str(v) for k, v in history.items() if v} or None
+        if isinstance(history, Mapping) else None,
         ha_discovery=raw.get("ha_discovery", True) is not False,
         energy_dashboard=raw.get("energy_dashboard"),
         control=control,
