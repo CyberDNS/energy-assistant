@@ -1,7 +1,8 @@
 <script>
-import { defineComponent, computed, reactive, watch } from 'vue'
+import { defineComponent, computed, reactive, ref, watch, onMounted } from 'vue'
 import FormShell from './FormShell.vue'
 import { useConfig, useConfigForm, clone } from './useConfig.js'
+import { fetchHistoryImport, runHistoryImport, removeHistoryImport } from '../api.js'
 
 const CONNECTIONS = {
   metered_by:    { label: 'Behind meter', description: 'Its power is part of what this meter reads. Builds the metering tree used for tariffs and costs.' },
@@ -30,7 +31,7 @@ export default defineComponent({
       id: '', category: props.category ?? '', type: '', label: '', tariff: null,
       settings: {}, capabilities: {}, params: {},
       metered_by: null, controlled_by: null, included_in: null,
-      forecast: null, learning: true, ha_discovery: true, control: null,
+      forecast: null, learning: true, history: null, ha_discovery: true, control: null,
     })
     for (const key of ['settings', 'capabilities', 'params']) form[key] ??= {}
 
@@ -133,6 +134,43 @@ export default defineComponent({
       for (const k of Object.keys(connectionSpecs.value)) form[k] = v?.[k] ?? null
     }
 
+    // Past data from Home Assistant (core/history_import): one entity per field.
+    const historySpecs = computed(() => {
+      const fields = schema.value.history_fields?.[form.category]
+      if (!fields || !form.category) return null
+      const hints = {
+        power: 'Its power in the past (W or kW; the sign is checked and corrected)',
+        soc: 'Its state of charge in the past (%)',
+      }
+      return Object.fromEntries(Object.entries(fields).map(([k, label]) =>
+        [k, { kind: 'str', entity: true, domains: ['sensor'], label, description: hints[k] ?? '' }]))
+    })
+    // The device's own Home Assistant entities, offered as the source.
+    const ownEntities = computed(() => {
+      const out = {}
+      const power = form.capabilities?.power_w?.entity
+      const soc = form.capabilities?.soc_pct?.entity
+      if (power) out.power = power
+      if (soc && historySpecs.value?.soc) out.soc = soc
+      return Object.keys(out).length ? out : null
+    })
+    function setHistory(value) {
+      form.history = value && Object.values(value).some(v => v) ? value : null
+    }
+    const importStatus = ref(null)
+    const importBusy = ref(false)
+    async function loadImport() {
+      if (isNew || !props.device?.history) return
+      try { importStatus.value = await fetchHistoryImport(props.device.id) } catch { importStatus.value = null }
+    }
+    async function importAction(fn) {
+      importBusy.value = true
+      try { importStatus.value = await fn(props.device.id) } catch (e) {
+        importStatus.value = { ...(importStatus.value ?? {}), state: 'error', message: String(e) }
+      } finally { importBusy.value = false }
+    }
+    onMounted(loadImport)
+
     const learningKind = computed(() => schema.value.learning_kinds[form.category] ?? '')
     const showForecast = computed(() => form.category === 'consumer' || form.forecast != null)
     const showLearning = computed(() => !!learningKind.value || form.learning !== true)
@@ -164,7 +202,9 @@ export default defineComponent({
              allBuiltIn, gridConnection,
              bindingSpecs, setBinding, connectionSpecs, connectionValues, setConnections,
              controlled, controlSpec,
-             learningKind, showForecast, showLearning, advancedSpecs, idProblem, state, save, remove }
+             learningKind, showForecast, showLearning, advancedSpecs, idProblem, state, save, remove,
+             historySpecs, ownEntities, setHistory, importStatus, importBusy, importAction,
+             runHistoryImport, removeHistoryImport }
   },
 })
 </script>
@@ -306,6 +346,33 @@ export default defineComponent({
           </div>
           <div class="cfg-hint">An explicit forecast for this consumer. With learning on, a static profile here is the fallback until a model is fitted.</div>
         </div>
+      </div>
+    </section>
+
+    <section v-if="historySpecs">
+      <h3>Past data from Home Assistant</h3>
+      <p class="cfg-hint">
+        Optional, for learning and charts. Imports this device's hourly history from Home Assistant once
+        (up to 2 years back), so learning starts with data instead of from zero. Nornwatt keeps measuring
+        the device as before; this is only about the time before. The entities are first compared with
+        what Nornwatt measures itself: a wrong entity is refused, an inverted sign is corrected.
+      </p>
+      <p v-if="ownEntities && !form.history" class="cfg-hint">
+        <button type="button" class="btn" @click="setHistory({ ...ownEntities })">Use this device's entities</button>
+      </p>
+      <SchemaForm :specs="historySpecs" :model-value="form.history ?? undefined" @update:model-value="setHistory" />
+      <div v-if="importStatus?.configured" class="cfg-import" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px">
+        <span class="pill" :class="{ 'pill-ok': importStatus.state === 'imported',
+                                     'pill-warn': ['waiting', 'pending'].includes(importStatus.state),
+                                     'pill-off': ['refused', 'error', 'removed'].includes(importStatus.state) }">
+          {{ { imported: 'Imported', waiting: 'Waiting', pending: 'Pending', refused: 'Not imported',
+               removed: 'Removed', error: 'Error' }[importStatus.state] ?? importStatus.state }}
+        </span>
+        <span class="cfg-hint">{{ importStatus.message }}</span>
+        <button type="button" class="btn" :disabled="importBusy" @click="importAction(runHistoryImport)">
+          {{ importStatus.state === 'imported' ? 'Check again' : 'Import now' }}</button>
+        <button v-if="importStatus.state === 'imported'" type="button" class="btn" :disabled="importBusy"
+                @click="importAction(removeHistoryImport)">Remove imported data</button>
       </div>
     </section>
 

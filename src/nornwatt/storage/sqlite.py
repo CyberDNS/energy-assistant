@@ -13,7 +13,10 @@ Device history is kept in two compact tiers, both keyed on
     charge and the number of readings.  Kept ``HISTORY_5M_RETENTION``.
 ``history_1h``
     The same per hour, rolled up from the 5-minute rows.  Kept for good:
-    24 rows per device and day.
+    24 rows per device and day.  Rows with ``source = 'imported'`` come from
+    Home Assistant's long-term statistics (``core/history_import``): they
+    never replace a measured hour, a measured hour replaces them, and they
+    can be removed again (``delete_imported_history``).
 
 Readings arrive every few seconds; ``write()`` only adds them to the open
 bucket in memory and stores the bucket about once a minute.  Databases from
@@ -426,6 +429,7 @@ class HistoryRow:
     pos_w: float | None  # mean of the positive part of the power
     neg_w: float | None  # mean of the negative part, as a positive number
     soc_pct: float | None  # last reading in the bucket
+    imported: bool = False  # from Home Assistant's statistics, not measured
 
     @property
     def power_w(self) -> float | None:
@@ -501,6 +505,7 @@ class SqliteStorageBackend:
 
         for ddl in _CREATE_HISTORY_TABLES:
             await self._db.execute(ddl)
+        await self._add_missing_columns("history_1h", {"source": "TEXT"})
         self._has_raw = await self._table_exists("measurements")
         await self._db.execute(_CREATE_LEDGER_TABLE)
         await self._db.execute(_CREATE_LEDGER_HISTORY_TABLE)
@@ -678,13 +683,70 @@ class SqliteStorageBackend:
         assert self._db is not None, "Call start() before query_history()"
         await self.flush(device_id)
         table = "history_1h" if hourly else "history_5m"
+        source = "source = 'imported'" if hourly else "0"
         async with self._db.execute(
-            f"SELECT timestamp, pos_w, neg_w, soc_pct FROM {table} "
+            f"SELECT timestamp, pos_w, neg_w, soc_pct, {source} FROM {table} "
             "WHERE device_id = ? AND timestamp BETWEEN ? AND ? ORDER BY timestamp",
             (device_id, _utc_ts(start), _utc_ts(end)),
         ) as cursor:
             rows = await cursor.fetchall()
-        return [HistoryRow(datetime.fromisoformat(r[0]), r[1], r[2], r[3]) for r in rows]
+        return [HistoryRow(datetime.fromisoformat(r[0]), r[1], r[2], r[3], bool(r[4])) for r in rows]
+
+    async def query_learning_history(
+        self,
+        device_id: str,
+        start: datetime,
+        end: datetime,
+    ) -> list[tuple[datetime, float | None, float | None, float, float | None, float | None]]:
+        """Samples for learning in ``[start, end]``: the hourly rows (measured
+        or imported) up to where the 5-minute rows begin, then the 5-minute
+        rows.  Each sample is ``(bucket start, mean power_w, soc_pct,
+        bucket seconds, pos_w, neg_w)``."""
+        fine = await self.query_history(device_id, start, end)
+        first_fine = fine[0].timestamp if fine else end
+        hourly = [r for r in await self.query_history(device_id, start, end, hourly=True)
+                  if r.timestamp + timedelta(hours=1) <= first_fine]
+        return (
+            [(r.timestamp, r.power_w, r.soc_pct, 3600.0, r.pos_w, r.neg_w) for r in hourly]
+            + [(r.timestamp, r.power_w, r.soc_pct, 300.0, r.pos_w, r.neg_w) for r in fine]
+        )
+
+    async def import_history(self, device_id: str, rows: list[HistoryRow]) -> int:
+        """Store hourly rows from another source (``source = 'imported'``).
+        A measured hour is never replaced.  Returns the rows written."""
+        assert self._db is not None
+        before = self._db.total_changes
+        await self._db.executemany(
+            "INSERT OR IGNORE INTO history_1h "
+            "(device_id, timestamp, pos_w, neg_w, soc_pct, samples, source) "
+            "VALUES (?, ?, ?, ?, ?, 0, 'imported')",
+            [(device_id, _utc_ts(r.timestamp), r.pos_w, r.neg_w, r.soc_pct) for r in rows],
+        )
+        await self._db.commit()
+        return self._db.total_changes - before
+
+    async def delete_imported_history(self, device_id: str) -> int:
+        """Remove the imported hourly rows of *device_id*; returns how many."""
+        assert self._db is not None
+        cursor = await self._db.execute(
+            "DELETE FROM history_1h WHERE device_id = ? AND source = 'imported'", (device_id,),
+        )
+        await self._db.commit()
+        return cursor.rowcount
+
+    async def imported_history_bounds(self, device_id: str) -> tuple[datetime | None, datetime | None, int]:
+        """First and last imported hour of *device_id* and the number of rows."""
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT min(timestamp), max(timestamp), count(*) FROM history_1h "
+            "WHERE device_id = ? AND source = 'imported'", (device_id,),
+        ) as cursor:
+            first, last, n = await cursor.fetchone()
+        return (
+            datetime.fromisoformat(first) if first else None,
+            datetime.fromisoformat(last) if last else None,
+            int(n or 0),
+        )
 
     async def query_power_soc(
         self,

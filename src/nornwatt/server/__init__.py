@@ -1143,6 +1143,18 @@ class Application:
         )
         for tracker in self._savings_trackers():
             tracker.set_batteries(self._planning_storage_constraints())
+        # Past data from Home Assistant per device (core/history_import).
+        from ..core.history_import import HistoryImporter  # noqa: PLC0415
+        self._history_importers = {
+            spec.id: HistoryImporter(
+                spec.id, spec.category.value, spec.history, self._build_ctx.ha_client,
+                self._storage, self._build_ctx.data_dir,
+            )
+            for spec in self._cfg.devices.values()
+            if spec.history and self._build_ctx.ha_client is not None and self._storage is not None
+        }
+        self._history_import_task: asyncio.Task | None = None
+        self._history_import_at: datetime | None = None
 
         # 7d — MQTT publisher (optional — only started when mqtt: is configured)
         if self._cfg.backends.mqtt:
@@ -2152,6 +2164,7 @@ class Application:
 
         thermal_models, ambient_forecasts = await self._thermal_inputs(effective_horizon)
         storage_constraints = self._planning_storage_constraints(refit=True)
+        self._schedule_history_imports()
         for tracker in self._savings_trackers():
             tracker.set_batteries(storage_constraints)
         if self._projection is not None:
@@ -2862,6 +2875,35 @@ class Application:
             "totals": _savings_totals(window),
             "all_time": _savings_totals(rows),
         }
+
+    def _schedule_history_imports(self, force: bool = False) -> None:
+        """Run the pending history imports in the background — at most once an
+        hour while one is waiting for Nornwatt's own data to compare with."""
+        importers = getattr(self, "_history_importers", {})
+        pending = [i for i in importers.values() if not i.done]
+        if not pending or (self._history_import_task and not self._history_import_task.done()):
+            return
+        now = datetime.now(UTC)
+        if not force and self._history_import_at and now - self._history_import_at < timedelta(hours=1):
+            return
+        self._history_import_at = now
+        self._history_import_task = asyncio.create_task(self._run_history_imports(pending))
+
+    async def _run_history_imports(self, importers: list[Any]) -> None:
+        for importer in importers:
+            status = await importer.run()
+            learner = self._efficiency_learners.get(importer.device_id)
+            if status.state == "imported" and learner is not None:
+                await learner.refit()  # learn from the imported hours now
+
+    def _history_import_status(self, device_id: str) -> dict:
+        importer = getattr(self, "_history_importers", {}).get(device_id)
+        if importer is None:
+            return {"device_id": device_id, "configured": False}
+        st = importer.status
+        return {"device_id": device_id, "configured": True, "power": importer.power,
+                "soc": importer.soc, **(st.to_dict() if st else {"state": "pending",
+                "message": "Not imported yet: runs in the background shortly."})}
 
     def _savings_trackers(self) -> list[SavingsTracker]:
         """The savings accounting and the projected one (observe mode): both
@@ -3619,6 +3661,34 @@ class Application:
                 raise HTTPException(409, "Not enough usable history to fit a model")
             asyncio.create_task(self._run_plan())
             return {"ok": True, "fitted_at": model.fitted_at}
+
+        @api.get("/api/history/import")
+        async def get_history_imports() -> dict:
+            """Status of each device's import of past data from Home Assistant."""
+            return {"devices": [self._history_import_status(d)
+                                for d in getattr(self, "_history_importers", {})]}
+
+        @api.get("/api/history/import/{device_id}")
+        async def get_history_import(device_id: str) -> dict:
+            return self._history_import_status(device_id)
+
+        @api.post("/api/history/import/{device_id}")
+        async def run_history_import(device_id: str) -> dict:
+            """Check and import now (again)."""
+            importer = getattr(self, "_history_importers", {}).get(device_id)
+            if importer is None:
+                raise HTTPException(404, f"No history import configured for {device_id!r}")
+            await self._run_history_imports([importer])
+            return self._history_import_status(device_id)
+
+        @api.delete("/api/history/import/{device_id}")
+        async def delete_history_import(device_id: str) -> dict:
+            """Remove the imported hours; the import runs again on the next check."""
+            importer = getattr(self, "_history_importers", {}).get(device_id)
+            if importer is None:
+                raise HTTPException(404, f"No history import configured for {device_id!r}")
+            removed = await importer.remove()
+            return {**self._history_import_status(device_id), "removed_hours": removed}
 
         @api.get("/api/history")
         async def get_history(

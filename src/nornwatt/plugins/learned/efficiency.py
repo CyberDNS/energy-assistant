@@ -15,7 +15,7 @@ Configured on the storage device::
         self_consumption_w: 0
         efficiency: learned          # default: configured
         efficiency_learning:         # all optional
-          history_days: 14
+          history_days: 90
           refit_interval_h: 6
 
 Every battery is learned, so the Learning tab can compare learned and
@@ -62,7 +62,7 @@ class EfficiencyLearner:
         *,
         mode: str = "configured",
         label: str = "",
-        history_days: float = 14.0,
+        history_days: float = 90.0,
         refit_interval_h: float = 6.0,
         model_path: Path | None = None,
     ) -> None:
@@ -139,7 +139,13 @@ class EfficiencyLearner:
         self._last_attempt = now
         sc = self.constraints
         try:
-            samples = await self._storage.query_power_soc(sc.device_id, now - self._history, now)
+            if hasattr(self._storage, "query_learning_history"):
+                # Hourly rows (measured or imported from Home Assistant) up to
+                # where the 5-minute rows begin, then the 5-minute rows.
+                samples = await self._storage.query_learning_history(
+                    sc.device_id, now - self._history, now)
+            else:
+                samples = await self._storage.query_power_soc(sc.device_id, now - self._history, now)
         except Exception as exc:  # noqa: BLE001
             self._last_error = f"history query failed: {exc}"
             _log.warning("%s: %s", self.id, self._last_error)
@@ -267,7 +273,7 @@ class EfficiencyLearner:
             _log.warning("%s: could not save %s: %s", self.id, self._model_path, exc)
 
 
-def _series(samples: list[tuple[datetime, float | None, float | None]]) -> list[dict[str, Any]]:
+def _series(samples: list[tuple]) -> list[dict[str, Any]]:
     """SoC (last reading) and mean power per 15 minutes, for the chart."""
     out: list[dict[str, Any]] = []
     bucket: datetime | None = None
@@ -279,7 +285,7 @@ def _series(samples: list[tuple[datetime, float | None, float | None]]) -> list[
         if bucket is not None and n:
             out.append({"t": bucket.isoformat(), "soc_pct": soc, "power_w": round(p_sum / n)})
 
-    for ts, power, s in samples:
+    for ts, power, s, *_ in samples:
         b = ts.replace(minute=ts.minute - ts.minute % 15, second=0, microsecond=0)
         if b != bucket:
             flush()
@@ -318,7 +324,7 @@ def build_efficiency_learners(
             sc, storage,
             mode=mode,
             label=(spec.label or "") if spec is not None else "",
-            history_days=float(opts.get("history_days", 14)),
+            history_days=float(opts.get("history_days", 90)),
             refit_interval_h=float(opts.get("refit_interval_h", 6)),
             model_path=(data_dir / "learned_models" / f"efficiency_{sc.device_id}.json")
             if data_dir else None,

@@ -53,7 +53,7 @@ _SECRET_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 #: Key order of a newly written entry (plugin settings follow ``tariff``).
 _HEAD_KEYS = ("id", "category", "label", "type", "tariff")
 _TAIL_KEYS = ("capabilities", "params", *(c.value for c in ConnectionType),
-              "forecast", "learning", "ha_discovery", "energy_dashboard", "control")
+              "forecast", "learning", "history", "ha_discovery", "energy_dashboard", "control")
 
 
 class ConfigStoreError(ValueError):
@@ -271,6 +271,7 @@ def entry_to_form(
         form[conn.value] = entry.get(conn.value)
     form["forecast"] = entry.get("forecast")
     form["learning"] = entry.get("learning", True)
+    form["history"] = entry.get("history")
     form["ha_discovery"] = entry.get("ha_discovery", True) is not False
     if entry.get("energy_dashboard"):
         form["energy_dashboard"] = entry["energy_dashboard"]
@@ -315,6 +316,7 @@ def form_to_entry(form: Mapping[str, Any], existing: Mapping[str, Any] | None = 
         entry["learning"] = False
     elif isinstance(learning, Mapping) and (options := prune_empty(learning)):
         entry["learning"] = options
+    put("history", prune_empty(form.get("history")))
     if form.get("ha_discovery") is False:
         entry["ha_discovery"] = False
     put("energy_dashboard", form.get("energy_dashboard"))

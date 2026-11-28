@@ -33,6 +33,10 @@ export const fetchLearned  = ({ summary = false, deviceId = null } = {}) => {
 }
 export const fetchSavings  = (hours)      => call(`/api/savings?hours=${hours}`)
 export const refitLearned  = (id)         => call(`/api/learned/${encodeURIComponent(id)}/refit`, { method: 'POST' })
+// Past data from Home Assistant (core/history_import).
+export const fetchHistoryImport  = (id) => call(`/api/history/import/${encodeURIComponent(id)}`)
+export const runHistoryImport    = (id) => call(`/api/history/import/${encodeURIComponent(id)}`, { method: 'POST' })
+export const removeHistoryImport = (id) => call(`/api/history/import/${encodeURIComponent(id)}`, { method: 'DELETE' })
 
 const _json = (method, body) => ({
   method,

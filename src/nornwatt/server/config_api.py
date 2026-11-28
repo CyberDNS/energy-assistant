@@ -70,10 +70,13 @@ from ..core.device_model import (
     MODEL_KEYS,
     OBSERVE,
     Capability,
+    DeviceCategory,
     DeviceConfigError,
     ParamSpec,
+    history_fields,
     specs_to_dict,
 )
+from ..core.history_import import FIELDS as HISTORY_FIELD_LABELS
 from ..core.presets import presets_json
 from ..loader.config_validation import learning_options
 from ..plugins import registry as plugin_registry
@@ -269,6 +272,11 @@ def mount_config_api(api: FastAPI, app: Application) -> None:
                 for kind in sorted(set(LEARNING_KINDS.values()))
             },
             "learning_kinds": {cat.value: kind for cat, kind in LEARNING_KINDS.items()},
+            # Past data from Home Assistant (core/history_import): fields per category.
+            "history_fields": {
+                cat.value: {f: HISTORY_FIELD_LABELS[f] for f in history_fields(cat)}
+                for cat in DeviceCategory
+            },
             "model_keys": sorted(MODEL_KEYS),
             # Categories with control: observe | active (issue #134).
             "controlled_categories": sorted(_CONTROLLED),
