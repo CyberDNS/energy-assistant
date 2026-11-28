@@ -19,7 +19,8 @@ const C = {
   ambient:  '#8b93a7',  // thermal: ambient input
   limit:    '#b8574a',  // thermal: thresholds
   power:    'rgba(42,120,214,.30)',  // efficiency: battery power
-  cycle:    'rgba(235,104,52,.10)',  // efficiency: closed cycles
+  window:   'rgba(235,104,52,.10)',  // efficiency: balance windows
+  windowAlt: 'rgba(235,104,52,.18)',
   configured: '#8b93a7',             // efficiency: configured value
 }
 
@@ -273,47 +274,18 @@ export default defineComponent({
 
     // ── battery efficiency ───────────────────────────────────────────────
     const pct = (v, dec = 1) => (v == null ? '—' : `${(v * 100).toFixed(dec)} %`)
-    const est = computed(() => item.value?.estimate ?? null)
     const bal = computed(() => item.value?.balance ?? null)
-    const cyclesNewestFirst = computed(() => [...(item.value?.cycles ?? [])].reverse())
-    // Cycle ends with a day of padding on both sides, so a single cycle
-    // doesn't fill the axis and the reference lines stay visible.
-    const cycleSpan = computed(() => {
-      const ends = (item.value?.cycles ?? []).map(c => new Date(c.end).getTime())
-      if (!ends.length) return undefined
-      const day = 86400000
-      return [toPlotlyMinute(new Date(Math.min(...ends) - day).toISOString()),
-              toPlotlyMinute(new Date(Math.max(...ends) + day).toISOString())]
-    })
-    const cycleTraces = computed(() => {
-      const cyc = item.value?.cycles ?? []
-      if (!cyc.length) return []
-      const x = cyc.map(c => toPlotlyMinute(c.end))
-      const span = cycleSpan.value
-      const flat = (v, name, color, dash) => ({
-        name, type: 'scatter', mode: 'lines', x: span, y: [v * 100, v * 100],
-        line: { color, width: 2, dash }, hoverinfo: 'skip',
+    // Each window with what the fitted model leaves unexplained (kWh).
+    const windowsNewestFirst = computed(() => {
+      const b = bal.value
+      return [...(item.value?.windows ?? [])].reverse().map(w => {
+        const hours = (new Date(w.end).getTime() - new Date(w.start).getTime()) / 3600000
+        const resid = b
+          ? b.efficiency * w.energy_in_kwh - w.energy_out_kwh / b.efficiency
+            - b.self_consumption_w / 1000 * hours - w.delta_stored_kwh
+          : null
+        return { ...w, hours, resid }
       })
-      const traces = [{
-        name: 'Cycle', type: 'scatter', mode: 'markers', x, y: cyc.map(c => c.round_trip * 100),
-        marker: { color: C.actual, size: cyc.map(c => 6 + 4 * Math.sqrt(c.energy_in_kwh)), opacity: 0.75 },
-        customdata: cyc.map(c => [c.energy_in_kwh, c.energy_out_kwh, c.soc_pct]),
-        hovertemplate: '%{x|%d.%m. %H:%M} · %{y:.1f} %<br>in %{customdata[0]:.2f} kWh · out %{customdata[1]:.2f} kWh'
-          + ' · at %{customdata[2]:.0f} % SoC<extra>Cycle</extra>',
-      }]
-      if (est.value) traces.push(flat(est.value.round_trip, 'Learned', C.model, 'solid'))
-      traces.push(flat(item.value.configured.round_trip, 'Configured', C.configured, 'dash'))
-      return traces
-    })
-    const cycleLayout = computed(() => {
-      const cyc = item.value?.cycles ?? []
-      const vals = [...cyc.map(c => c.round_trip), item.value?.configured?.round_trip ?? 1]
-      const lo = Math.max(0, Math.floor(Math.min(...vals) * 20) / 20 - 0.05)
-      return {
-        xaxis: { type: 'date', tickformat: '%d.%m.', range: cycleSpan.value },
-        yaxis: { title: '% returned', range: [lo * 100, 102] },
-        hovermode: 'closest',
-      }
     })
     const socTraces = computed(() => {
       const rows = item.value?.series ?? []
@@ -331,11 +303,11 @@ export default defineComponent({
     const socLayout = computed(() => {
       const rows = item.value?.series ?? []
       const first = rows.length ? new Date(rows[0].t).getTime() : 0
-      const shapes = (item.value?.cycles ?? [])
-        .filter(c => new Date(c.end).getTime() >= first)
-        .map(c => ({ type: 'rect', xref: 'x', yref: 'paper', y0: 0, y1: 1,
-                     x0: toPlotlyMinute(c.start), x1: toPlotlyMinute(c.end),
-                     fillcolor: C.cycle, line: { width: 0 }, layer: 'below' }))
+      const shapes = (item.value?.windows ?? [])
+        .filter(w => new Date(w.end).getTime() >= first)
+        .map((w, i) => ({ type: 'rect', xref: 'x', yref: 'paper', y0: 0, y1: 1,
+                          x0: toPlotlyMinute(w.start), x1: toPlotlyMinute(w.end),
+                          fillcolor: i % 2 ? C.window : C.windowAlt, line: { width: 0 }, layer: 'below' }))
       // Symmetric power axis: its zero sits at 50 % SoC.
       const kw = Math.max(0.5, ...rows.map(r => Math.abs(r.power_w) / 1000)) * 1.05
       return {
@@ -380,7 +352,7 @@ export default defineComponent({
     return {
       item, model, isTemp, isThermal, isEfficiency, isPv, error, busy, refit,
       pvForecastTraces, azimuthText, shadedBins,
-      pct, est, bal, cyclesNewestFirst, cycleTraces, cycleLayout, socTraces, socLayout,
+      pct, bal, windowsNewestFirst, socTraces, socLayout,
       tUnit, rate, thermalModes, modeName, thermalForm, thermalTraces, thermalLayout,
       counts, formula, fittedAt, statusPill, fmt,
       scatterTraces, shapeTraces, seriesTraces, forecastTraces, forecastDays, excludedDays,
@@ -405,126 +377,87 @@ export default defineComponent({
       ⚠ {{ error || item.last_error }}
     </div>
 
-    <!-- ── battery: round-trip efficiency ── -->
+    <!-- ── battery: efficiency and self-consumption ── -->
     <template v-if="isEfficiency">
       <div class="kpis">
         <div class="card">
-          <div class="k">Round trip, learned</div>
-          <div class="v">{{ pct(est?.round_trip) }}</div>
-          <div class="savings-sub" v-if="est">± {{ pct(est.spread) }} between cycles</div>
+          <div class="k">Efficiency, learned</div>
+          <div class="v">{{ pct(bal?.efficiency) }}</div>
+          <div class="savings-sub" v-if="bal">per direction · {{ pct(bal.round_trip) }} round trip
+            · configured {{ pct(item.configured.round_trip) }}</div>
         </div>
         <div class="card">
-          <div class="k">Round trip, configured</div>
-          <div class="v">{{ pct(item.configured.round_trip) }}</div>
-          <div class="savings-sub">{{ pct(item.configured.charge_efficiency, 0) }} charge · {{ pct(item.configured.discharge_efficiency, 0) }} discharge</div>
+          <div class="k">Self-consumption, learned</div>
+          <div class="v">{{ bal ? fmt(bal.self_consumption_w, 0) + ' W' : '—' }}</div>
+          <div class="savings-sub">configured {{ fmt(item.configured.self_consumption_w ?? 0, 0) }} W</div>
         </div>
         <div class="card">
           <div class="k">Plan uses</div>
           <div class="v">{{ pct(item.planned.charge_efficiency) }}</div>
           <div class="savings-sub">
             {{ pct(item.planned.charge_efficiency, 0) }} charge · {{ pct(item.planned.discharge_efficiency, 0) }} discharge
-            · {{ fmt(item.planned.self_consumption_w ?? 0, 0) }} W self-consumption
-            · {{ item.method === 'balance' ? 'learned (energy balance)' : item.method === 'cycles' ? 'learned (cycles)' : 'configured' }}
+            · {{ fmt(item.planned.self_consumption_w ?? 0, 0) }} W · {{ item.status === 'learned' ? 'learned' : 'configured' }}
           </div>
-        </div>
-      </div>
-
-      <div class="subpanel" v-if="bal">
-        <h3>Energy balance</h3>
-        <div class="kpis">
-          <div class="card">
-            <div class="k">Per direction</div>
-            <div class="v">{{ pct(bal.efficiency) }}</div>
-            <div class="savings-sub">{{ pct(bal.round_trip) }} round trip</div>
-          </div>
-          <div class="card">
-            <div class="k">Self-consumption</div>
-            <div class="v">{{ fmt(bal.self_consumption_w, 0) }} W</div>
-            <div class="savings-sub">configured {{ fmt(item.configured_self_consumption_w ?? 0, 0) }} W</div>
-          </div>
-          <div class="card">
-            <div class="k">Windows</div>
-            <div class="v">{{ bal.windows }}</div>
-            <div class="savings-sub">
-              {{ fmt(bal.energy_in_kwh) }} kWh in · {{ fmt(bal.days) }} days · ± {{ fmt(bal.rms_error_kwh, 2) }} kWh
-              · {{ bal.confident ? 'confident' : 'collecting' }}
-            </div>
-          </div>
-        </div>
-        <div class="footnote">
-          Windows of at least 12 h from rest to rest. In each, the energy charged and discharged (measured)
-          must explain the change of the stored energy: η × in − out ÷ η − self-consumption × hours.
-          Confident with 6 windows over 4 days that charged 1.5 × the capacity, and when the windows
-          fit within 3 % of the capacity — a battery whose SoC reading does not track its energy stays
-          on its configured values. Preferred over the cycles below.
         </div>
       </div>
 
       <div class="subpanel">
         <h3>State of charge and power</h3>
         <PlotlyChart :traces="socTraces" :layout="socLayout" height="320px" />
-        <div class="footnote">Shaded: closed charge and discharge cycles the efficiency is learned from.</div>
+        <div class="footnote">Shaded: the rest-to-rest windows the values are learned from.</div>
       </div>
 
       <details class="learn-details">
-        <summary>How the efficiency is learned</summary>
-        <div class="kpis">
+        <summary>How it is learned</summary>
+        <div class="kpis" v-if="bal">
           <div class="card">
-            <div class="k">Per direction, learned</div>
-            <div class="v">{{ pct(est?.efficiency) }}</div>
-            <div class="savings-sub">√ round trip, charge = discharge</div>
+            <div class="k">Windows</div>
+            <div class="v">{{ bal.windows }}</div>
+            <div class="savings-sub">over {{ fmt(bal.days) }} days · {{ bal.confident ? 'confident' : 'collecting' }}</div>
           </div>
           <div class="card">
-            <div class="k">Cycles used</div>
-            <div class="v">{{ est?.cycles ?? 0 }}</div>
-            <div class="savings-sub" v-if="est">{{ est.outliers }} outliers · over {{ fmt(est.window_days) }} days</div>
+            <div class="k">Charged in them</div>
+            <div class="v">{{ fmt(bal.energy_in_kwh) }} kWh</div>
+            <div class="savings-sub">needs {{ fmt(item.capacity_kwh * 1.5) }} kWh</div>
           </div>
           <div class="card">
-            <div class="k">Throughput</div>
-            <div class="v">{{ fmt(est?.energy_in_kwh) }} kWh</div>
-            <div class="savings-sub" v-if="est">in · {{ fmt(est.energy_out_kwh) }} kWh out</div>
+            <div class="k">Unexplained</div>
+            <div class="v">± {{ fmt(bal.rms_error_kwh, 2) }} kWh</div>
+            <div class="savings-sub">per window · at most {{ fmt(item.capacity_kwh * 0.03, 2) }} kWh</div>
           </div>
         </div>
-        <div class="row2">
-          <div class="subpanel">
-            <h3>Round trip per cycle</h3>
-            <PlotlyChart :traces="cycleTraces" :layout="cycleLayout" height="300px" />
-            <div class="footnote">
-              One dot per closed cycle, at its end; bigger dots moved more energy and weigh more.
-              Learned = all energy out ÷ all energy in, after dropping cycles far from the median.
-            </div>
+        <div class="subpanel">
+          <h3>Windows ({{ windowsNewestFirst.length }})</h3>
+          <div class="learn-scroll">
+            <table>
+              <thead><tr><th>From</th><th>To</th><th>Hours</th><th>In</th><th>Out</th><th>Stored Δ</th><th>Unexplained</th></tr></thead>
+              <tbody>
+                <tr v-for="w in windowsNewestFirst" :key="w.start">
+                  <td>{{ new Date(w.start).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) }}</td>
+                  <td>{{ new Date(w.end).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) }}</td>
+                  <td>{{ fmt(w.hours, 1) }}</td>
+                  <td>{{ fmt(w.energy_in_kwh, 2) }}</td>
+                  <td>{{ fmt(w.energy_out_kwh, 2) }}</td>
+                  <td>{{ fmt(w.delta_stored_kwh, 2) }}</td>
+                  <td>{{ w.resid == null ? '—' : fmt(w.resid, 2) }}</td>
+                </tr>
+              </tbody>
+            </table>
           </div>
-          <div class="subpanel">
-            <h3>Cycles ({{ item.cycles.length }})</h3>
-            <div class="learn-scroll">
-              <table>
-                <thead><tr><th>From</th><th>To</th><th>SoC</th><th>In</th><th>Out</th><th>Round trip</th></tr></thead>
-                <tbody>
-                  <tr v-for="c in cyclesNewestFirst" :key="c.start">
-                    <td>{{ new Date(c.start).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) }}</td>
-                    <td>{{ new Date(c.end).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) }}</td>
-                    <td>{{ fmt(c.soc_pct, 0) }} %</td>
-                    <td>{{ fmt(c.energy_in_kwh, 2) }}</td>
-                    <td>{{ fmt(c.energy_out_kwh, 2) }}</td>
-                    <td>{{ pct(c.round_trip) }}</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-            <div class="footnote" v-if="!item.cycles.length">
-              No closed cycle yet: the battery has to rest, charge and discharge at least
-              {{ fmt(item.capacity_kwh * 0.15) }} kWh each way, and rest again at the same SoC reading.
-            </div>
+          <div class="footnote" v-if="!windowsNewestFirst.length">
+            No window yet: the battery has to rest (idle for 10 minutes) and rest again at least 12 hours later.
           </div>
         </div>
         <div class="footnote">
-          A cycle starts and ends with the battery idle at the same SoC reading, so the stored
-          energy is the same at both ends and SoC calibration errors cancel; cycles with an unexplained SoC jump
-          (BMS re-calibration) are dropped. Power up to {{ fmt(item.standby_w, 0) }} W (standby) is left out.
-          Cycles are kept {{ fmt(item.history_days, 0) }} days. With
-          <code>efficiency: learned</code> on the battery, the plan and the savings accounting use the
-          energy balance once it is confident, else the cycles once {{ item.min_cycles }} of them have
-          charged 1.5 × the capacity.
+          A window runs from the battery resting to resting again at least 12 hours later. The energy charged
+          and discharged in it (measured) must explain the change of the stored energy (from the two SoC
+          readings): η × in − out ÷ η − self-consumption × hours. A least-squares fit over all windows finds
+          the efficiency η (per direction) and the self-consumption. Windows with an unexplained SoC jump
+          (BMS re-calibration) are dropped, except from full to full. Power up to {{ fmt(item.standby_w, 0) }} W
+          while charging is the battery's standby and left out. Windows are kept {{ fmt(item.history_days, 0) }} days.
+          With <code>efficiency: learned</code> on the battery, the plan and the savings accounting use the learned
+          values once 6 windows over 4 days have charged 1.5 × the capacity and the model explains them within
+          3 % of the capacity — a battery whose SoC reading does not track its energy stays on its configured values.
         </div>
       </details>
     </template>

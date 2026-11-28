@@ -62,17 +62,30 @@ measured vs. modelled value. Configuration: the thermal load's `learning:`
 (`false` keeps the configured rates), see the aquarium example in
 `config.yaml.example`.
 
-## Learned battery efficiency
+## Learned battery efficiency and self-consumption
 
-Each battery's effective round-trip efficiency is learned from the measured AC
-power and SoC (`core/battery_efficiency.py`). SoC readings are coarse and a BMS
-re-calibrates them, so it only uses **closed cycles**: the battery rests,
-charges and discharges (at least 15 % of its capacity each way), and rests
-again at the same SoC reading. The stored energy is then the same at both ends,
-and energy out ÷ energy in is the round trip. Cycles with an unexplained SoC
-jump are dropped, and power at or below `standby_w` is left out (standby draw
-is household load, not a storage loss). The estimate is Σ out ÷ Σ in over the
-cycles of the last 14 days, split evenly: η_charge = η_discharge = √round trip.
+A battery loses energy in two ways: a share of every kWh it moves
+(`charge_efficiency` / `discharge_efficiency`) and a constant
+`self_consumption_w` (battery management, inverter) drawn from the stored energy
+at all times. Both are learned from the measured AC power and SoC
+(`core/battery_efficiency.py`) with an **energy balance**: windows of at least
+12 hours from the battery resting to resting again. In each window the energy
+charged and discharged must explain the change of the stored energy (from the
+two SoC readings):
+
+    η × in − out ÷ η − self-consumption × hours = change of the stored energy
+
+A least-squares fit over all windows finds η (per direction) and the
+self-consumption. One SoC reading's error does not add up over many windows,
+while the losses grow with throughput and time. Windows with an unexplained SoC
+jump (BMS re-calibration) are dropped, except from full to full; charging power
+at or below `standby_w` is the battery's standby (household load), while
+discharging counts down to 10 W.
+
+The estimate is confident with 6 windows over 4 days that charged 1.5 × the
+capacity, and when the model explains the windows within 3 % of the capacity —
+a battery whose SoC reading does not track its energy keeps its configured
+values.
 
 ```yaml
 - id: zendure
@@ -84,14 +97,16 @@ cycles of the last 14 days, split evenly: η_charge = η_discharge = √round tr
     max_discharge_kw: 0.8
     charge_efficiency: 0.95     # used until the estimate is confident
     discharge_efficiency: 0.95
+    self_consumption_w: 0
     efficiency: learned         # default: configured
     efficiency_learning:        # optional
       history_days: 14
-      min_cycles: 3             # and 1.5 × capacity charged
+      refit_interval_h: 6
 ```
 
 Every battery is learned, also with `efficiency: configured`, so you can compare
 the values on the Learning tab (Batteries) or via `GET /api/learned` and
-`GET /api/config` before switching. Only the plan uses the learned value; the
-savings accounting keeps the configured efficiencies, so a battery that performs
-worse than configured shows up as lower savings instead of being hidden.
+`GET /api/config` before switching. With `efficiency: learned` the plan and the
+savings accounting's uncontrolled house use the learned values (a configured
+charge/discharge asymmetry is kept): the real house's losses are what the SoC
+readings show, so the uncontrolled house must run on the same battery.
