@@ -50,6 +50,7 @@ __all__ = [
     "BalanceEstimate",
     "BalanceWindow",
     "find_balance_windows",
+    "find_energy_windows",
     "fit_balance",
 ]
 
@@ -197,19 +198,43 @@ _BALANCE_MIN_WINDOW = timedelta(hours=12)
 _ETA_GRID = [0.70 + 0.0025 * i for i in range(121)]  # 0.70 … 1.00
 
 
+_ENERGY_WINDOW = timedelta(days=30)
+"""Windows without SoC readings (``find_energy_windows``): long enough that
+the throughput dwarfs the unknown change of the stored energy."""
+
+_MIN_COVERAGE = 0.95
+"""Share of an energy window that must have measured power."""
+
+_SOC_SIGMA_CAPACITIES = 0.02
+"""Uncertainty of a SoC window's stored-energy change (its two readings)."""
+
+_ENERGY_SIGMA_CAPACITIES = 0.5
+"""Uncertainty of an energy window's stored-energy change: unknown, but it
+cannot exceed the usable capacity."""
+
+_MAX_NORMALIZED_RMS = 1.5
+"""The windows' unexplained energy, in units of their uncertainty, must stay
+below this for a confident fit."""
+
+
 @dataclass(frozen=True)
 class BalanceWindow:
-    """One window between two settled rest points."""
+    """One window: rest point to rest point (``soc_known``), or a stretch of
+    power without SoC readings, whose stored-energy change is unknown."""
 
     start: datetime
     end: datetime
     energy_in_kwh: float
     energy_out_kwh: float
     delta_stored_kwh: float
+    soc_known: bool = True
 
     @property
     def hours(self) -> float:
         return (self.end - self.start).total_seconds() / 3600.0
+
+    def sigma_kwh(self, capacity_kwh: float) -> float:
+        return capacity_kwh * (_SOC_SIGMA_CAPACITIES if self.soc_known else _ENERGY_SIGMA_CAPACITIES)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -217,7 +242,8 @@ class BalanceWindow:
             "end": self.end.isoformat(),
             "energy_in_kwh": round(self.energy_in_kwh, 4),
             "energy_out_kwh": round(self.energy_out_kwh, 4),
-            "delta_stored_kwh": round(self.delta_stored_kwh, 4),
+            "delta_stored_kwh": round(self.delta_stored_kwh, 4) if self.soc_known else None,
+            "soc_known": self.soc_known,
         }
 
     @classmethod
@@ -227,7 +253,8 @@ class BalanceWindow:
             end=datetime.fromisoformat(d["end"]),
             energy_in_kwh=float(d["energy_in_kwh"]),
             energy_out_kwh=float(d["energy_out_kwh"]),
-            delta_stored_kwh=float(d["delta_stored_kwh"]),
+            delta_stored_kwh=float(d.get("delta_stored_kwh") or 0.0),
+            soc_known=bool(d.get("soc_known", True)),
         )
 
 
@@ -244,6 +271,11 @@ class BalanceEstimate:
     """Root mean square of the windows' unexplained energy."""
     confident: bool
     fitted_at: str = ""
+    basis: str = "soc"
+    """Which windows the estimate rests on: ``soc`` (rest to rest), ``energy``
+    (long stretches without SoC readings) or ``both``."""
+    soc_windows: int = 0
+    energy_windows: int = 0
 
     @property
     def round_trip(self) -> float:
@@ -294,6 +326,63 @@ def find_balance_windows(
     return out
 
 
+def find_energy_windows(
+    samples: Iterable[Sample],
+    *,
+    standby_w: float = 50.0,
+    span: timedelta = _ENERGY_WINDOW,
+) -> list[BalanceWindow]:
+    """Windows of *span* over the samples **without** a SoC reading (power
+    history imported without state of charge).  The change of the stored
+    energy is unknown, but bounded by the capacity — small against a
+    month's throughput.  A window needs measured power for
+    ``_MIN_COVERAGE`` of its time."""
+    out: list[BalanceWindow] = []
+    start: datetime | None = None
+    e_in = e_out = covered = 0.0
+
+    def close() -> None:
+        if start is not None and covered >= _MIN_COVERAGE * span.total_seconds():
+            out.append(BalanceWindow(start, start + span, e_in, e_out, 0.0, soc_known=False))
+
+    for sample in samples:
+        ts, power, soc = sample[0], sample[1], sample[2]
+        if soc is not None:
+            continue
+        bucket_s = float(sample[3]) if len(sample) > 3 and sample[3] else _MAX_GAP.total_seconds()
+        pos, neg = (sample[4], sample[5]) if len(sample) > 5 else (None, None)
+        if pos is None and neg is None:
+            if power is None:
+                continue
+            pos, neg = max(float(power), 0.0), max(-float(power), 0.0)
+        pos, neg = float(pos or 0.0), float(neg or 0.0)
+        if start is None or ts >= start + span:
+            close()
+            start, e_in, e_out, covered = ts, 0.0, 0.0, 0.0
+        hours = bucket_s / 3600.0
+        e_in += (pos if pos > standby_w else 0.0) * hours / 1000.0
+        e_out += (neg if neg > min(_DISCHARGE_NOISE_W, standby_w) else 0.0) * hours / 1000.0
+        covered += bucket_s
+    close()
+    return out
+
+
+def _fit(ws: list[BalanceWindow], capacity_kwh: float) -> tuple[float, float, list[float]]:
+    """Weighted least squares over the η grid: (η, P_self kW, residuals)."""
+    best: tuple[float, float, float, list[float]] | None = None
+    wts = [1.0 / w.sigma_kwh(capacity_kwh) ** 2 for w in ws]
+    hh = sum(wt * w.hours ** 2 for wt, w in zip(wts, ws, strict=True))
+    for eta in _ETA_GRID:
+        r = [eta * w.energy_in_kwh - w.energy_out_kwh / eta - w.delta_stored_kwh for w in ws]
+        p_kw = max(0.0, sum(wt * ri * w.hours for wt, ri, w in zip(wts, r, ws, strict=True)) / hh)
+        res = [ri - p_kw * w.hours for ri, w in zip(r, ws, strict=True)]
+        sse = sum(wt * x * x for wt, x in zip(wts, res, strict=True))
+        if best is None or sse < best[0]:
+            best = (sse, eta, p_kw, res)
+    assert best is not None
+    return best[1], best[2], best[3]
+
+
 def fit_balance(
     windows: Iterable[BalanceWindow],
     capacity_kwh: float,
@@ -304,43 +393,59 @@ def fit_balance(
     max_rms_capacities: float = 0.03,
     fitted_at: datetime | None = None,
 ) -> BalanceEstimate | None:
-    """Least-squares fit of η (per direction, symmetric) and P_self ≥ 0.
+    """Weighted least-squares fit of η (per direction, symmetric) and P_self ≥ 0.
+
+    Each window counts by its uncertainty: a SoC window's stored-energy
+    change is known to a few percent of the capacity, an energy window's
+    only to ± half of it.  Tried on all windows, then on the SoC windows
+    alone, then on the energy windows alone; the first confident one is the
+    estimate — so a battery whose SoC does not track its energy (its SoC
+    windows do not fit) is still learned from its power history.
 
     Confident with at least *min_windows* windows over *min_days* that
-    together charged *min_throughput_capacities* × the capacity, and when
-    the model explains them: the windows' unexplained energy (RMS) stays
-    below *max_rms_capacities* × the capacity.  A battery whose SoC reading
-    does not track its energy fails that test and keeps its configured (or
-    cycle-learned) values.
+    together charged *min_throughput_capacities* × the capacity, when the
+    model explains them within their uncertainty, and the SoC windows'
+    unexplained energy (RMS) stays below *max_rms_capacities* × the capacity.
     """
     ws = [w for w in windows if w.hours > 0]
     if len(ws) < 2:
         return None
-    best: tuple[float, float, float] | None = None  # (sse, eta, p_kw)
-    for eta in _ETA_GRID:
-        r = [eta * w.energy_in_kwh - w.energy_out_kwh / eta - w.delta_stored_kwh for w in ws]
-        hh = sum(w.hours ** 2 for w in ws)
-        p_kw = max(0.0, sum(ri * w.hours for ri, w in zip(r, ws, strict=True)) / hh)
-        sse = sum((ri - p_kw * w.hours) ** 2 for ri, w in zip(r, ws, strict=True))
-        if best is None or sse < best[0]:
-            best = (sse, eta, p_kw)
-    assert best is not None
-    sse, eta, p_kw = best
-    e_in = sum(w.energy_in_kwh for w in ws)
-    days = (max(w.end for w in ws) - min(w.start for w in ws)).total_seconds() / 86400.0
-    confident = (
-        len(ws) >= min_windows and days >= min_days
-        and e_in >= min_throughput_capacities * capacity_kwh
-        and _ETA_GRID[0] < eta < _ETA_GRID[-1]  # not stuck at the edge of the search
-        and math.sqrt(sse / len(ws)) <= max_rms_capacities * capacity_kwh
-    )
-    return BalanceEstimate(
-        efficiency=round(eta, 4),
-        self_consumption_w=round(p_kw * 1000.0, 1),
-        windows=len(ws),
-        energy_in_kwh=round(e_in, 3),
-        days=round(days, 2),
-        rms_error_kwh=round(math.sqrt(sse / len(ws)), 4),
-        confident=confident,
-        fitted_at=fitted_at.isoformat() if fitted_at else "",
-    )
+    soc = [w for w in ws if w.soc_known]
+    energy = [w for w in ws if not w.soc_known]
+
+    def estimate(sel: list[BalanceWindow], basis: str) -> BalanceEstimate | None:
+        if len(sel) < 2:
+            return None
+        eta, p_kw, res = _fit(sel, capacity_kwh)
+        norm = math.sqrt(sum((x / w.sigma_kwh(capacity_kwh)) ** 2 for x, w in zip(res, sel, strict=True))
+                         / len(sel))
+        soc_res = [x for x, w in zip(res, sel, strict=True) if w.soc_known]
+        rms = math.sqrt(sum(x * x for x in (soc_res or res)) / len(soc_res or res))
+        e_in = sum(w.energy_in_kwh for w in sel)
+        days = (max(w.end for w in sel) - min(w.start for w in sel)).total_seconds() / 86400.0
+        confident = (
+            len(sel) >= min_windows and days >= min_days
+            and e_in >= min_throughput_capacities * capacity_kwh
+            and _ETA_GRID[0] < eta < _ETA_GRID[-1]  # not stuck at the edge of the search
+            and norm <= _MAX_NORMALIZED_RMS
+            and (not soc_res or rms <= max_rms_capacities * capacity_kwh)
+        )
+        return BalanceEstimate(
+            efficiency=round(eta, 4),
+            self_consumption_w=round(p_kw * 1000.0, 1),
+            windows=len(sel),
+            energy_in_kwh=round(e_in, 3),
+            days=round(days, 2),
+            rms_error_kwh=round(rms, 4),
+            confident=confident,
+            fitted_at=fitted_at.isoformat() if fitted_at else "",
+            basis=basis,
+            soc_windows=sum(1 for w in sel if w.soc_known),
+            energy_windows=sum(1 for w in sel if not w.soc_known),
+        )
+
+    candidates = [estimate(ws, "both" if soc and energy else ("soc" if soc else "energy"))]
+    if soc and energy:
+        candidates += [estimate(soc, "soc"), estimate(energy, "energy")]
+    found = [c for c in candidates if c is not None]
+    return next((c for c in found if c.confident), found[0] if found else None)

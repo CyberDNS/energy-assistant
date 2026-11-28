@@ -52,17 +52,17 @@ def battery_hours(days: int, *, eta: float = 0.9, self_w: float = 30.0, start: d
 # -- conversion --------------------------------------------------------------------
 
 
-def test_hours_split_by_direction_and_mixed_hours_are_left_out():
+def test_hours_split_by_direction_and_mixed_hours_count_net():
     t = T0
     rows = hour_rows([
         {"start": t, "mean": 800.0, "min": 0.0, "max": 1200.0},                          # charging
         {"start": t + timedelta(hours=1), "mean": -500.0, "min": -900.0, "max": 0.0},    # discharging
-        {"start": t + timedelta(hours=2), "mean": 100.0, "min": -800.0, "max": 1500.0},  # both
+        {"start": t + timedelta(hours=2), "mean": 100.0, "min": -800.0, "max": 1500.0},  # both: net
     ], [
         {"start": t, "mean": 40.0, "min": 35.0, "max": 45.0},   # moving: no reading
         {"start": t + timedelta(hours=1), "mean": 44.5, "min": 44.0, "max": 45.0},  # settled
     ])
-    assert [(r.pos_w, r.neg_w) for r in rows] == [(800.0, 0.0), (0.0, 500.0), (None, None)]
+    assert [(r.pos_w, r.neg_w) for r in rows] == [(800.0, 0.0), (0.0, 500.0), (100.0, 0.0)]
     assert [r.soc_pct for r in rows] == [None, 44.5, None]
 
 
@@ -277,3 +277,65 @@ def test_history_survives_the_config_form():
     assert form["history"] == entry["history"]
     assert form_to_entry(form)["history"] == entry["history"]
     assert "history" not in form_to_entry({**form, "history": {"power": "", "soc": None}})
+
+
+# -- one entity per direction (charge / discharge) -----------------------------------------
+
+
+def test_split_entities_keep_both_directions_of_an_hour():
+    t = T0
+    rows = hour_rows(None, None, split=(
+        [{"start": t, "mean": 600.0}, {"start": t + timedelta(hours=1), "mean": 0.0}],
+        [{"start": t, "mean": 200.0}, {"start": t + timedelta(hours=1), "mean": 450.0}],
+    ))
+    assert [(r.pos_w, r.neg_w) for r in rows] == [(600.0, 200.0), (0.0, 450.0)]
+    (swapped, _) = hour_rows(None, None, invert=True, split=(
+        [{"start": t, "mean": 600.0}, {"start": t + timedelta(hours=1), "mean": 0.0}],
+        [{"start": t, "mean": 200.0}, {"start": t + timedelta(hours=1), "mean": 450.0}],
+    ))
+    assert (swapped.pos_w, swapped.neg_w) == (200.0, 600.0)
+
+
+async def test_split_source_is_imported_and_learned_from(storage, tmp_path):
+    power, soc = battery_hours(30, eta=0.9, self_w=30.0)
+    charge = [{"start": r["start"], "mean": max(r["mean"], 0.0)} for r in power]
+    discharge = [{"start": r["start"], "mean": max(-r["mean"], 0.0)} for r in power]
+    now = power[-1]["start"] + timedelta(hours=1)
+    importer = HistoryImporter(
+        "bat", "battery",
+        {"power": {"import_entity": "sensor.c", "export_entity": "sensor.d"}, "soc": {"entity": "sensor.s"}},
+        FakeHA({"sensor.c": charge, "sensor.d": discharge, "sensor.s": soc}), storage, tmp_path)
+    assert importer.entities == ["sensor.c", "sensor.d", "sensor.s"]
+    status = await importer.run(now)
+    assert status.state == "imported" and not status.inverted, status.message
+    sc = StorageConstraints(device_id="bat", capacity_kwh=CAP, max_charge_kw=3, max_discharge_kw=3)
+    est = await EfficiencyLearner(sc, storage, mode="learned", history_days=60).refit(now)
+    assert est.confident and est.efficiency == pytest.approx(0.9, abs=0.02)
+
+
+async def test_entities_without_older_history_have_nothing_to_import(storage, tmp_path):
+    """The entities Nornwatt publishes itself only have history from when it
+    measured the device: measured hours win, nothing is left to import."""
+    power, soc = battery_hours(5)
+    truth = hour_rows(power, soc)
+    await _store_measured(storage, truth)
+    importer = HistoryImporter("bat", "battery", {"power": "sensor.p", "soc": "sensor.s"},
+                               FakeHA({"sensor.p": power, "sensor.s": soc}), storage, tmp_path)
+    status = await importer.run(truth[-1].timestamp + timedelta(hours=1))
+    assert status.state == "nothing" and status.hours == 0
+    assert "older history" in status.message and importer.done
+
+
+def test_history_sources_take_the_binding_forms():
+    from nornwatt.core.device_model import DeviceConfigError, parse_devices
+
+    base = {"category": "battery", "type": "zendure",
+            "params": {"capacity_kwh": 5, "max_charge_kw": 1, "max_discharge_kw": 1}}
+    for ok in ({"power": "sensor.a"}, {"power": {"entity": "sensor.a"}, "soc": {"entity": "sensor.s"}},
+               {"power": {"import_entity": "sensor.c", "export_entity": "sensor.d"}}):
+        assert parse_devices({"z": {**base, "history": ok}})["z"].history == ok
+    for bad in ({"power": {"import_entity": "sensor.c"}},
+                {"soc": {"import_entity": "sensor.c", "export_entity": "sensor.d"}},
+                {"power": {"entity": "sensor.a", "invert_sign": True}}):
+        with pytest.raises(DeviceConfigError, match="history"):
+            parse_devices({"z": {**base, "history": bad}})
