@@ -282,7 +282,7 @@ export default defineComponent({
         const hours = (new Date(w.end).getTime() - new Date(w.start).getTime()) / 3600000
         const resid = b
           ? b.efficiency * w.energy_in_kwh - w.energy_out_kwh / b.efficiency
-            - b.self_consumption_w / 1000 * hours - w.delta_stored_kwh
+            - b.self_consumption_w / 1000 * hours - (w.delta_stored_kwh ?? 0)
           : null
         return { ...w, hours, resid }
       })
@@ -413,7 +413,10 @@ export default defineComponent({
           <div class="card">
             <div class="k">Windows</div>
             <div class="v">{{ bal.windows }}</div>
-            <div class="savings-sub">over {{ fmt(bal.days) }} days · {{ bal.confident ? 'confident' : 'collecting' }}</div>
+            <div class="savings-sub">
+              {{ bal.soc_windows ?? bal.windows }} rest to rest<span v-if="bal.energy_windows"> · {{ bal.energy_windows }} of a month (power only)</span>
+              · over {{ fmt(bal.days) }} days · {{ bal.confident ? 'confident' : 'collecting' }}
+            </div>
           </div>
           <div class="card">
             <div class="k">Charged in them</div>
@@ -438,7 +441,7 @@ export default defineComponent({
                   <td>{{ fmt(w.hours, 1) }}</td>
                   <td>{{ fmt(w.energy_in_kwh, 2) }}</td>
                   <td>{{ fmt(w.energy_out_kwh, 2) }}</td>
-                  <td>{{ fmt(w.delta_stored_kwh, 2) }}</td>
+                  <td>{{ w.soc_known === false ? '—' : fmt(w.delta_stored_kwh, 2) }}</td>
                   <td>{{ w.resid == null ? '—' : fmt(w.resid, 2) }}</td>
                 </tr>
               </tbody>
@@ -451,13 +454,15 @@ export default defineComponent({
         <div class="footnote">
           A window runs from the battery resting to resting again at least 12 hours later. The energy charged
           and discharged in it (measured) must explain the change of the stored energy (from the two SoC
-          readings): η × in − out ÷ η − self-consumption × hours. A least-squares fit over all windows finds
-          the efficiency η (per direction) and the self-consumption. Windows with an unexplained SoC jump
-          (BMS re-calibration) are dropped, except from full to full. Power up to {{ fmt(item.standby_w, 0) }} W
-          while charging is the battery's standby and left out. Windows are kept {{ fmt(item.history_days, 0) }} days.
-          With <code>efficiency: learned</code> on the battery, the plan and the savings accounting use the learned
-          values once 6 windows over 4 days have charged 1.5 × the capacity and the model explains them within
-          3 % of the capacity — a battery whose SoC reading does not track its energy stays on its configured values.
+          readings): η × in − out ÷ η − self-consumption × hours. Power history without SoC (imported from
+          Home Assistant) counts in windows of a month: the change of the stored energy is unknown there, but
+          it cannot exceed the capacity, small against a month's throughput. A weighted least-squares fit finds
+          the efficiency η (per direction) and the self-consumption; a battery whose SoC windows do not fit is
+          learned from its month windows alone. Windows with an unexplained SoC jump (BMS re-calibration) are
+          dropped, except from full to full. Power up to {{ fmt(item.standby_w, 0) }} W while charging is the
+          battery's standby and left out. With <code>efficiency: learned</code> on the battery, the plan and the
+          savings accounting use the learned values once 6 windows have charged 1.5 × the capacity and the model
+          explains them within their uncertainty.
         </div>
       </details>
     </template>

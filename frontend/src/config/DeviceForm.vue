@@ -134,29 +134,32 @@ export default defineComponent({
       for (const k of Object.keys(connectionSpecs.value)) form[k] = v?.[k] ?? null
     }
 
-    // Past data from Home Assistant (core/history_import): one entity per field.
-    const historySpecs = computed(() => {
+    // Past data from Home Assistant (core/history_import): per field the
+    // keys of a binding (power: one entity, or one per direction, with the
+    // same switch as the binding above).
+    const historyFields = computed(() => {
       const fields = schema.value.history_fields?.[form.category]
-      if (!fields || !form.category) return null
-      const hints = {
-        power: 'Its power in the past (W or kW; the sign is checked and corrected)',
-        soc: 'Its state of charge in the past (%)',
-      }
-      return Object.fromEntries(Object.entries(fields).map(([k, label]) =>
-        [k, { kind: 'str', entity: true, domains: ['sensor'], label, description: hints[k] ?? '' }]))
+      return fields && form.category && Object.keys(fields).length ? fields : null
     })
+    const asBinding = (v) => (typeof v === 'string' ? { entity: v } : (v ?? undefined))
+    function setHistoryField(key, value) {
+      const next = { ...(form.history ?? {}) }
+      if (value && Object.values(value).some(v => v)) next[key] = value
+      else delete next[key]
+      form.history = Object.keys(next).length ? next : null
+    }
     // The device's own Home Assistant entities, offered as the source.
     const ownEntities = computed(() => {
       const out = {}
-      const power = form.capabilities?.power_w?.entity
+      const pw = form.capabilities?.power_w
+      if (pw?.entity) out.power = { entity: pw.entity }
+      else if (pw?.import_entity && pw?.export_entity) {
+        out.power = { import_entity: pw.import_entity, export_entity: pw.export_entity }
+      }
       const soc = form.capabilities?.soc_pct?.entity
-      if (power) out.power = power
-      if (soc && historySpecs.value?.soc) out.soc = soc
+      if (soc && historyFields.value?.soc) out.soc = { entity: soc }
       return Object.keys(out).length ? out : null
     })
-    function setHistory(value) {
-      form.history = value && Object.values(value).some(v => v) ? value : null
-    }
     const importStatus = ref(null)
     const importBusy = ref(false)
     async function loadImport() {
@@ -203,7 +206,7 @@ export default defineComponent({
              bindingSpecs, setBinding, connectionSpecs, connectionValues, setConnections,
              controlled, controlSpec,
              learningKind, showForecast, showLearning, advancedSpecs, idProblem, state, save, remove,
-             historySpecs, ownEntities, setHistory, importStatus, importBusy, importAction,
+             historyFields, asBinding, setHistoryField, ownEntities, importStatus, importBusy, importAction,
              runHistoryImport, removeHistoryImport }
   },
 })
@@ -349,7 +352,7 @@ export default defineComponent({
       </div>
     </section>
 
-    <section v-if="historySpecs">
+    <section v-if="historyFields">
       <h3>Past data from Home Assistant</h3>
       <p class="cfg-hint">
         Optional, for learning and charts. Imports this device's hourly history from Home Assistant once
@@ -358,15 +361,22 @@ export default defineComponent({
         what Nornwatt measures itself: a wrong entity is refused, an inverted sign is corrected.
       </p>
       <p v-if="ownEntities && !form.history" class="cfg-hint">
-        <button type="button" class="btn" @click="setHistory({ ...ownEntities })">Use this device's entities</button>
+        <button type="button" class="btn" @click="form.history = JSON.parse(JSON.stringify(ownEntities))">Use this device's entities</button>
       </p>
-      <SchemaForm :specs="historySpecs" :model-value="form.history ?? undefined" @update:model-value="setHistory" />
+      <div class="cfg-caps">
+        <div v-for="(f, key) in historyFields" :key="key" class="cfg-cap">
+          <div class="cfg-cap-name">{{ f.label }} <code class="cfg-key">{{ key }}</code></div>
+          <SchemaForm :specs="f.specs" :model-value="asBinding(form.history?.[key])"
+                      :key-prefix="'history-' + key + ':'" :show-keys="false"
+                      @update:model-value="setHistoryField(key, $event)" />
+        </div>
+      </div>
       <div v-if="importStatus?.configured" class="cfg-import" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px">
         <span class="pill" :class="{ 'pill-ok': importStatus.state === 'imported',
                                      'pill-warn': ['waiting', 'pending'].includes(importStatus.state),
-                                     'pill-off': ['refused', 'error', 'removed'].includes(importStatus.state) }">
+                                     'pill-off': ['refused', 'error', 'removed', 'nothing'].includes(importStatus.state) }">
           {{ { imported: 'Imported', waiting: 'Waiting', pending: 'Pending', refused: 'Not imported',
-               removed: 'Removed', error: 'Error' }[importStatus.state] ?? importStatus.state }}
+               removed: 'Removed', nothing: 'Nothing to import', error: 'Error' }[importStatus.state] ?? importStatus.state }}
         </span>
         <span class="cfg-hint">{{ importStatus.message }}</span>
         <button type="button" class="btn" :disabled="importBusy" @click="importAction(runHistoryImport)">

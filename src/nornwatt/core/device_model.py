@@ -722,6 +722,30 @@ def history_fields(category: DeviceCategory) -> tuple[str, ...]:
     return ("power",)
 
 
+def _entity_id(value: Any) -> bool:
+    return isinstance(value, str) and "." in value
+
+
+def history_source_problem(field_name: str, source: Any) -> str | None:
+    """What is wrong with one ``history:`` field, or ``None``.
+
+    An entity id, ``{entity: …}``, or for ``power`` one entity per direction
+    (``{import_entity: …, export_entity: …}``) — the forms of a binding."""
+    if _entity_id(source):
+        return None
+    if not isinstance(source, Mapping):
+        return "must be a Home Assistant entity id or a mapping"
+    keys = set(source)
+    if keys == {"entity"} and _entity_id(source["entity"]):
+        return None
+    if field_name == "power" and keys == {"import_entity", "export_entity"}:
+        if all(_entity_id(source[k]) for k in keys):
+            return None
+        return "import_entity and export_entity must be Home Assistant entity ids"
+    allowed = "entity" + (" or import_entity + export_entity" if field_name == "power" else "")
+    return f"expects {allowed}"
+
+
 # ---------------------------------------------------------------------------
 # DeviceSpec
 # ---------------------------------------------------------------------------
@@ -756,9 +780,11 @@ class DeviceSpec:
     forecast: dict[str, Any] | None = None
     learning: bool | dict[str, Any] = True
     """Default learning for consumers (see ``loader/forecast_config``)."""
-    history: dict[str, str] | None = None
+    history: dict[str, Any] | None = None
     """Home Assistant entities with this device's past data (``power``,
-    ``soc``), imported once as hourly history (``core/history_import``)."""
+    ``soc``), imported once as hourly history (``core/history_import``).
+    Each is an entity id, ``{entity: …}``, or — power only — one entity per
+    direction ``{import_entity: …, export_entity: …}``, as in bindings."""
     ha_discovery: bool = True
     energy_dashboard: str | None = None
     """Statistic id this device was imported from (HA Energy dashboard)."""
@@ -961,12 +987,12 @@ def parse_device(device_id: str, raw: Mapping[str, Any], errors: list[str]) -> D
         if not isinstance(history, Mapping):
             errors.append(f"{where}: 'history:' must map {', '.join(allowed)} to entities")
         else:
-            for key, entity in history.items():
+            for key, source in history.items():
                 if key not in allowed:
                     errors.append(f"{where}: history: unknown field {key!r} "
                                   f"(allowed: {', '.join(allowed)})")
-                elif not isinstance(entity, str) or "." not in entity:
-                    errors.append(f"{where}: history: {key}: must be a Home Assistant entity id")
+                elif (problem := history_source_problem(key, source)) is not None:
+                    errors.append(f"{where}: history: {key}: {problem}")
     tariff = raw.get("tariff")
     if tariff is not None and not isinstance(tariff, str):
         errors.append(f"{where}: 'tariff:' must be a tariff id")
@@ -995,7 +1021,8 @@ def parse_device(device_id: str, raw: Mapping[str, Any], errors: list[str]) -> D
         included_in=connections.get(ConnectionType.INCLUDED_IN),
         forecast=dict(forecast) if forecast is not None else None,
         learning=dict(learning) if isinstance(learning, Mapping) else learning,
-        history={str(k): str(v) for k, v in history.items() if v} or None
+        history={str(k): (dict(v) if isinstance(v, Mapping) else str(v))
+                 for k, v in history.items() if v} or None
         if isinstance(history, Mapping) else None,
         ha_discovery=raw.get("ha_discovery", True) is not False,
         energy_dashboard=raw.get("energy_dashboard"),

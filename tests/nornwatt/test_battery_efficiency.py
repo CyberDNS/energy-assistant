@@ -11,9 +11,15 @@ import pytest
 from nornwatt.core.battery_efficiency import (
     BalanceEstimate,
     find_balance_windows,
+    find_energy_windows,
     fit_balance,
 )
-from nornwatt.core.device_model import DeviceCategory, DeviceConfigError, DeviceSpec, parse_devices
+from nornwatt.core.device_model import (
+    DeviceCategory,
+    DeviceConfigError,
+    DeviceSpec,
+    parse_devices,
+)
 from nornwatt.core.models import StorageConstraints
 from nornwatt.loader.device_loader import validate_plugins
 from nornwatt.plugins.learned.efficiency import (
@@ -256,3 +262,84 @@ def test_min_cycles_is_no_longer_a_setting():
             "params": {"capacity_kwh": 5, "max_charge_kw": 1, "max_discharge_kw": 1,
                        "efficiency": "learned", "efficiency_learning": {"min_cycles": 3}},
         }}))
+
+
+# -- energy windows: power without SoC (imported history) ---------------------------
+
+
+def seasonal_hours(days: int, *, eta: float = 0.9, self_w: float = 30.0, start: datetime = T0,
+                   soc_scale: float | None = None):
+    """Hourly samples ``(ts, power, soc, 3600, pos, neg)`` of a battery that
+    charges at 1.5 kW for a seasonal number of hours (1 in winter, 5 in
+    summer) and discharges at 1 kW in the evening back to 1 kWh.  SoC is
+    None (power history without state of charge) unless *soc_scale* is
+    given: then a reading that moves *soc_scale* × as much as the stored
+    energy (a SoC that does not track the energy)."""
+    import math as _m
+    out, stored, t = [], 2.0, start
+    for day in range(days):
+        charge_h = 1 + round(2 + 2 * _m.sin(2 * _m.pi * day / 365))
+        for hour in range(24):
+            if 10 <= hour < 10 + charge_h and stored < CAP - 1.5:
+                p = 1500.0
+            elif hour >= 18 and stored > 1.0 + 1.0 / eta:
+                p = -1000.0
+            else:
+                p = 0.0
+            stored += (p / 1000 * eta if p > 0 else p / 1000 / eta) - self_w / 1000
+            stored = max(0.0, stored)
+            soc = None
+            if soc_scale is not None:
+                soc = round(stored / CAP * 100 * soc_scale, 1)
+            out.append((t, p, soc, 3600.0, max(p, 0.0), max(-p, 0.0)))
+            t += timedelta(hours=1)
+    return out
+
+
+def test_energy_windows_learn_without_soc():
+    windows = find_energy_windows(seasonal_hours(365))
+    assert len(windows) == 12 and not any(w.soc_known for w in windows)
+    est = fit_balance(windows, CAP)
+    assert est.confident and est.basis == "energy"
+    assert est.efficiency == pytest.approx(0.9, abs=0.02)
+    assert est.self_consumption_w == pytest.approx(30.0, abs=10.0)
+
+
+def _five_minutes(hourly):
+    """Hourly samples as Nornwatt records them: 5-minute buckets, SoC moving in between."""
+    out, prev_soc = [], None
+    for ts, p, soc, _, pos, neg in hourly:
+        for k in range(12):
+            frac = (k + 1) / 12
+            s5 = soc if prev_soc is None or soc is None else prev_soc + (soc - prev_soc) * frac
+            out.append((ts + timedelta(minutes=5 * k), p, None if s5 is None else round(s5, 1),
+                        300.0, pos, neg))
+        prev_soc = soc
+    return out
+
+
+def test_power_history_carries_a_battery_whose_soc_does_not_fit():
+    """A year of imported power without SoC, then a month of Nornwatt's own
+    data whose SoC moves 1.4 × as much as the energy: the SoC windows do not
+    fit, the estimate rests on the energy windows."""
+    year = seasonal_hours(330)
+    own = _five_minutes(seasonal_hours(30, start=year[-1][0] + timedelta(hours=1), soc_scale=1.4))
+    windows = find_energy_windows(year + own) + find_balance_windows(own, CAP)
+    assert any(w.soc_known for w in windows)
+    est = fit_balance(windows, CAP)
+    assert est.confident and est.basis == "energy", est
+    assert est.efficiency == pytest.approx(0.9, abs=0.02)
+
+
+def test_soc_windows_win_when_they_fit():
+    year = seasonal_hours(200)
+    own = days(10, start=year[-1][0] + timedelta(hours=1))
+    windows = find_energy_windows(year) + find_balance_windows(own, CAP)
+    est = fit_balance(windows, CAP)
+    assert est.confident and est.basis == "both" and est.soc_windows and est.energy_windows
+
+
+def test_energy_windows_need_coverage():
+    s = seasonal_hours(60)
+    holey = [x for i, x in enumerate(s) if i % 10]   # 10 % of the hours missing
+    assert find_energy_windows(holey) == []

@@ -82,6 +82,12 @@ jump (BMS re-calibration) are dropped, except from full to full; charging power
 at or below `standby_w` is the battery's standby (household load), while
 discharging counts down to 10 W.
 
+Power history without a state of charge (an import without `soc`) still counts:
+in windows of a month, where the unknown change of the stored energy (at most the
+capacity) is small against the throughput. Each window weighs by its uncertainty;
+when a battery's rest-to-rest windows do not fit (its SoC does not track its
+energy), the estimate rests on the month windows alone.
+
 The estimate is confident with 6 windows over 4 days that charged 1.5 × the
 capacity, and when the model explains the windows within 3 % of the capacity —
 a battery whose SoC reading does not track its energy keeps its configured
@@ -121,9 +127,21 @@ with data instead of from zero (`core/history_import.py`):
 - id: zendure
   category: battery
   history:                      # optional: past data, hourly
-    power: sensor.zendure_power
-    soc: sensor.zendure_state_of_charge   # batteries and cars only
+    power: { entity: sensor.zendure_power }              # one signed entity, or …
+    soc: { entity: sensor.zendure_state_of_charge }      # batteries and cars only
+
+- id: sma_battery
+  category: battery
+  history:
+    power: { import_entity: sensor.sbs_charge_power,     # … one per direction, both ≥ 0
+             export_entity: sensor.sbs_discharge_power }
+    soc: { entity: sensor.sbs_soc }
 ```
+
+The forms are those of a capability binding; the device settings offer the same
+"Read from" switch. Choose entities whose history goes back before Nornwatt:
+the entities Nornwatt publishes to Home Assistant itself only start when Nornwatt
+did, so there is nothing to import from them ("Nothing to import").
 
 Their long-term statistics (hourly, kept for good by Home Assistant) are imported
 once, up to 2 years back, into Nornwatt's own hourly history. Learners and charts
@@ -137,6 +155,6 @@ must follow what Nornwatt measured (correlation ≥ 0.9, scale 0.8–1.25): a
 slope near −1 is imported with the sign inverted, anything else is refused with
 the figures, and the state of charge must match within 5 points. Until Nornwatt
 has measured the device for 48 hours the import waits — except for a battery,
-whose state of charge must then rise while the power says charging. Hours that
-charged and discharged cannot be split from hourly statistics and are left out.
+whose state of charge must then rise while the power says charging. With one signed entity, hours that charged and discharged cannot be split from
+hourly statistics and are left out; with one entity per direction every hour counts.
 Hourly rows take about 0.9 MB per device and year, so the import stays small.

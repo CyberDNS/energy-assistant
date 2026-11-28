@@ -36,3 +36,16 @@ npm run build              # vue-tsc + vite build
 npm test                   # vitest
 uv run --with playwright pytest tests/e2e   # browser tests against the build (from the repo root)
 ```
+
+## Config conventions
+- **Power and energy from Home Assistant always offer the single/split switch.**
+  Wherever the config takes a power or energy value from Home Assistant (a
+  capability binding, `history:`, anything new), accept both forms — one signed
+  entity (`entity`) or one entity per direction (`import_entity` /
+  `export_entity`) — and build its form from
+  `plugins/_homeassistant/bindings.binding_specs()` so the UI shows the same
+  "Read from: one entity / separate …" switch (the `source` selector is UI-only,
+  never in the file). Name the directions for the device (`CHARGE_DISCHARGE` for
+  batteries and cars, `IMPORT_EXPORT` otherwise). Many integrations only offer
+  the split pair (e.g. SMA: battery charge and discharge power), and a split pair
+  keeps both directions of an hour apart.

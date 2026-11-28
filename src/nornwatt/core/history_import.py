@@ -6,8 +6,17 @@ battery or a car, state of charge)::
     - id: zendure
       category: battery
       history:                       # optional: past data, hourly
-        power: sensor.zendure_power
-        soc: sensor.zendure_state_of_charge
+        power: { entity: sensor.zendure_power }
+        soc: { entity: sensor.zendure_state_of_charge }
+
+    - id: sma_battery
+      category: battery
+      history:                       # power: one entity per direction
+        power: { import_entity: sensor.sbs_charge_power,      # charging, ≥ 0
+                 export_entity: sensor.sbs_discharge_power }  # discharging, ≥ 0
+
+The forms are those of a binding (a bare entity id also works); the config UI
+picks one entity or one per direction with the same switch.
 
 Their long-term statistics (hourly, kept for good by Home Assistant) are
 imported into Nornwatt's own hourly history (``history_1h``, ``source =
@@ -30,9 +39,14 @@ teach the learners nonsense:
 * Otherwise the import waits until Nornwatt has measured the device for
   ``MIN_OVERLAP_HOURS``.
 
-Power the entity reports in both directions within one hour (it charged and
-discharged) cannot be split into the two directions from hourly statistics;
-such hours are left out.
+Power one signed entity reports in both directions within one hour (it charged
+and discharged) cannot be split into the two directions from hourly
+statistics; such an hour counts with its net power.  With one entity per
+direction every hour is exact.
+
+Without a state of charge the battery learner still learns from imported
+power: over 30-day windows the throughput dwarfs the unknown change of the
+stored energy (``battery_efficiency.find_energy_windows``).
 """
 
 from __future__ import annotations
@@ -104,10 +118,11 @@ class Check:
 
 @dataclass
 class ImportStatus:
-    power: str | None
-    soc: str | None
+    power: dict[str, str] | None
+    soc: dict[str, str] | None
     state: str
-    """``imported``, ``waiting``, ``refused``, ``removed`` or ``error``."""
+    """``imported``, ``nothing`` (no hour older than Nornwatt's own),
+    ``waiting``, ``refused``, ``removed`` or ``error``."""
     message: str
     inverted: bool = False
     hours: int = 0
@@ -128,10 +143,21 @@ def hour_rows(
     soc: list[dict[str, Any]] | None,
     *,
     invert: bool = False,
+    split: tuple[list[dict[str, Any]] | None, list[dict[str, Any]] | None] | None = None,
 ) -> list[HourRow]:
     """Hourly rows from Home Assistant statistics rows (``start``, ``mean``,
-    ``min``, ``max``).  *invert* flips the power's sign."""
+    ``min``, ``max``): one signed *power* entity, or *split* = the statistics
+    of the import (charge) and the export (discharge) entity, both ≥ 0.
+    *invert* flips the power's sign (swaps the directions)."""
     by_ts: dict[datetime, HourRow] = {}
+    if split is not None:
+        ins = {r["start"]: r.get("mean") for r in split[0] or [] if r.get("mean") is not None}
+        outs = {r["start"]: r.get("mean") for r in split[1] or [] if r.get("mean") is not None}
+        for ts in set(ins) & set(outs):
+            pos, neg = max(float(ins[ts]), 0.0), max(float(outs[ts]), 0.0)
+            if invert:
+                pos, neg = neg, pos
+            by_ts[ts] = HourRow(ts, pos, neg, None)
     for r in power or []:
         mean, lo, hi = r.get("mean"), r.get("min"), r.get("max")
         if mean is None:
@@ -144,7 +170,10 @@ def hour_rows(
         elif hi <= _MIXED_TOLERANCE_W:
             pos, neg = 0.0, max(-mean, 0.0)
         else:
-            pos = neg = None  # both directions in one hour: not splittable
+            # Both directions in one hour: hourly statistics cannot split
+            # them, so the hour counts with its net power (both directions
+            # equally understated — small against dropping the hour).
+            pos, neg = max(mean, 0.0), max(-mean, 0.0)
         by_ts[r["start"]] = HourRow(r["start"], pos, neg, None)
     for r in soc or []:
         mean, lo, hi = r.get("mean"), r.get("min"), r.get("max")
@@ -248,6 +277,15 @@ def check_battery_physics(raw: list[HourRow]) -> Check:
 # -- the job ------------------------------------------------------------------------
 
 
+def _source(value: Any) -> dict[str, str] | None:
+    """A ``history:`` field as a binding mapping (an entity id → ``{entity: …}``)."""
+    if not value:
+        return None
+    if isinstance(value, str):
+        return {"entity": value}
+    return {str(k): str(v) for k, v in value.items() if v}
+
+
 class HistoryImporter:
     """Imports and checks one device's past data; keeps its status."""
 
@@ -255,8 +293,8 @@ class HistoryImporter:
                  ha: Any, storage: Any, data_dir: Path | None) -> None:
         self.device_id = device_id
         self.category = category
-        self.power = source.get("power")
-        self.soc = source.get("soc")
+        self.power = _source(source.get("power"))
+        self.soc = _source(source.get("soc"))
         self._ha = ha
         self._storage = storage
         self._path = (data_dir / "history_import" / f"{device_id}.json") if data_dir else None
@@ -283,11 +321,27 @@ class HistoryImporter:
             _log.warning("history import %s: could not save %s: %s", self.device_id, self._path, exc)
 
     @property
+    def entities(self) -> list[str]:
+        """Every entity to fetch statistics for."""
+        out = [e for src in (self.power, self.soc) if src
+               for e in (src.get("entity"), src.get("import_entity"), src.get("export_entity")) if e]
+        return list(dict.fromkeys(out))
+
+    def _rows(self, stats: dict[str, list[dict[str, Any]]], *, invert: bool = False) -> list[HourRow]:
+        p, s = self.power or {}, self.soc or {}
+        soc_stats = stats.get(s.get("entity", ""))
+        if "import_entity" in p:
+            split = (stats.get(p["import_entity"]), stats.get(p["export_entity"]))
+            return hour_rows(None, soc_stats, invert=invert, split=split)
+        return hour_rows(stats.get(p.get("entity", "")), soc_stats, invert=invert)
+
+    @property
     def done(self) -> bool:
-        return self.status is not None and self.status.state in ("imported", "refused", "removed")
+        return self.status is not None and self.status.state in (
+            "imported", "nothing", "refused", "removed")
 
     async def _fetch(self, start: datetime, end: datetime) -> dict[str, list[dict[str, Any]]]:
-        ids = [e for e in (self.power, self.soc) if e]
+        ids = self.entities
         out: dict[str, list[dict[str, Any]]] = {e: [] for e in ids}
         cursor = start
         while cursor < end:
@@ -309,10 +363,10 @@ class HistoryImporter:
                               checked_at=now.isoformat())
         try:
             stats = await self._fetch(hour - timedelta(days=IMPORT_DAYS), hour)
-            raw = hour_rows(stats.get(self.power or ""), stats.get(self.soc or ""))
+            raw = self._rows(stats)
             if not raw:
                 status.message = ("Home Assistant has no long-term statistics for "
-                                  + " / ".join(e for e in (self.power, self.soc) if e))
+                                  + " / ".join(self.entities))
                 self.status = status
                 self._save()
                 return status
@@ -330,16 +384,27 @@ class HistoryImporter:
                 status.state, status.message = "refused", "Not imported: " + check.message
             else:
                 inverted = check.verdict == "inverted"
-                rows = hour_rows(stats.get(self.power or ""), stats.get(self.soc or ""),
-                                 invert=inverted)
+                rows = self._rows(stats, invert=inverted)
                 await self._storage.import_history(self.device_id, rows)
                 first, last, n = await self._storage.imported_history_bounds(self.device_id)
-                status.state, status.inverted, status.hours = "imported", inverted, n
+                status.inverted, status.hours = inverted, n
                 status.first = first.isoformat() if first else None
                 status.last = last.isoformat() if last else None
-                days = n / 24
-                status.message = (f"{days:.0f} days imported — {check.message}"
-                                  + (" (sign inverted)" if inverted and "inverted" not in check.message else ""))
+                since = raw[0].timestamp.astimezone().strftime("%d.%m.%Y")
+                if n == 0:
+                    # Everything Home Assistant has is from when Nornwatt
+                    # measured the device already (e.g. the entities Nornwatt
+                    # publishes itself) — measured hours win.
+                    status.state = "nothing"
+                    status.message = (f"Nothing to import: these entities' history starts {since}, "
+                                      "when Nornwatt already measured this device. Choose entities "
+                                      "with older history.")
+                else:
+                    status.state = "imported"
+                    status.message = (f"{n / 24:.0f} days imported (from {first.astimezone():%d.%m.%Y}) — "
+                                      f"{check.message}"
+                                      + (" (sign inverted)" if inverted and "inverted" not in check.message
+                                         else ""))
         except Exception as exc:  # noqa: BLE001
             status.state, status.message = "error", f"Import failed: {exc}"
             _log.warning("history import %s: %s", self.device_id, exc)

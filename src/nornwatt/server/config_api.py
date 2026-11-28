@@ -40,6 +40,7 @@ Secrets never leave the server: a ``!secret name`` value is exchanged as
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import os
 from collections.abc import Mapping
@@ -120,6 +121,28 @@ class TextBody(BaseModel):
     text: str
     revision: str | None = None
 
+
+
+def _history_specs(category: DeviceCategory, field_name: str) -> dict[str, ParamSpec]:
+    """The keys of one ``history:`` field: those of a binding of the same
+    value — one entity, or for power one per direction with the same switch
+    as bindings — without what the import works out itself (the sign) or
+    does not take (attribute, scale)."""
+    from ..plugins._homeassistant.bindings import (  # noqa: PLC0415
+        CHARGE_DISCHARGE,
+        IMPORT_EXPORT,
+        binding_specs,
+    )
+    if field_name == "soc":
+        specs = {k: v for k, v in binding_specs(Capability.SOC_PCT).items() if k == "entity"}
+    else:
+        directions = (CHARGE_DISCHARGE if category in (DeviceCategory.BATTERY, DeviceCategory.VEHICLE)
+                      else IMPORT_EXPORT)
+        specs = {k: v for k, v in binding_specs(Capability.POWER_W, directions=directions).items()
+                 if k not in ("invert_sign", "attribute", "scale")}
+    # The whole section is optional; a split pair is checked when the file is
+    # validated (core/device_model.history_source_problem).
+    return {k: dataclasses.replace(v, required=False) for k, v in specs.items()}
 
 def _errors_of(exc: Exception) -> list[str]:
     if isinstance(exc, DeviceConfigError):
@@ -272,9 +295,11 @@ def mount_config_api(api: FastAPI, app: Application) -> None:
                 for kind in sorted(set(LEARNING_KINDS.values()))
             },
             "learning_kinds": {cat.value: kind for cat, kind in LEARNING_KINDS.items()},
-            # Past data from Home Assistant (core/history_import): fields per category.
+            # Past data from Home Assistant (core/history_import): per category
+            # and field its label and the binding keys it takes.
             "history_fields": {
-                cat.value: {f: HISTORY_FIELD_LABELS[f] for f in history_fields(cat)}
+                cat.value: {f: {"label": HISTORY_FIELD_LABELS[f], "specs": specs_to_dict(_history_specs(cat, f))}
+                            for f in history_fields(cat)}
                 for cat in DeviceCategory
             },
             "model_keys": sorted(MODEL_KEYS),

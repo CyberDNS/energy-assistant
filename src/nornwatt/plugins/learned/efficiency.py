@@ -44,12 +44,17 @@ from ...core.battery_efficiency import (
     BalanceEstimate,
     BalanceWindow,
     find_balance_windows,
+    find_energy_windows,
     fit_balance,
 )
 from ...core.device_model import DeviceSpec
 from ...core.models import StorageConstraints
 
 _log = logging.getLogger(__name__)
+
+ENERGY_HISTORY = timedelta(days=730)
+"""How far back power without SoC (imported) is used: month-long windows
+need many months, and the import reaches two years back."""
 
 
 class EfficiencyLearner:
@@ -141,24 +146,28 @@ class EfficiencyLearner:
         try:
             if hasattr(self._storage, "query_learning_history"):
                 # Hourly rows (measured or imported from Home Assistant) up to
-                # where the 5-minute rows begin, then the 5-minute rows.
+                # where the 5-minute rows begin, then the 5-minute rows; power
+                # without SoC counts in month-long windows, so it is read
+                # further back (ENERGY_HISTORY).
                 samples = await self._storage.query_learning_history(
-                    sc.device_id, now - self._history, now)
+                    sc.device_id, now - max(self._history, ENERGY_HISTORY), now)
             else:
                 samples = await self._storage.query_power_soc(sc.device_id, now - self._history, now)
         except Exception as exc:  # noqa: BLE001
             self._last_error = f"history query failed: {exc}"
             _log.warning("%s: %s", self.id, self._last_error)
             return None
-        self._series = _series(samples)
+        recent = [s for s in samples if s[0] >= now - self._history]
+        self._series = _series(recent)
         windows = find_balance_windows(
-            samples, sc.capacity_kwh, standby_w=sc.standby_w, max_soc_pct=sc.max_soc_pct,
-        )
+            recent, sc.capacity_kwh, standby_w=sc.standby_w, max_soc_pct=sc.max_soc_pct,
+        ) + find_energy_windows(samples, standby_w=sc.standby_w)
         # Kept windows from before the history now available, plus all found now.
         first = samples[0][0] if samples else now
         cutoff = now - self._history
         self._windows = sorted(
-            [w for w in self._windows if w.end < first and w.start >= cutoff] + windows,
+            [w for w in self._windows if w.end < first
+             and w.start >= (cutoff if w.soc_known else now - ENERGY_HISTORY)] + windows,
             key=lambda w: w.start,
         )
         self._balance = fit_balance(self._windows, sc.capacity_kwh, fitted_at=now)
