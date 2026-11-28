@@ -59,6 +59,8 @@ def register(registry: PluginRegistry) -> None:
     registry.register_device(
         "homeassistant_thermal", _build,
         title="Home Assistant temperature sensor",
+        description="A cooler, fridge or heating rod with a temperature sensor in Home "
+                    "Assistant, switched through a switch device.",
         deferred=True,
         categories={C.THERMAL_LOAD},
         provides={Cap.POWER_W},

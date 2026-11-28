@@ -4,16 +4,16 @@ integration: Huawei Solar (custom, wlcrs/huawei_solar)
 url: https://github.com/wlcrs/huawei_solar
 verified: false
 description: >-
-  Works through the working mode and the maximum charge / discharge powers:
-  self-consumption, storing PV surplus only (discharge limit 0) and hold.
-  Charging from the grid needs the integration's forcible_charge service,
-  which this preset does not use: a planned grid charge stores PV surplus
-  only.  Needs "elevated permissions" in the integration.  Check that the
-  charge/discharge power is positive while charging (else set invert_sign)
-  and set the two "full" limits to your battery's maximum.
+  Nornwatt sets the working mode and the maximum charge and discharge power.
+  The battery can then cover the house, store PV surplus only, or hold its
+  charge. It cannot be charged from the grid this way: when the plan charges
+  from the grid, the battery stores PV surplus only. The integration needs
+  "elevated permissions". Check that the charge/discharge power is positive
+  while the battery charges, and turn on Invert sign if it is not. Replace the
+  two power limits of 5000 W with the maximum of your battery.
 variables:
   prefix:
-    label: Battery device prefix
+    label: Battery prefix (the start of its entity ids)
     example: batteries
 device:
   type: homeassistant_battery

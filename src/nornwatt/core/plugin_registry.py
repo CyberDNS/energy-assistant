@@ -149,7 +149,7 @@ class ServicePluginInfo:
 #: Binding keys of a plugin that binds capabilities to Home Assistant entities.
 ENTITY_BINDING: Mapping[str, ParamSpec] = {
     "entity": ParamSpec(str, required=True, entity=True, label="Entity",
-                        description="Home Assistant entity that provides it"),
+                        description="Home Assistant entity this value is read from"),
 }
 
 

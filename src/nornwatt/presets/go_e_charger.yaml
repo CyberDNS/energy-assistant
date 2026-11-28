@@ -4,13 +4,14 @@ integration: go-eCharger API v2 (custom, marq24/ha-goecharger-api2)
 url: https://github.com/marq24/ha-goecharger-api2
 verified: false
 description: >-
-  The "Force state" select starts (Charge) and stops (Don't charge) charging;
-  the requested current sets the power.  The charger has no PV mode Nornwatt
-  can use, so it follows the surplus by changing the current.  The
-  select's options may show as their labels (Charge / Don't charge) instead of
-  2 / 1 on your installation: compare with the select's options.  Not yet
-  checked on a real go-e.  When Nornwatt stops, the charger keeps its
-  last state; set Force state to Neutral by hand to give it back its own logic.
+  The "Force state" select starts and stops charging, and the requested
+  current sets the power. The charger has no PV mode Nornwatt can use, so
+  Nornwatt follows the PV surplus itself by changing the current. On your
+  installation the options of the select may be named Charge and Don't charge
+  instead of 2 and 1: compare them with the options the select offers. When
+  Nornwatt stops, the charger keeps its last state. Set Force state to Neutral
+  by hand to give the charger back its own logic. Not yet checked on a real
+  go-e Charger.
 variables:
   serial:
     label: Serial number (as in the entity ids, goe_<serial>_…)

@@ -57,8 +57,13 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from ...core.device_model import (
+    READ_EVERY_LABEL,
+    UNAVAILABLE_AFTER_LABEL,
+    DeviceCategory,
+    ParamSpec,
+)
 from ...core.device_model import Capability as Cap
-from ...core.device_model import DeviceCategory, ParamSpec
 from ...core.device_model import DeviceCategory as C
 from ...core.plugin_registry import BuildContext, PluginRegistry
 
@@ -68,18 +73,26 @@ _log = logging.getLogger(__name__)
 SETTINGS = {
     "host": ParamSpec(str, required=True, description="Host name or IP address of the bridge"),
     "password": ParamSpec(str, required=True, secret=True, label="Bridge password",
-                          description="Code printed on the bridge"),
-    "user": ParamSpec(str, advanced=True, default="admin", description="Web user"),
-    "node_id": ParamSpec(int, advanced=True, minimum=0, default=1, description="Node of the Pulse on the bridge"),
+                          description="Password of the bridge's web interface: the code "
+                                      "printed on the bridge"),
+    "user": ParamSpec(str, advanced=True, default="admin", label="Web user",
+                      description="User name of the bridge's web interface"),
+    "node_id": ParamSpec(int, advanced=True, minimum=0, default=1,
+                         description="Number under which the bridge lists the Pulse. Change it "
+                                     "only if the bridge has more than one"),
     "poll_interval_s": ParamSpec(float, advanced=True, minimum=0, exclusive_minimum=True, default=1.0,
-                                 description="Seconds between reads"),
+                                 label=READ_EVERY_LABEL,
+                                 description="Seconds between two reads of the bridge"),
     "stale_after_s": ParamSpec(float, advanced=True, minimum=0, exclusive_minimum=True, default=30.0,
-                               description="Seconds without a valid reading until the device "
+                               label=UNAVAILABLE_AFTER_LABEL,
+                               description="Without a valid reading for this long, the meter "
                                            "counts as unavailable"),
     "token": ParamSpec(str, secret=True, label="Tibber API token (fallback)",
-                       description="Tibber API token: cloud live stream as fallback"),
+                       description="Optional. With a token, Nornwatt reads the live power from "
+                                   "the Tibber cloud while the bridge does not answer"),
     "home_id": ParamSpec(str, when={"token": "*"}, label="Tibber home ID",
-                         description="For the fallback (default: the account's first home)"),
+                         description="For the fallback, on an account with several homes. Left "
+                                     "empty, the first home is used"),
     "api_url": ParamSpec(str, advanced=True, when={"token": "*"}, label="Tibber API URL",
                          description="Tests only"),
 }

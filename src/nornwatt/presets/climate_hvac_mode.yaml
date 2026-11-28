@@ -4,13 +4,14 @@ integration: any climate entity (Home Assistant core)
 url: https://www.home-assistant.io/integrations/climate/
 verified: true
 description: >-
-  Nornwatt switches the thermostat between heat and off; the
-  thermostat keeps its own target while on.  Set the thresholds, rates and
-  the heater's power under Parameters.  Learning needs plain sensors: set
-  learning.value_entity, or turn learning off.
+  Nornwatt switches the thermostat between heat and off. The thermostat
+  keeps its own target temperature while it is on. Set the thresholds, the
+  rates and the heater's power under Parameters. Learning needs a plain
+  temperature sensor: choose one as Temperature sensor under Forecast and
+  learning, or turn learning off.
 variables:
   climate:
-    label: Climate entity (without "climate.")
+    label: Thermostat (the entity id without "climate.")
     example: living_room
 device:
   type: homeassistant_thermostat

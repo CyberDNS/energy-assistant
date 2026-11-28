@@ -33,9 +33,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from ...core.device_model import READ_EVERY_LABEL, ParamSpec
 from ...core.device_model import Capability as Cap
 from ...core.device_model import DeviceCategory as C
-from ...core.device_model import ParamSpec
 from ...core.plugin_registry import BuildContext, PluginRegistry
 from .._homeassistant.bindings import bindings_for, parse_bindings
 
@@ -54,10 +54,12 @@ def register(registry: PluginRegistry) -> None:
         bindings=bindings_for(_BINDABLE),
         settings={
             "refresh_entity": ParamSpec(str, entity=True, label="Refresh button",
-                                        description="Button entity that makes the car report "
-                                                    "fresh values"),
+                                        description="Button entity of the car's integration "
+                                                    "that makes the car report fresh values"),
             "poll_interval_s": ParamSpec(float, advanced=True, minimum=0, exclusive_minimum=True, default=30.0,
-                                         description="Seconds between reads"),
+                                         label=READ_EVERY_LABEL,
+                                         description="Seconds between two reads of the car's "
+                                                     "values from Home Assistant"),
         },
     )
 

@@ -54,6 +54,8 @@ def register(registry: PluginRegistry) -> None:
     registry.register_device(
         "homeassistant_switch", _build,
         title="Home Assistant switch",
+        description="A plug or relay in Home Assistant that Nornwatt switches on and off for "
+                    "another device.",
         categories={C.SWITCH},
         bindable={Cap.SWITCH, *_READINGS},
         bindings={
@@ -64,8 +66,8 @@ def register(registry: PluginRegistry) -> None:
             "release_state": ParamSpec(
                 str, choices=RELEASE_STATES, default="on", label="When released",
                 choice_labels={"on": "Switch on", "off": "Switch off", "leave": "Leave as is"},
-                description="State when Nornwatt stops or lets go of the switch "
-                            "(on: the load's own thermostat or timer takes over)"),
+                description="What the switch is set to when Nornwatt stops or lets go of "
+                            "it. Switched on, the load's own thermostat or timer takes over"),
         },
     )
 

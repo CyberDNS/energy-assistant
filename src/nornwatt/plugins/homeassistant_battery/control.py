@@ -86,13 +86,15 @@ def _number(label: str, description: str, *controls: str, required: bool = True)
 
 _MODE_ENTRY = ParamSpec(dict, fields={
     "option": ParamSpec(str, required=True, label="Option", options_from=("mode", "options"), 
-                        description="Option of the mode select"),
+                        description="Option of the mode select for this behaviour"),
     "power": ParamSpec(str, entity=True, domains=NUMBER_DOMAINS, units=_POWER,
                        label="Power number",
-                       description="Gets the commanded power (W or kW, without sign)"),
+                       description="Number entity that takes the power in this mode, in W or "
+                                   "kW, always positive"),
     "set": ParamSpec(dict, values=ParamSpec(object), label="Also set",
                      keys=ParamSpec(str, entity=True, domains=NUMBER_DOMAINS + SELECT_DOMAINS),
-                     description="Fixed values written with the mode: {entity: value}"),
+                     description="Other entities set together with the mode, each with a "
+                                 "fixed value, e.g. a discharge limit of 0"),
 })
 
 #: Keys of the ``power_setpoint`` binding (validation and config UI).
@@ -100,64 +102,80 @@ POWER_SETPOINT_BINDING: dict[str, ParamSpec] = {
     "control": ParamSpec(str, required=True, choices=CONTROLS, choice_labels=CONTROL_LABELS,
                          label="Controlled through",
                          description="How Nornwatt tells the battery what to do"),
-    "number": _number("Power number", "Signed power setpoint (+ charge, − discharge)",
-                      "number"),
+    "number": _number("Power number", "Number entity that takes the power, in W or kW: "
+                      "positive charges, negative discharges", "number"),
     "invert_sign": ParamSpec(bool, default=False, label="Invert sign", when=_when("number"),
-                             description="The number takes discharging as positive"),
-    "charge": _number("Charge power number", "Charge power (W or kW)", "charge_discharge"),
-    "discharge": _number("Discharge power number", "Discharge power (W or kW)",
-                         "charge_discharge"),
+                             description="Turn on when the number takes discharging as "
+                                         "positive"),
+    "charge": _number("Charge power number", "Number entity that takes the charge power, in "
+                      "W or kW", "charge_discharge"),
+    "discharge": _number("Discharge power number", "Number entity that takes the discharge "
+                         "power, in W or kW", "charge_discharge"),
     "mode": ParamSpec(str, required=True, entity=True, domains=SELECT_DOMAINS,
-                      label="Mode select", description="Select entity of the working mode",
+                      label="Mode select",
+                      description="Select entity that sets the battery's working mode",
                       when=_when("mode_power", "modes")),
     "power_numbers": ParamSpec(
         str, selector=True, choices=("single", "split"), default="single",
         choice_labels={"single": "One power number", "split": "Separate charge and discharge"},
         label="Power through", when=_when("mode_power"),
-        description="One power number for both directions, or one for charging and one "
-                    "for discharging"),
+        description="Whether the battery has one power number for both directions, or one "
+                    "for charging and one for discharging"),
     "power": ParamSpec(str, required=True, entity=True, domains=NUMBER_DOMAINS, units=_POWER,
                        label="Power number",
-                       description="Power for charging and discharging (no sign)",
+                       description="Number entity that takes the power for charging and for "
+                                   "discharging, in W or kW, always positive",
                        when={"control": "mode_power", "power_numbers": "single"}),
     "charge_power": ParamSpec(str, required=True, entity=True, domains=NUMBER_DOMAINS,
                               units=_POWER, label="Charge power number",
-                              description="Power while charging (no sign)",
+                              description="Number entity that takes the power while "
+                                          "charging, in W or kW, always positive",
                               when={"control": "mode_power", "power_numbers": "split"}),
     "discharge_power": ParamSpec(str, required=True, entity=True, domains=NUMBER_DOMAINS,
                                  units=_POWER, label="Discharge power number",
-                                 description="Power while discharging (no sign)",
+                                 description="Number entity that takes the power while "
+                                             "discharging, in W or kW, always positive",
                                  when={"control": "mode_power", "power_numbers": "split"}),
     "charge_option": ParamSpec(str, required=True, label="Charge option", options_from=("mode", "options"), 
-                               when=_when("mode_power"), description="Forced charge mode"),
+                               when=_when("mode_power"),
+                               description="Option of the mode select that makes the battery "
+                                           "charge"),
     "discharge_option": ParamSpec(str, required=True, label="Discharge option", options_from=("mode", "options"), 
                                   when=_when("mode_power"),
-                                  description="Forced discharge mode"),
+                                  description="Option of the mode select that makes the "
+                                              "battery discharge"),
     "hold_option": ParamSpec(str, required=True, label="Hold option", options_from=("mode", "options"), when=_when("mode_power"),
-                             description="Mode that neither charges nor discharges"),
+                             description="Option of the mode select in which the battery "
+                                         "neither charges nor discharges"),
     "release_option": ParamSpec(str, label="Release option", options_from=("mode", "options"), when=_when("mode_power"),
-                                description="Mode set when Nornwatt stops (its own "
-                                            "self-consumption)"),
+                                description="Option set when Nornwatt stops or lets go of "
+                                            "the battery, usually its own self-consumption "
+                                            "mode. Left empty, the mode stays as it is"),
     "action": ParamSpec(str, required=True, label="Action", when=_when("action"),
-                        description="Script or action called with the power, e.g. "
-                                    "script.set_battery_power"),
+                        description="Script or action Nornwatt calls with the power in W "
+                                    "(positive charges), e.g. script.set_battery_power"),
     "data": ParamSpec(dict, values=ParamSpec(object), advanced=True, label="Extra data",
-                      when=_when("action"), description="More data for the action"),
+                      when=_when("action"),
+                      description="Other fields sent with every call of the action"),
     "power_key": ParamSpec(str, default="power_w", advanced=True, label="Power variable",
                            when=_when("action"),
-                           description="Data key that gets the power in W"),
+                           description="Name of the field in which the action gets the "
+                                       "power"),
     "modes": ParamSpec(dict, required=True, label="Modes", when=_when("modes"),
                        values=_MODE_ENTRY,
                        keys=ParamSpec(str, choices=_BEHAVIOURS, choice_labels=BEHAVIOUR_LABELS),
-                       description="Per behaviour (charge, discharge, hold, absorb_surplus, "
-                                   "self_consumption): option, power, set"),
+                       description="For every behaviour the battery has a mode for: the "
+                                   "option of the mode select and, where needed, a power "
+                                   "number and other values to set"),
     "release": ParamSpec(str, label="When released", choices=_BEHAVIOURS,
                          choice_labels=BEHAVIOUR_LABELS, when=_when("modes"),
-                         description="Mode set when Nornwatt stops or lets go of the "
-                                     "battery (default self_consumption, if configured)"),
+                         description="Behaviour set when Nornwatt stops or lets go of the "
+                                     "battery. Left empty: self-consumption, when the "
+                                     "battery has a mode for it"),
     "deadband_w": ParamSpec(float, default=25.0, minimum=0, advanced=True,
-                            label="Deadband (W)",
-                            description="Power changes up to this are not written"),
+                            label="Ignore changes up to (W)",
+                            description="A new power that differs from the one set on the "
+                                        "battery by no more than this is not sent"),
 }
 
 

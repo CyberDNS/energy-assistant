@@ -4,12 +4,13 @@ integration: any climate entity (Home Assistant core)
 url: https://www.home-assistant.io/integrations/climate/
 verified: true
 description: >-
-  The thermostat stays in its heating mode; Nornwatt moves its target
-  between the thresholds (run → top, stop → bottom) and puts back the normal
-  target when it stops.  Checked with Home Assistant's generic thermostat.
+  The thermostat stays in its heating mode. Nornwatt sets its target
+  temperature to the upper threshold to heat and to the lower threshold to
+  stop, and puts back your normal target when it stops controlling. Checked
+  with Home Assistant's generic thermostat.
 variables:
   climate:
-    label: Climate entity (without "climate.")
+    label: Thermostat (the entity id without "climate.")
     example: living_room
 device:
   type: homeassistant_thermostat

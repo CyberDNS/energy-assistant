@@ -67,40 +67,45 @@ def _text(label: str, description: str, *controls: str, options: str) -> ParamSp
 POWER_SETPOINT_BINDING: dict[str, ParamSpec] = {
     "control": ParamSpec(str, required=True, choices=CONTROLS, choice_labels=CONTROL_LABELS,
                          label="Run and stop through",
-                         description="What Nornwatt changes on the thermostat"),
+                         description="What Nornwatt changes on the thermostat to make the "
+                                     "device run and stop"),
     "entity": ParamSpec(str, required=True, entity=True, domains=("climate", "water_heater"),
-                        label="Thermostat", description="Climate or water heater entity"),
+                        label="Thermostat",
+                        description="The climate or water heater entity of the device"),
     "run_temperature": ParamSpec(float, label="Run at", when=_when("target_temperature",
                                                                   "water_heater"),
-                                 description="Target while running (default: the threshold "
-                                             "it runs towards)"),
+                                 description="Target temperature set to make it run. Left "
+                                             "empty: the threshold it runs towards, the "
+                                             "upper one for a heater"),
     "stop_temperature": ParamSpec(float, label="Stop at", when=_when("target_temperature",
                                                                     "water_heater"),
-                                  description="Target while stopped (default: the other "
-                                              "threshold)"),
-    "run_mode": _text("Run mode", "HVAC mode while running, e.g. heat", "hvac_mode",
+                                  description="Target temperature set to make it stop. Left "
+                                              "empty: the other threshold"),
+    "run_mode": _text("Run mode", "HVAC mode set to make it run, e.g. heat", "hvac_mode",
                       options="hvac_modes"),
-    "stop_mode": _text("Stop mode", "HVAC mode while stopped, e.g. off", "hvac_mode",
+    "stop_mode": _text("Stop mode", "HVAC mode set to make it stop, e.g. off", "hvac_mode",
                        options="hvac_modes"),
-    "run_preset": _text("Run preset", "Preset while running, e.g. boost", "preset",
+    "run_preset": _text("Run preset", "Preset set to make it run, e.g. boost", "preset",
                         options="preset_modes"),
-    "stop_preset": _text("Stop preset", "Preset while stopped, e.g. eco", "preset",
+    "stop_preset": _text("Stop preset", "Preset set to make it stop, e.g. eco", "preset",
                          options="preset_modes"),
-    "run_operation": _text("Run operation", "Operation mode while running, e.g. "
+    "run_operation": _text("Run operation", "Operation mode set to make it run, e.g. "
                            "high_demand", "water_heater_operation", options="operation_list"),
-    "stop_operation": _text("Stop operation", "Operation mode while stopped, e.g. eco",
+    "stop_operation": _text("Stop operation", "Operation mode set to make it stop, e.g. eco",
                             "water_heater_operation", options="operation_list"),
     "normal": ParamSpec(object, label="Normal operation",
-                        description="Your own temperature / mode / preset, restored when "
-                                    "Nornwatt stops or its plan is stale"),
+                        description="The temperature, mode or preset you normally use. "
+                                    "Nornwatt puts it back when it stops or has not sent a "
+                                    "command for too long"),
     "running_states": ParamSpec(list, items=ParamSpec(str), advanced=True, item_label="state",
-                                label="Running hvac_action states",
-                                description="hvac_action values that mean it runs "
-                                            "(default: heating, cooling, …)"),
+                                label="States that mean running",
+                                description="Values of the entity's hvac_action attribute "
+                                            "that mean the device is running. Left empty: "
+                                            "heating, cooling, drying, preheating, defrosting"),
     "stale_after_min": ParamSpec(float, default=30.0, minimum=1, advanced=True,
                                  label="Restore after (min)",
-                                 description="Restore the normal operation when no command "
-                                             "came for this long"),
+                                 description="Without a new command for this long, Nornwatt "
+                                             "puts back the normal operation"),
 }
 
 

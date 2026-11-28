@@ -4,13 +4,13 @@ integration: Wallbox (Home Assistant core)
 url: https://www.home-assistant.io/integrations/wallbox/
 verified: false
 description: >-
-  Charging current (A) plus the Pause/resume switch.  Nornwatt follows
-  the PV surplus itself by changing the current.  Entity ids are built from
-  the device name; check them under Settings → Entities.  The power sensor is
-  in kW (converted).  Not yet checked on a real Wallbox.
+  Nornwatt sets the charging current and uses the Pause/resume switch to
+  start and stop. It follows the PV surplus itself by changing the current.
+  The entity ids are built from the name of the device: check them in Home
+  Assistant under Settings → Entities. Not yet checked on a real Wallbox.
 variables:
   prefix:
-    label: Entity prefix (device name)
+    label: Entity prefix (the name of the device)
     example: wallbox_pulsar_plus
 device:
   type: homeassistant_charger

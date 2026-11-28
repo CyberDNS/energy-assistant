@@ -416,7 +416,9 @@ def _first_number(*values: Any) -> float | None:
 
 SWITCH_BINDING: dict[str, ParamSpec] = {
     "entity": ParamSpec(str, required=True, entity=True, domains=SWITCH_DOMAINS,
-                        label="Entity", description="Entity switched on / off"),
+                        label="Entity",
+                        description="Entity Nornwatt switches on and off: a switch, input "
+                                    "boolean, light or fan"),
 }
 
 

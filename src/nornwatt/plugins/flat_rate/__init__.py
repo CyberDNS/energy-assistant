@@ -15,9 +15,11 @@ def register(registry: PluginRegistry) -> None:
         description="Constant price per kWh.",
         settings={
             "import_price_eur_per_kwh": ParamSpec(float, minimum=0, default=0.0,
-                                                  description="Price of energy drawn (€/kWh)"),
+                                                  description="What you pay for every kWh drawn "
+                                                              "from the grid, all included"),
             "export_price_eur_per_kwh": ParamSpec(float, minimum=0, default=0.0,
-                                                  description="Payment for energy fed in (€/kWh)"),
+                                                  description="What you receive for every kWh "
+                                                              "fed in"),
         },
     )
 

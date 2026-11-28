@@ -214,7 +214,7 @@ async def test_plugin_settings_are_validated(running) -> None:
         ("device 'pv_meter': unknown setting 'hots' of plugin 'tasmota' (allowed: host, profile, "
          "sensor, fields, invert_sign, user, password, poll_interval_s, stale_after_s)"),
         ("device 'pv_meter': setting 'host' is required by plugin 'tasmota' "
-         "(Host name, IP address or URL)"),
+         "(Host name, IP address or URL of the Tasmota device)"),
     ]
 
 
@@ -318,7 +318,8 @@ async def test_tariffs_are_added_checked_and_removed(running) -> None:
     })).json()
     assert check["errors"] == [
         "tariffs: night: resolution must be one of QUARTER_HOURLY, HOURLY, got 'DAILY'",
-        "tariffs: night: setting 'token' is required (Personal access token from developer.tibber.com)",
+        ("tariffs: night: setting 'token' is required (Personal access token of your Tibber "
+         "account, from developer.tibber.com)"),
     ]
 
     # A tariff a device uses cannot go.

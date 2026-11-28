@@ -41,27 +41,47 @@ def register(registry: PluginRegistry) -> None:
         categories={C.BATTERY, C.PV, C.METER, C.CONSUMER},
         provides={Cap.POWER_W, Cap.SOC_PCT},
         settings={
-            "host": ParamSpec(str, required=True, description="Host name or IP address"),
+            "host": ParamSpec(str, required=True,
+                              description="Host name or IP address of the device on your network"),
             "profile": ParamSpec(str, required=True,
-                                 description="Built-in profile name or path to a profile file"),
+                                 description="Name of a built-in device profile, e.g. "
+                                             "sma_sunny_boy_storage, or the path to a profile "
+                                             "file of your own"),
             "port": ParamSpec(int, advanced=True, minimum=1, maximum=65535,
-                              description="TCP port (default: the profile's, usually 502)"),
+                              description="TCP port of the device. Left empty, the port of the "
+                                          "profile is used, usually 502"),
             "unit_id": ParamSpec(int, advanced=True, label="Modbus unit ID", minimum=0, maximum=255,
-                                 description="Modbus unit id (default: the profile's)"),
-            "timeout_s": ParamSpec(float, advanced=True, minimum=0, exclusive_minimum=True, default=3.0),
-            "read_only": ParamSpec(bool, default=False, description="Never send setpoints to this device"),
-            "voltage_nominal_v": ParamSpec(float, advanced=True, minimum=0, exclusive_minimum=True, default=230.0),
-            "voltage_max_v": ParamSpec(float, advanced=True, minimum=0, exclusive_minimum=True, default=253.0),
+                                 description="Modbus address of the device, also called unit "
+                                             "ID or slave ID. Left empty, the one of the "
+                                             "profile is used"),
+            "timeout_s": ParamSpec(float, advanced=True, minimum=0, exclusive_minimum=True, default=3.0,
+                                   description="Seconds to wait for an answer of the device "
+                                               "before a read counts as failed"),
+            "read_only": ParamSpec(bool, default=False,
+                                   description="Nornwatt only reads this device and never "
+                                               "sends it commands"),
+            "voltage_nominal_v": ParamSpec(float, advanced=True, minimum=0, exclusive_minimum=True, default=230.0,
+                                           label="Nominal grid voltage (V)",
+                                           description="SMA: with the highest grid voltage it "
+                                                       "scales the discharge limit sent to "
+                                                       "the inverter. Change it only if your "
+                                                       "grid differs"),
+            "voltage_max_v": ParamSpec(float, advanced=True, minimum=0, exclusive_minimum=True, default=253.0,
+                                       label="Highest grid voltage (V)",
+                                       description="SMA: the voltage at which the inverter "
+                                                   "reaches its rated power"),
             "bms_step_w": ParamSpec(float, advanced=True, label="Battery management step (W)",
                                     minimum=0, exclusive_minimum=True, default=50.0,
-                                    description="SMA: setpoints are rounded to this step, so small "
-                                                "changes do not cause writes"),
+                                    description="SMA: the power sent is rounded to this step, "
+                                                "so small changes are not written to the "
+                                                "inverter"),
             "bms_discharge_offset_w": ParamSpec(float, advanced=True, label="Discharge offset (W, deprecated)",
                                                 minimum=0,
-                                                description="SMA: deprecated — set the battery's "
-                                                            "self_consumption_w and discharge_efficiency "
-                                                            "instead. When set, the discharge limit is the "
-                                                            "setpoint plus this offset"),
+                                                description="SMA: no longer needed. Set the "
+                                                            "battery's Self-consumption (W) and "
+                                                            "Discharge efficiency instead. When "
+                                                            "set, it is added to the discharge "
+                                                            "limit sent"),
         },
     )
 
