@@ -69,6 +69,13 @@ tag v0.2.0 pushed ─────► draft GitHub Release (auto-generated notes)
   gives the curation step in between a chance to happen first).
 - Promotion to prod lives entirely in `CyberDNS/hassio-addons-repository`
   (`promote-to-prod.yml`), not in this repo.
+- `.github/workflows/sync-docs.yml` keeps the documentation site
+  (`CyberDNS/nornwatt.com`, branches `main` / `edge` / `stable`) in step: on
+  `main` push it sends the configuration schema to the documentation's `main`
+  branch as a pull request; when a release is **published** it tags the
+  documentation with the version and opens the pull request `main` → `edge`.
+  "Promote to prod" opens `edge` → `stable` from that tag. Needs the secret
+  `DOCS_PAT`.
 
 ---
 

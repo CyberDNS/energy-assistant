@@ -167,6 +167,38 @@ def _entry_specs(collection: str, type_name: Any) -> dict[str, ParamSpec] | None
     return {**info.settings, **schema.common}
 
 
+def config_schema() -> dict[str, Any]:
+    """Everything the config UI needs to build its forms (also exported for the documentation)."""
+    return {
+        "categories": [schema.to_dict() for schema in CATEGORY_SCHEMAS.values()],
+        "capabilities": [
+            {"capability": c.value, "title": CAPABILITY_TITLES.get(c.value, c.value)}
+            for c in Capability
+        ],
+        "plugins": [info.to_dict() for info in plugin_registry.device_infos()],
+        "tariff_plugins": [info.to_dict() for info in plugin_registry.tariff_infos()],
+        "forecast_plugins": [info.to_dict() for info in plugin_registry.forecast_infos()],
+        "sections": [schema.to_dict() for schema in SECTION_SCHEMAS.values()],
+        "collections": [schema.to_dict() for schema in COLLECTIONS.values()],
+        "learning": {
+            kind: specs_to_dict(learning_options(kind))
+            for kind in sorted(set(LEARNING_KINDS.values()))
+        },
+        "learning_kinds": {cat.value: kind for cat, kind in LEARNING_KINDS.items()},
+        # Past data from Home Assistant (core/history_import): per category
+        # and field its label and the binding keys it takes.
+        "history_fields": {
+            cat.value: {f: {"label": HISTORY_FIELD_LABELS[f], "specs": specs_to_dict(_history_specs(cat, f))}
+                        for f in history_fields(cat)}
+            for cat in DeviceCategory
+        },
+        "model_keys": sorted(MODEL_KEYS),
+        # Categories with control: observe | active (issue #134).
+        "controlled_categories": sorted(_CONTROLLED),
+        "presets": presets_json(),
+    }
+
+
 def mount_config_api(api: FastAPI, app: Application) -> None:
     edit_lock = asyncio.Lock()
 
@@ -279,34 +311,7 @@ def mount_config_api(api: FastAPI, app: Application) -> None:
     @api.get("/api/config/schema")
     async def get_config_schema() -> dict:
         """Everything the config UI needs to build its forms."""
-        return {
-            "categories": [schema.to_dict() for schema in CATEGORY_SCHEMAS.values()],
-            "capabilities": [
-                {"capability": c.value, "title": CAPABILITY_TITLES.get(c.value, c.value)}
-                for c in Capability
-            ],
-            "plugins": [info.to_dict() for info in plugin_registry.device_infos()],
-            "tariff_plugins": [info.to_dict() for info in plugin_registry.tariff_infos()],
-            "forecast_plugins": [info.to_dict() for info in plugin_registry.forecast_infos()],
-            "sections": [schema.to_dict() for schema in SECTION_SCHEMAS.values()],
-            "collections": [schema.to_dict() for schema in COLLECTIONS.values()],
-            "learning": {
-                kind: specs_to_dict(learning_options(kind))
-                for kind in sorted(set(LEARNING_KINDS.values()))
-            },
-            "learning_kinds": {cat.value: kind for cat, kind in LEARNING_KINDS.items()},
-            # Past data from Home Assistant (core/history_import): per category
-            # and field its label and the binding keys it takes.
-            "history_fields": {
-                cat.value: {f: {"label": HISTORY_FIELD_LABELS[f], "specs": specs_to_dict(_history_specs(cat, f))}
-                            for f in history_fields(cat)}
-                for cat in DeviceCategory
-            },
-            "model_keys": sorted(MODEL_KEYS),
-            # Categories with control: observe | active (issue #134).
-            "controlled_categories": sorted(_CONTROLLED),
-            "presets": presets_json(),
-        }
+        return config_schema()
 
     @api.get("/api/config/file")
     async def get_config_file() -> dict:

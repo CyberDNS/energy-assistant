@@ -72,8 +72,8 @@ SETTINGS = {
     "smart_mode": ParamSpec(bool, advanced=True, default=False, description="Enable the device's smartMode on start-up, so limit "
                                                  "writes do not wear its flash"),
     "release_auto_model": ParamSpec(int, advanced=True, minimum=0, label="Own mode (autoModel)",
-                                    description="Mode the device returns to when Energy "
-                                                "Assistant lets go of it (Zendure 'autoModel', "
+                                    description="Mode the device returns to when Nornwatt "
+                                                "lets go of it (Zendure 'autoModel', "
                                                 "e.g. 8 = smart matching); default: the mode it "
                                                 "had before Nornwatt took over"),
     "poll_interval_s": ParamSpec(float, advanced=True, minimum=0, exclusive_minimum=True, default=60.0,

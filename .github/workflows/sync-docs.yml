@@ -1,0 +1,137 @@
+# Keeps the documentation site (CyberDNS/nornwatt.com) in step with this repository.
+#
+# The documentation has one branch per channel: main (dev), edge and stable.
+#
+#   push to main        The configuration schema (every device type, preset,
+#                       tariff, forecast and setting) is exported and sent to
+#                       the documentation's main branch as a pull request. The
+#                       site builds its settings tables from it and its build
+#                       fails when a type or preset has no page.
+#
+#   release published   The documentation's main branch is tagged with the
+#                       version, and a pull request main → edge is opened.
+#
+# Promotion to prod opens the pull request edge → stable from that tag; it
+# lives in CyberDNS/hassio-addons-repository (promote-to-prod.yml).
+#
+# Required secret:
+#   DOCS_PAT — a fine-grained personal access token for CyberDNS/nornwatt.com
+#              with "Contents: read and write" and "Pull requests: read and write".
+
+name: Sync documentation
+
+on:
+  push:
+    branches:
+      - main
+  release:
+    types:
+      - published
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-docs-${{ github.event_name }}
+  cancel-in-progress: false
+
+env:
+  DOCS_REPO: CyberDNS/nornwatt.com
+
+jobs:
+  schema:
+    name: Send the schema to the documentation
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Export the schema
+        run: |
+          uv sync --frozen
+          uv run python scripts/export_docs_schema.py > "$RUNNER_TEMP/schema.json"
+
+      - name: Checkout the documentation
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.DOCS_REPO }}
+          token: ${{ secrets.DOCS_PAT }}
+          path: docs-site
+
+      - name: Open or update the pull request
+        env:
+          GH_TOKEN: ${{ secrets.DOCS_PAT }}
+          SHORT_SHA: ${{ github.sha }}
+        run: |
+          cd docs-site
+          cp "$RUNNER_TEMP/schema.json" src/data/schema.json
+          if git diff --quiet; then
+            echo "The schema did not change: nothing to send."
+            exit 0
+          fi
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # One branch and one pull request, updated by every push.
+          BRANCH="sync/schema"
+          TITLE="chore: schema of Nornwatt ${SHORT_SHA::7}"
+          git checkout -B "$BRANCH"
+          git commit -am "$TITLE"
+          git push --force origin "$BRANCH"
+
+          BODY="The configuration schema changed in [CyberDNS/nornwatt@${SHORT_SHA::7}](https://github.com/CyberDNS/nornwatt/commit/${SHORT_SHA}).
+
+          The settings tables follow it by themselves. The build of this pull request fails if a device type, preset, tariff or forecast has no page yet, and lists field names on pages that no form has any more: add the missing documentation to this branch before merging."
+
+          if [[ -n "$(gh pr list --repo "$DOCS_REPO" --head "$BRANCH" --state open --json number --jq '.[0].number')" ]]; then
+            gh pr edit "$BRANCH" --repo "$DOCS_REPO" --title "$TITLE" --body "$BODY"
+          else
+            gh pr create --repo "$DOCS_REPO" --head "$BRANCH" --base main --title "$TITLE" --body "$BODY"
+          fi
+
+  promote-edge:
+    name: Promote the documentation to edge
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the documentation
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.DOCS_REPO }}
+          token: ${{ secrets.DOCS_PAT }}
+          ref: main
+          fetch-depth: 0
+
+      - name: Tag the version and open the pull request
+        env:
+          GH_TOKEN: ${{ secrets.DOCS_PAT }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          DESCRIBED="v$(jq -r .version src/data/schema.json)"
+          if [[ "$DESCRIBED" != "$TAG" ]]; then
+            echo "::warning::The documentation's main branch describes ${DESCRIBED}, the release is ${TAG}. Merge the open schema pull request in ${DOCS_REPO} first, then re-run this job."
+          fi
+
+          # The tag is the documentation of exactly this version: promotion to
+          # stable starts from it, whatever edge holds by then.
+          git tag --force "$TAG"
+          git push --force origin "refs/tags/${TAG}"
+
+          BRANCH="promote/edge-${TAG}"
+          git checkout -B "$BRANCH"
+          git push --force origin "$BRANCH"
+
+          if [[ -z "$(git rev-list origin/edge.."$BRANCH" | head -1)" ]]; then
+            echo "edge already has everything of main: nothing to promote."
+            exit 0
+          fi
+          if [[ -z "$(gh pr list --repo "$DOCS_REPO" --head "$BRANCH" --state open --json number --jq '.[0].number')" ]]; then
+            gh pr create --repo "$DOCS_REPO" --head "$BRANCH" --base edge \
+              --title "docs: promote to edge (${TAG})" \
+              --body "Nornwatt [${TAG}](https://github.com/CyberDNS/nornwatt/releases/tag/${TAG}) is on the edge channel. This brings the documentation of that version to edge.nornwatt.com. Merge with a merge commit, not a squash, so later promotions stay conflict-free."
+          fi
