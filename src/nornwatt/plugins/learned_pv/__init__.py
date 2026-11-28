@@ -39,6 +39,10 @@ from ...core.plugin_registry import BuildContext, PluginRegistry
 _log = logging.getLogger(__name__)
 
 
+_LATITUDE = "Latitude of the PV system in degrees, e.g. 49.61. North is positive"
+_LONGITUDE = "Longitude of the PV system in degrees, e.g. 6.13. East is positive"
+
+
 def register(registry: PluginRegistry) -> None:
     registry.register_forecast(
         "learned_pv", _build,
@@ -46,27 +50,44 @@ def register(registry: PluginRegistry) -> None:
         description="PV forecast learned from the measured production and Open-Meteo weather forecasts.",
         scopes=("system",),
         settings={
-            "latitude": ParamSpec(float, required=True, minimum=-90, maximum=90),
-            "longitude": ParamSpec(float, required=True, minimum=-180, maximum=180),
+            "latitude": ParamSpec(float, required=True, minimum=-90, maximum=90,
+                                  description=_LATITUDE),
+            "longitude": ParamSpec(float, required=True, minimum=-180, maximum=180,
+                                   description=_LONGITUDE),
             "history_entity": ParamSpec(str, required=True, entity=True, label="PV power sensor",
-                                        description="Home Assistant sensor of the PV power to learn from"),
+                                        description="Sensor of the PV power in Home Assistant. "
+                                                    "Its history is what the forecast is "
+                                                    "learned from"),
             "device": ParamSpec(str, label="PV device", advanced=True,
-                                description="Id of the PV device, to show the model on its page"),
+                                description="ID of the PV device in Nornwatt. The learned "
+                                            "model is then shown on the page of that device"),
             "history_days": ParamSpec(int, minimum=14, default=730, advanced=True,
-                                      description="Days of history used for training"),
+                                      description="Days of history the forecast is learned "
+                                                  "from"),
             "min_days": ParamSpec(int, minimum=1, default=14, advanced=True,
-                                  description="Days with production needed before the model is used"),
+                                  label="Days needed",
+                                  description="Days with production needed before the learned "
+                                              "forecast is used"),
             "refit_interval_h": ParamSpec(float, minimum=1, default=24, advanced=True,
-                                          description="Hours between refits"),
+                                          description="Hours between two refits, when the "
+                                                      "forecast is learned again from the "
+                                                      "history"),
             "forecast_days": ParamSpec(int, minimum=1, maximum=16, default=7, advanced=True,
-                                       description="Days of weather forecast fetched"),
+                                       label="Weather forecast (days)",
+                                       description="How many days of weather forecast are "
+                                                   "fetched"),
             "capacity_kw": ParamSpec(float, minimum=0, exclusive_minimum=True, advanced=True,
                                      label="Inverter limit (kW)",
-                                     description="Highest PV power; default: the highest hourly mean measured"),
+                                     description="The forecast never goes above this. Left "
+                                                 "empty: the highest hourly average ever "
+                                                 "measured"),
             "intraday_correction": ParamSpec(bool, default=True, advanced=True,
-                                             description="Correct the next hours by the deviation of the last hour"),
+                                             description="When the last hour produced more or "
+                                                         "less than forecast, the next hours "
+                                                         "are corrected in the same direction"),
             "fallback": ParamSpec(dict, plugin="forecast", label="Fallback forecast",
-                                  description="Forecast used until a model is fitted"),
+                                  description="Forecast used until enough history is there to "
+                                              "learn from"),
             "forecast_url": ParamSpec(str, advanced=True, description="Tests only"),
             "archive_url": ParamSpec(str, advanced=True, description="Tests only"),
         },

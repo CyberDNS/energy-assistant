@@ -41,9 +41,12 @@ _RESOLUTIONS = ("QUARTER_HOURLY", "HOURLY")
 
 _ACCOUNT = {
     "token": ParamSpec(str, required=True, secret=True, label="Tibber API token",
-                       description="Personal access token from developer.tibber.com"),
+                       description="Personal access token of your Tibber account, from "
+                                   "developer.tibber.com"),
     "home_id": ParamSpec(str, label="Tibber home ID",
-                         description="Default: the account's first home"),
+                         description="Only for an account with several homes: the ID of the "
+                                     "home, from developer.tibber.com. Left empty, the first "
+                                     "home is used"),
     "api_url": ParamSpec(str, advanced=True, label="Tibber API URL", description="Tests only"),
 }
 
@@ -53,9 +56,10 @@ def register(registry: PluginRegistry) -> None:
         "tibber", _build_tariff,
         title="Tibber",
         description="Tibber spot prices from the Tibber API.",
-        settings={**_ACCOUNT, "resolution": ParamSpec(str, choices=_RESOLUTIONS,
-                                                      default="QUARTER_HOURLY",
-                                                      description="Price resolution")},
+        settings={**_ACCOUNT, "resolution": ParamSpec(
+            str, choices=_RESOLUTIONS, default="QUARTER_HOURLY", label="Price resolution",
+            choice_labels={"QUARTER_HOURLY": "Quarter-hourly", "HOURLY": "Hourly"},
+            description="Whether the prices are fetched per quarter hour or per hour")},
     )
     registry.register_device(
         "tibber_cloud", _build_device,

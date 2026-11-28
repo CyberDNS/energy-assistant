@@ -13,16 +13,25 @@ from ...core.plugin_registry import BuildContext, PluginRegistry
 _log = logging.getLogger(__name__)
 
 
+_VALUES = ("power_w for its power, or extra.<name> for another value it reports, e.g. "
+           "extra.import_w for the import alone")
+
 SETTINGS = {
     "minuend": ParamSpec(str, required=True, ref=("*",), label="Total",
-                         description="Device to subtract from"),
+                         description="The device whose power is the larger amount, e.g. the "
+                                     "meter at the grid connection"),
     "subtrahend": ParamSpec(str, required=True, ref=("*",), label="Minus",
-                            description="Device that is subtracted"),
-    "minuend_field": ParamSpec(str, advanced=True, default="power_w", description="State field of the minuend"),
-    "subtrahend_field": ParamSpec(str, advanced=True, default="power_w",
-                                  description="State field of the subtrahend"),
-    "min_w": ParamSpec(float, label="Lower bound (W)", description="Clamp the result to at least this (W)"),
-    "max_w": ParamSpec(float, label="Upper bound (W)", description="Clamp the result to at most this (W)"),
+                            description="The device whose power is taken off, e.g. the "
+                                        "household meter"),
+    "minuend_field": ParamSpec(str, advanced=True, default="power_w", label="Value of Total",
+                               description=f"Which value of the Total device is used: {_VALUES}"),
+    "subtrahend_field": ParamSpec(str, advanced=True, default="power_w", label="Value of Minus",
+                                  description=f"Which value of the Minus device is used: {_VALUES}"),
+    "min_w": ParamSpec(float, label="Lower bound (W)",
+                       description="The result is never lower than this, e.g. 0 so that the "
+                                   "difference cannot turn negative"),
+    "max_w": ParamSpec(float, label="Upper bound (W)",
+                       description="The result is never higher than this"),
 }
 
 

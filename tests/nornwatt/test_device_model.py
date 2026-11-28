@@ -98,8 +98,9 @@ def test_unknown_category_and_missing_type() -> None:
 
 def test_required_params_and_misplaced_params() -> None:
     errors = _errors({"bat": {"category": "battery", "type": "zendure", "capacity_kwh": 7.6}})
-    assert "device 'bat': params.capacity_kwh is required for category 'battery' " \
-           "(Usable capacity (kWh))" in errors
+    assert ("device 'bat': params.capacity_kwh is required for category 'battery' "
+            "(Energy the battery can store and give back, from its data sheet. Enter the "
+            "usable capacity, not the nominal one)") in errors
     assert "device 'bat': 'capacity_kwh' is a model parameter — move it under 'params:'" in errors
 
 

@@ -127,7 +127,7 @@ def test_validation_checks_domains_and_conditional_keys() -> None:
              "capabilities": {"power_w": {"import_entity": "sensor.i"}}}
     assert errors({"grid": meter}) == [(
         "device 'grid': capabilities.power_w: key 'export_entity' is required "
-        "(Export power sensor, ≥ 0)"
+        "(Sensor of the export power, never negative)"
     )]
     meter["capabilities"]["power_w"]["export_entity"] = "sensor.e"
     assert errors({"grid": meter}) == []

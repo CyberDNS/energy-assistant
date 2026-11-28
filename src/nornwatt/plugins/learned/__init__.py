@@ -63,36 +63,70 @@ _log = logging.getLogger(__name__)
 #: options of a consumer's ``learning:``.
 LEARNING_OPTIONS = {
     "history_unit": ParamSpec(str, choices=("W", "kW"), advanced=True,
-                              description="Only for sensors without a unit"),
+                              label="Unit of the sensor",
+                              description="Only for a sensor that has no unit in Home "
+                                          "Assistant: the unit its values are in"),
     "subtract": ParamSpec(list, items=ParamSpec(str, entity=True), label="Subtract sensors", item_label="sensor",
-                          description="Sensors taken off before fitting; 'auto' = every other "
-                                      "consumer with a learned forecast on the same tariff"),
+                          description="Sensors whose consumption is taken off before "
+                                      "learning, so the forecast covers what is left. Enter "
+                                      "auto for every other consumer on the same tariff that "
+                                      "has a learned forecast"),
     "temperature_entity": ParamSpec(str, entity=True, label="Outdoor temperature sensor",
-                                    description="Outdoor temperature sensor (°C), for heating loads"),
+                                    description="For a load that follows the weather, such as "
+                                                "a heat pump: the sensor of the outdoor "
+                                                "temperature"),
     "weather_entity": ParamSpec(str, entity=True, label="Weather forecast entity",
-                                description="Weather entity whose forecast gives the temperature"),
-    "history_days": ParamSpec(int, minimum=1, default=730, advanced=True, description="Days of history used"),
+                                description="Weather entity whose forecast gives the outdoor "
+                                            "temperature of the coming hours"),
+    "history_days": ParamSpec(int, minimum=1, default=730, advanced=True,
+                              description="Days of history the forecast is learned from"),
     "min_days": ParamSpec(int, minimum=1, default=14, advanced=True,
-                          description="Usable days needed before a model is used"),
+                          label="Days needed",
+                          description="Days with usable data needed before the learned "
+                                      "forecast is used"),
     "refit_interval_h": ParamSpec(float, minimum=0, exclusive_minimum=True, default=6,
                                   advanced=True,
-                                  description="Hours between refits"),
-    "exclude": ParamSpec(list, label="Excluded periods", item_label="period", advanced=True, description="Periods left out of the training (local time)",
+                                  description="Hours between two refits, when the forecast is "
+                                              "learned again from the history"),
+    "exclude": ParamSpec(list, label="Excluded periods", item_label="period", advanced=True,
+                         description="Periods that are not learned from, e.g. a holiday or a "
+                                     "time the sensor was wrong. In local time",
                          items=ParamSpec(dict, fields={
-                             "from": ParamSpec(str, required=True, label="from (YYYY-MM-DD HH:MM)"),
-                             "to": ParamSpec(str, required=True, label="to (YYYY-MM-DD HH:MM)"),
+                             "from": ParamSpec(str, required=True, label="From (YYYY-MM-DD HH:MM)",
+                                               description="Start of the period"),
+                             "to": ParamSpec(str, required=True, label="To (YYYY-MM-DD HH:MM)",
+                                             description="End of the period"),
                          })),
-    "exclude_when": ParamSpec(list, label="Exclude while", item_label="condition", description="Hours left out while a condition holds",
+    "exclude_when": ParamSpec(list, label="Exclude while", item_label="condition",
+                              description="Hours that are not learned from because of the "
+                                          "state of an entity, e.g. while a meter was stuck",
                               items=ParamSpec(dict, fields={
-                                  "entity": ParamSpec(str, required=True, entity=True),
-                                  "condition": ParamSpec(str, choices=("frozen",),
-                                                         description="frozen = value not changing"),
-                                  "below": ParamSpec(float),
-                                  "above": ParamSpec(float),
-                                  "min_hours": ParamSpec(int, minimum=1, default=1),
+                                  "entity": ParamSpec(str, required=True, entity=True,
+                                                      description="The entity that is "
+                                                                  "checked, hour by hour"),
+                                  "condition": ParamSpec(
+                                      str, choices=("frozen",),
+                                      choice_labels={"frozen": "The value does not change"},
+                                      description="Leaves out hours in which the value of the "
+                                                  "entity did not change, e.g. a stuck meter"),
+                                  "below": ParamSpec(float,
+                                                     description="Leaves out hours in which "
+                                                                 "the entity's mean value is "
+                                                                 "below this"),
+                                  "above": ParamSpec(float,
+                                                     description="Leaves out hours in which "
+                                                                 "the entity's mean value is "
+                                                                 "above this"),
+                                  "min_hours": ParamSpec(int, minimum=1, default=1,
+                                                         label="For at least (h)",
+                                                         description="Hours are only left out "
+                                                                     "when the condition holds "
+                                                                     "for this many hours in a "
+                                                                     "row"),
                               })),
     "fallback": ParamSpec(dict, plugin="forecast", label="Fallback forecast",
-                          description="Forecast used until a model is fitted"),
+                          description="Forecast used until enough history is there to learn "
+                                      "from"),
 }
 
 
@@ -101,11 +135,14 @@ def register(registry: PluginRegistry) -> None:
     registry.register_forecast(
         "learned", _build,
         title="Learned from history",
-        description="Consumption forecast learned from Home Assistant statistics.",
+        description="Consumption forecast learned from the history Home Assistant keeps of "
+                    "a sensor.",
         scopes=("device",),
         settings={
             "history_entity": ParamSpec(str, required=True, entity=True, label="Sensor to learn from",
-                                        description="Power sensor or energy meter to learn from"),
+                                        description="Power or energy sensor of the consumer. "
+                                                    "Its history in Home Assistant is what the "
+                                                    "forecast is learned from"),
             **LEARNING_OPTIONS,
         },
     )

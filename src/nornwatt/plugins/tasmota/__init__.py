@@ -79,8 +79,13 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from ...core.device_model import (
+    READ_EVERY_LABEL,
+    UNAVAILABLE_AFTER_LABEL,
+    DeviceCategory,
+    ParamSpec,
+)
 from ...core.device_model import Capability as Cap
-from ...core.device_model import DeviceCategory, ParamSpec
 from ...core.device_model import DeviceCategory as C
 from ...core.plugin_registry import BuildContext, PluginRegistry
 
@@ -88,22 +93,36 @@ _log = logging.getLogger(__name__)
 
 
 SETTINGS = {
-    "host": ParamSpec(str, required=True, description="Host name, IP address or URL"),
+    "host": ParamSpec(str, required=True,
+                      description="Host name, IP address or URL of the Tasmota device"),
     "profile": ParamSpec(str, label="Meter profile",
-                         description="Built-in profile (e.g. iskra_mt175, energy for plugs) or "
-                                     "path to a profile file"),
-    "sensor": ParamSpec(str, advanced=True, description="Sensor name in the Tasmota status (default: the "
-                                         "profile's, or detected)"),
-    "fields": ParamSpec(dict, advanced=True, values=ParamSpec(object), label="Field mapping", description="Capability → Tasmota field, e.g. {power_w: MT631.P}"),
-    "invert_sign": ParamSpec(bool, description="The meter counts production as positive"),
-    "user": ParamSpec(str, advanced=True, default="admin", label="Web user"),
+                         description="Built-in profile for your meter, e.g. iskra_mt175 (energy "
+                                     "for a metering plug), or the path to a profile file of "
+                                     "your own"),
+    "sensor": ParamSpec(str, advanced=True,
+                        description="Name of the sensor in the Tasmota status, e.g. MT175. Left "
+                                    "empty, the name from the profile is used, or the sensor "
+                                    "is detected"),
+    "fields": ParamSpec(dict, advanced=True, values=ParamSpec(object), label="Field mapping",
+                        description="For a meter without a fitting profile: which Tasmota "
+                                    "field holds which value, e.g. power_w and MT631.P"),
+    "invert_sign": ParamSpec(bool,
+                             description="Turn on when the meter counts production as "
+                                         "positive. Left empty, the profile decides"),
+    "user": ParamSpec(str, advanced=True, default="admin", label="Web user",
+                      description="User name of the Tasmota web interface"),
     "password": ParamSpec(str, secret=True, label="Web password",
-                          description="Only if the device has one"),
+                          description="Password of the Tasmota web interface. Only if you set "
+                                      "one"),
     "poll_interval_s": ParamSpec(float, advanced=True, minimum=0, exclusive_minimum=True,
-                                 description="Seconds between reads (default 2 for meters, else 10)"),
+                                 label=READ_EVERY_LABEL,
+                                 description="Seconds between two reads of the device. Left "
+                                             "empty: 2 for a meter, 10 for anything else"),
     "stale_after_s": ParamSpec(float, advanced=True, minimum=0, exclusive_minimum=True,
-                               description="Seconds without a valid reading until the device "
-                                           "counts as unavailable"),
+                               label=UNAVAILABLE_AFTER_LABEL,
+                               description="Without a valid reading for this long, the device "
+                                           "counts as unavailable. Left empty: three read "
+                                           "intervals, at least 30 s"),
 }
 
 

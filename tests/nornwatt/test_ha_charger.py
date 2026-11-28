@@ -190,7 +190,7 @@ def test_validation_of_the_power_setpoint() -> None:
     assert errors({"control": "current", "current": "number.c", "enable": "switch.e"}) == []
     assert errors({"control": "current"}) == [(
         "device 'wb': capabilities.power_setpoint: key 'current' is required "
-        "(Charging current (A))"
+        "(Number entity that takes the charging current, in A)"
     )]
     assert errors({"control": "current", "current": "number.c", "enable": "sensor.e"}) == [(
         "device 'wb': capabilities.power_setpoint: enable must be a switch / input_boolean / "

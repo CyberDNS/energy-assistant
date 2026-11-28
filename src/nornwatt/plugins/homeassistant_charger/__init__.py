@@ -52,9 +52,12 @@ _READINGS = frozenset({Cap.POWER_W, Cap.PLUGGED})
 
 SETTINGS: dict[str, ParamSpec] = {
     "phases": ParamSpec(int, minimum=1, maximum=3, default=3, label="Phases",
-                        description="Phases the charger charges with (for current ↔ power)"),
+                        description="Number of phases the charger charges with. Used to "
+                                    "convert between current and power"),
     "voltage_v": ParamSpec(float, minimum=0, exclusive_minimum=True, default=230.0,
-                           advanced=True, label="Voltage (V)"),
+                           advanced=True, label="Voltage (V)",
+                           description="Voltage of one phase. Used to convert between "
+                                       "current and power"),
 }
 
 

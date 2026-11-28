@@ -54,34 +54,41 @@ _log = logging.getLogger(__name__)
 
 _WINDOW = ParamSpec(dict, fields={
     "days": ParamSpec(list, items=ParamSpec(str), label="Days", widget="weekdays",
-                      description="e.g. mon-fri, sat, sun (default: every day)"),
+                      description="Days of the week the window applies on. Left empty: every "
+                                  "day"),
     "all_day": ParamSpec(bool, label="All day", widget="checkbox",
-                         description="The whole day (no from/to)"),
+                         description="The window covers the whole day"),
     "from": ParamSpec(str, label="From", widget="time", when={"all_day": None},
-                      description="On a quarter hour"),
+                      description="Start of the window, on a quarter hour"),
     "to": ParamSpec(str, label="To", widget="time_end", when={"all_day": None},
-                    description="24:00 = end of day; before 'from' = over midnight"),
+                    description="End of the window. 24:00 is the end of the day; a time before "
+                                "From runs over midnight"),
 })
 
 _PERIOD = ParamSpec(dict, summary="{name} · {price_eur_per_kwh} €/kWh", fields={
-    "name": ParamSpec(str, required=True, label="Name", description="e.g. day, night"),
-    "price_eur_per_kwh": ParamSpec(float, required=True, label="Price (€/kWh)"),
+    "name": ParamSpec(str, required=True, label="Name",
+                      description="Your name for the period, e.g. day or night"),
+    "price_eur_per_kwh": ParamSpec(float, required=True, label="Price (€/kWh)",
+                                   description="What a kWh costs in this period"),
     "default": ParamSpec(bool, label="All other times", widget="exclusive",
-                         description="Period whose price applies whenever no window covers "
-                                     "the time; none = the windows must cover the whole week"),
+                         description="The period whose price applies whenever no time window "
+                                     "covers the time. Without one, the windows must cover "
+                                     "the whole week"),
     "windows": ParamSpec(list, items=_WINDOW, label="Time windows", item_label="time window",
-                         description="When this price applies"),
+                         description="The days and times this price applies"),
 })
 
 _SEASON = ParamSpec(dict, summary="{from} – {to}", fields={
     "from": ParamSpec(str, required=True, label="From", widget="month_day",
-                      description="First day, inclusive"),
+                      description="First day of the season"),
     "to": ParamSpec(str, required=True, label="To", widget="month_day",
-                    description="Last day, inclusive (may be in the next year)"),
+                    description="Last day of the season. A day before From runs into the "
+                                "next year"),
     "periods": ParamSpec(dict, required=True, values=ParamSpec(float),
                          keys=ParamSpec(str, label="Period", choices_from=("periods", "name")),
                          label="Prices (€/kWh)", item_label="price",
-                         description="Price per period within this season"),
+                         description="The price of each period during this season. Periods "
+                                     "left out keep their usual price"),
 })
 
 #: What a new time-of-use tariff starts with: day/night with cheap weekends.
@@ -109,17 +116,21 @@ def register(registry: PluginRegistry) -> None:
             "periods": ParamSpec(list, required=True, items=_PERIOD, label="Periods",
                                  item_label="period", widget="tou_periods",
                                  initial=_EXAMPLE_PERIODS,
-                                 description="Named prices and the times they apply"),
+                                 description="The prices of the tariff, each with a name and "
+                                             "the times it applies"),
             "seasons": ParamSpec(list, items=_SEASON, label="Seasons", advanced=True,
                                  item_label="season",
-                                 description="Other prices for some periods within a date range"),
-            "timezone": ParamSpec(str, default="Europe/Berlin", label="Timezone",
-                                  description="Timezone the window times are in"),
+                                 description="Other prices for some periods during a part of "
+                                             "the year, e.g. a winter price"),
+            "timezone": ParamSpec(str, default="Europe/Berlin", label="Time zone",
+                                  description="Time zone the times of the windows are in"),
             "export_price_eur_per_kwh": ParamSpec(float, default=0.0,
-                                                  description="Payment for energy fed in (€/kWh)"),
+                                                  description="What you receive for every kWh "
+                                                              "fed in"),
             "base": ParamSpec(str, tariff=True, widget="base_tariff", label="Added to tariff",
-                              description="Add these prices on top of this tariff "
-                                          "(e.g. grid fees on a spot price); empty = standalone"),
+                              description="These prices are added to the prices of this "
+                                          "tariff, e.g. time-dependent grid fees on a spot "
+                                          "price. Left empty, the tariff stands alone"),
         },
         validator=validate,
     )

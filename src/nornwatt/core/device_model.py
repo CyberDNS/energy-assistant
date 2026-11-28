@@ -402,6 +402,10 @@ def specs_to_dict(specs: Mapping[str, ParamSpec]) -> dict[str, Any]:
     return {name: spec.to_dict(name) for name, spec in specs.items()}
 
 
+#: Label of every ``poll_interval_s`` and ``stale_after_s`` of a device type.
+READ_EVERY_LABEL = "Read every (s)"
+UNAVAILABLE_AFTER_LABEL = "Unavailable after (s)"
+
 #: Display names of the capabilities.
 CAPABILITY_TITLES = {
     "power_w": "Power", "energy_in_kwh": "Energy consumed", "energy_out_kwh": "Energy fed in",
@@ -480,32 +484,78 @@ _K = DeviceCategory
 _METERS = frozenset({_K.METER})
 _METERED = {ConnectionType.METERED_BY: _METERS}
 
+_FRACTION = "as a fraction (0.95 = 95 %)"
+
 _BATTERY_PARAMS = {
-    "capacity_kwh": ParamSpec(float, label="Usable capacity (kWh)", required=True, minimum=0, exclusive_minimum=True,
-                              description="Usable capacity (kWh)"),
-    "max_charge_kw": ParamSpec(float, label="Max charge power (kW)", required=True, minimum=0, description="Max charge power (kW)"),
-    "max_discharge_kw": ParamSpec(float, label="Max discharge power (kW)", required=True, minimum=0,
-                                  description="Max discharge power (kW)"),
-    "min_soc_pct": ParamSpec(float, default=0, label="Lowest SoC (%)", minimum=0, maximum=100, description="Lowest planned SoC (%)"),
-    "max_soc_pct": ParamSpec(float, default=100, label="Highest SoC (%)", minimum=0, maximum=100, description="Highest planned SoC (%)"),
-    "charge_efficiency": ParamSpec(float, default=0.95, description="Share of the charged energy that ends up stored", minimum=0, exclusive_minimum=True, maximum=1),
-    "discharge_efficiency": ParamSpec(float, default=0.95, description="Share of the stored energy that comes out", minimum=0, exclusive_minimum=True, maximum=1),
-    "efficiency": ParamSpec(str, default="configured", label="Efficiency used for planning", choices=("configured", "learned"),
-                            description="Plan with the configured or the learned efficiency and self-consumption"),
-    "efficiency_learning": ParamSpec(dict, when={"efficiency": "learned"}, advanced=True, label="Efficiency learning", description="How efficiency and self-consumption are learned", fields={
-        "history_days": ParamSpec(float, minimum=1, default=90, description="Days of history used"),
-        "refit_interval_h": ParamSpec(float, minimum=0, exclusive_minimum=True, default=6,
-                                      description="Hours between refits"),
-    }),
-    "purchase_price_eur": ParamSpec(float, label="Purchase price (€)", minimum=0, description="Hardware price, for wear cost"),
-    "cycle_life": ParamSpec(int, label="Cycle life (full cycles)", minimum=1, description="Rated full cycles, for wear cost"),
-    "no_grid_charge": ParamSpec(bool, default=False, label="Charge from PV only", description="Charge from PV surplus only"),
-    "own_meter": ParamSpec(str, default="zone", advanced=True, label="Follows on its own",
-                           choices=("zone", "grid_connection"),
-                           description="Meter the battery regulates on without Nornwatt: its zone's, or the grid connection point's (then PV a separately billed load uses is not available to it)"),
-    "standby_w": ParamSpec(float, default=50, advanced=True, label="Standby threshold (W)", minimum=0, description="Power treated as standby/noise (W)"),
-    "self_consumption_w": ParamSpec(float, default=0, label="Self consumption (W)", minimum=0,
-                                    description="Constant draw from the stored energy, at all times (battery management, inverter); learned with efficiency: learned"),
+    "capacity_kwh": ParamSpec(
+        float, label="Usable capacity (kWh)", required=True, minimum=0, exclusive_minimum=True,
+        description="Energy the battery can store and give back, from its data sheet. Enter "
+                    "the usable capacity, not the nominal one"),
+    "max_charge_kw": ParamSpec(
+        float, label="Max charge power (kW)", required=True, minimum=0,
+        description="The most the battery can charge with, from the data sheet of the "
+                    "battery or its inverter"),
+    "max_discharge_kw": ParamSpec(
+        float, label="Max discharge power (kW)", required=True, minimum=0,
+        description="The most the battery can deliver, from the data sheet of the battery "
+                    "or its inverter"),
+    "min_soc_pct": ParamSpec(
+        float, default=0, label="Lowest SoC (%)", minimum=0, maximum=100,
+        description="The plan never discharges the battery below this"),
+    "max_soc_pct": ParamSpec(
+        float, default=100, label="Highest SoC (%)", minimum=0, maximum=100,
+        description="The plan never charges the battery above this"),
+    "charge_efficiency": ParamSpec(
+        float, default=0.95, minimum=0, exclusive_minimum=True, maximum=1,
+        description=f"Share of the energy charged that ends up stored, {_FRACTION}"),
+    "discharge_efficiency": ParamSpec(
+        float, default=0.95, minimum=0, exclusive_minimum=True, maximum=1,
+        description=f"Share of the stored energy that comes out again, {_FRACTION}"),
+    "efficiency": ParamSpec(
+        str, default="configured", label="Efficiency used for planning",
+        choices=("configured", "learned"),
+        choice_labels={"configured": "Entered values", "learned": "Learned values"},
+        description="Whether the plan uses the efficiency and self-consumption entered here "
+                    "or the ones Nornwatt measured on your battery"),
+    "efficiency_learning": ParamSpec(
+        dict, when={"efficiency": "learned"}, advanced=True, label="Efficiency learning",
+        description="How the efficiency and self-consumption are measured from the "
+                    "battery's history",
+        fields={
+            "history_days": ParamSpec(float, minimum=1, default=90,
+                                      description="Days of the battery's history the "
+                                                  "measurement uses"),
+            "refit_interval_h": ParamSpec(float, minimum=0, exclusive_minimum=True, default=6,
+                                          description="Hours between two refits, when the values are "
+                                                      "measured again from the history"),
+        }),
+    "purchase_price_eur": ParamSpec(
+        float, label="Purchase price (€)", minimum=0,
+        description="What the battery cost, without installation. With the cycle life it "
+                    "gives the wear cost of every kWh stored"),
+    "cycle_life": ParamSpec(
+        int, label="Cycle life (full cycles)", minimum=1,
+        description="Full charge cycles the manufacturer rates the battery for, from its "
+                    "data sheet. With the purchase price it gives the wear cost"),
+    "no_grid_charge": ParamSpec(
+        bool, default=False, label="Charge from PV only",
+        description="The battery is only charged from PV surplus, never from the grid"),
+    "own_meter": ParamSpec(
+        str, default="zone", advanced=True, label="Regulates itself at",
+        choices=("zone", "grid_connection"),
+        choice_labels={"zone": "The meter it sits behind",
+                       "grid_connection": "The grid connection"},
+        description="Where the battery measures the surplus it stores while Nornwatt does "
+                    "not control it. Choose the grid connection for a battery with its own "
+                    "meter there, e.g. an SMA with an Energy Meter. Used for the savings"),
+    "standby_w": ParamSpec(
+        float, default=50, advanced=True, label="Standby threshold (W)", minimum=0,
+        description="Battery power up to this counts as the battery's own standby draw or "
+                    "as measurement noise, not as charging or discharging"),
+    "self_consumption_w": ParamSpec(
+        float, default=0, label="Self-consumption (W)", minimum=0,
+        description="Constant draw of the battery's electronics from the stored energy, at "
+                    "all times. Nornwatt measures it when the plan uses the learned values"),
 }
 
 def _check_charge_curve(value: Any) -> str | None:
@@ -541,73 +591,127 @@ def _check_str_list(value: Any) -> str | None:
 GUEST_MODES = ("pv_only", "instant", "off")
 
 _VEHICLE_PARAMS = {
-    "capacity_kwh": ParamSpec(float, required=True, minimum=0, exclusive_minimum=True,
-                              description="Usable battery capacity (kWh)"),
-    "charge_limit_soc_pct": ParamSpec(float, label="Charge limit (%)", minimum=0, maximum=100,
-                                      description="Ceiling the optimizer charges to"),
-    "max_charge_kw": ParamSpec(float, minimum=0, exclusive_minimum=True,
-                               description="On-board charger limit (kW); default: the charger's"),
+    "capacity_kwh": ParamSpec(
+        float, required=True, minimum=0, exclusive_minimum=True,
+        description="Usable capacity of the car's battery, from its data sheet"),
+    "charge_limit_soc_pct": ParamSpec(
+        float, default=100, label="Charge limit (%)", minimum=0, maximum=100,
+        description="Nornwatt never charges the car above this SoC, whatever the target"),
+    "max_charge_kw": ParamSpec(
+        float, label="Max charge power (kW)", minimum=0, exclusive_minimum=True,
+        description="The most the car's on-board charger takes. Left empty, the limit of "
+                    "the charger applies"),
     "charge_curve": ParamSpec(
         list, label="Charge curve", validator=_check_charge_curve, item_label="point",
-        description="Charging efficiency up to each SoC, ascending (the taper near full)",
+        description="How charging slows down as the battery fills: the share of the energy "
+                    "drawn that is stored, up to each SoC, lowest SoC first. Left empty: "
+                    "all of it up to 80 %, then 55 %",
         items=ParamSpec(dict, fields={
             "soc_pct": ParamSpec(float, required=True, minimum=0, exclusive_minimum=True,
-                                 maximum=100, label="up to SoC (%)"),
+                                 maximum=100, label="Up to SoC (%)",
+                                 description="The efficiency applies from the point before "
+                                             "up to this SoC"),
             "efficiency": ParamSpec(float, required=True, minimum=0, exclusive_minimum=True,
-                                    maximum=1, label="efficiency (0–1)"),
+                                    maximum=1, label="Efficiency (0–1)",
+                                    description="Share of the energy drawn that is stored, "
+                                                "as a fraction (0.55 = 55 %)"),
         }),
     ),
-    "timezone": ParamSpec(str, advanced=True, default="Europe/Berlin", description="Time zone of the weekly plan (default Europe/Berlin)"),
-    "charger_ids": ParamSpec(dict, label="ID in the charger system", item_label="charger system", validator=_check_charger_ids, values=ParamSpec(object),
-                             description="This vehicle's id in a charger system, e.g. openwb_mqtt → 1"),
-    "push_soc_to_charger": ParamSpec(bool, default=False, label="Send SoC to the charger", description="Publish the (estimated) SoC to the charger"),
-    "refresh_after_min": ParamSpec(float, label="Refresh when SoC is older than (min)", minimum=1,
-                                   description="Press the refresh button when the car's SoC is "
-                                               "older than this while charging"),
+    "timezone": ParamSpec(
+        str, advanced=True, default="Europe/Berlin", label="Time zone",
+        description="Time zone the times of the car's weekly plan are in"),
+    "charger_ids": ParamSpec(
+        dict, label="ID in the charger system", item_label="charger system",
+        validator=_check_charger_ids, values=ParamSpec(object),
+        description="Only for chargers that keep their own list of cars, such as openWB: "
+                    "the type of the charger and the number this car has there, e.g. "
+                    "openwb_mqtt and 1"),
+    "push_soc_to_charger": ParamSpec(
+        bool, default=False, label="Send SoC to the charger",
+        description="Nornwatt sends the car's SoC, measured or estimated, to the charger. "
+                    "Needs the ID in the charger system"),
+    "refresh_after_min": ParamSpec(
+        float, label="Refresh when SoC is older than (min)", minimum=1,
+        description="While the car charges, Nornwatt presses the car's Refresh button when "
+                    "its SoC is older than this. Left empty, it never does"),
 }
 
 _CHARGER_PARAMS = {
-    "min_power_kw": ParamSpec(float, label="Lowest charging power (kW)", minimum=0, description="Lowest charging power (kW)"),
-    "max_power_kw": ParamSpec(float, label="Highest charging power (kW)", minimum=0, exclusive_minimum=True,
-                              description="Highest charging power (kW)"),
-    "default_vehicle": ParamSpec(str, label="Default vehicle", ref=("vehicle",), description="Vehicle assigned on plug-in"),
-    "guest_mode": ParamSpec(str, default="pv_only", label="Guest car charging", choices=GUEST_MODES,
-                            description="Behaviour for an unknown car (default pv_only)"),
+    "min_power_kw": ParamSpec(
+        float, default=1.38, label="Lowest charging power (kW)", minimum=0,
+        description="The charger cannot charge with less than this. 1.38 kW is 6 A on one "
+                    "phase"),
+    "max_power_kw": ParamSpec(
+        float, default=11, label="Highest charging power (kW)", minimum=0,
+        exclusive_minimum=True,
+        description="The most the charger delivers. 11 kW is 16 A on three phases"),
+    "default_vehicle": ParamSpec(
+        str, label="Default vehicle", ref=("vehicle",),
+        description="The car a charging session starts with when one is plugged in. Left "
+                    "empty, a plugged-in car is a guest until you choose it"),
+    "guest_mode": ParamSpec(
+        str, default="pv_only", label="Guest car charging", choices=GUEST_MODES,
+        choice_labels={"pv_only": "PV surplus only", "instant": "Full power at once",
+                       "off": "Do not charge"},
+        description="What the charger does with a car that is not one of your vehicles"),
 }
 
 _THERMAL_PARAMS = {
-    "bottom_threshold": ParamSpec(float, label="Lower threshold", required=True,
-                                  description="Lower bound of the allowed range (e.g. °C)"),
-    "top_threshold": ParamSpec(float, label="Upper threshold", required=True,
-                               description="Upper bound of the allowed range"),
-    "direction": ParamSpec(str, default="reduces", label="Running the device", choices=("reduces", "increases"),
-                           description="reduces (cooler, default) or increases (heater) the value"),
-    "unit": ParamSpec(str, default="°C", advanced=True, label="Display unit", description="Display unit (default °C)"),
-    "active_rate_per_h": ParamSpec(float, label="Change per hour while running", required=True, minimum=0, exclusive_minimum=True,
-                                   description="Change per hour while running (fallback model)"),
-    "drift_rate_per_h": ParamSpec(float, label="Drift per hour while off", required=True, minimum=0,
-                                  description="Drift per hour while off (fallback model)"),
-    "min_runtime_h": ParamSpec(float, default=0, label="Minimum run time (h)", minimum=0, description="Minimum on-time (compressor)"),
-    "min_offtime_h": ParamSpec(float, default=0, label="Minimum off time (h)", minimum=0, description="Minimum off-time (compressor)"),
-    "rated_power_w": ParamSpec(float, label="Power while running (W)", minimum=0, exclusive_minimum=True,
-                               description="For a device that switches itself (a thermostat); "
-                                           "with controlled_by the switch's rated power is used"),
+    "bottom_threshold": ParamSpec(
+        float, label="Lower threshold", required=True,
+        description="Lower end of the range the value is kept in, e.g. 18 for an aquarium "
+                    "kept at 18 to 20.5 °C"),
+    "top_threshold": ParamSpec(
+        float, label="Upper threshold", required=True,
+        description="Upper end of the range the value is kept in"),
+    "direction": ParamSpec(
+        str, default="reduces", label="Running the device", choices=("reduces", "increases"),
+        choice_labels={"reduces": "Lowers the value (cooler, fridge)",
+                       "increases": "Raises the value (heater)"},
+        description="Whether the value falls or rises while the device runs"),
+    "unit": ParamSpec(
+        str, default="°C", advanced=True, label="Display unit",
+        description="Unit shown with the value and the thresholds"),
+    "active_rate_per_h": ParamSpec(
+        float, label="Change per hour while running", required=True, minimum=0,
+        exclusive_minimum=True,
+        description="How fast the value changes while the device runs, e.g. 0.4 for 0.4 °C "
+                    "per hour. A first estimate: Nornwatt learns the real rate"),
+    "drift_rate_per_h": ParamSpec(
+        float, label="Drift per hour while off", required=True, minimum=0,
+        description="How fast the value drifts back while the device is off. A first "
+                    "estimate: Nornwatt learns the real rate"),
+    "min_runtime_h": ParamSpec(
+        float, default=0, label="Minimum run time (h)", minimum=0,
+        description="Once started, the device runs at least this long, e.g. to protect a "
+                    "compressor"),
+    "min_offtime_h": ParamSpec(
+        float, default=0, label="Minimum off time (h)", minimum=0,
+        description="Once stopped, the device stays off at least this long"),
+    "rated_power_w": ParamSpec(
+        float, label="Power while running (W)", minimum=0, exclusive_minimum=True,
+        description="What the device draws while it runs. Only for a device that switches "
+                    "itself, such as a thermostat: with a switch under Controlled by, the "
+                    "power of the switch counts"),
 }
 
 #: Params of the grid connection meter (the meter without ``metered_by``).
 _GRID_ONLY = {"metered_by": None}
 _GRID_PARAMS = {
-    "max_import_kw": ParamSpec(float, minimum=0, exclusive_minimum=True, when=_GRID_ONLY,
-                               label="Grid connection limit (kW)",
-                               description="The plan and the control loop keep the import below it"),
-    "curtail_order": ParamSpec(list, items=ParamSpec(str, ref=("*",)), when=_GRID_ONLY, item_label="device to curtail",
-                               label="Curtail order",
-                               description="Devices reduced first → last when the limit is "
-                                           "reached (default: batteries, then chargers)"),
-    "limit_hysteresis_kw": ParamSpec(float, minimum=0, when=_GRID_ONLY, advanced=True,
-                                     label="Limit hysteresis (kW)",
-                                     description="Release the curtailment this far below the "
-                                                 "limit (default: 5 % of it)"),
+    "max_import_kw": ParamSpec(
+        float, minimum=0, exclusive_minimum=True, when=_GRID_ONLY,
+        label="Grid connection limit (kW)",
+        description="The most the house may draw from the grid, e.g. what the main fuse "
+                    "allows. The plan and the control loop keep the import below it"),
+    "curtail_order": ParamSpec(
+        list, items=ParamSpec(str, ref=("*",)), when=_GRID_ONLY,
+        item_label="device to curtail", label="Curtail order",
+        description="Devices that are reduced when the limit is reached, the first in the "
+                    "list first. Left empty: batteries, then chargers"),
+    "limit_hysteresis_kw": ParamSpec(
+        float, minimum=0, when=_GRID_ONLY, advanced=True, label="Limit hysteresis (kW)",
+        description="The devices get their full power back once the import would stay "
+                    "this far below the limit. Left empty: 5 % of the limit"),
 }
 
 CATEGORY_SCHEMAS: dict[DeviceCategory, CategorySchema] = {
@@ -660,7 +764,7 @@ CATEGORY_SCHEMAS: dict[DeviceCategory, CategorySchema] = {
         CategorySchema(
             _K.THERMAL_LOAD,
             "Load kept between two thresholds (aquarium cooler, fridge, heater); "
-            "switched by the switch it is controlled_by, or by itself (a thermostat).",
+            "switched by the switch chosen under Controlled by, or by itself (a thermostat).",
             title="Thermal load",
             required_capabilities=_caps(_C.TEMPERATURE_C),
             optional_capabilities=_caps(_C.POWER_W, _C.POWER_SETPOINT),
@@ -674,7 +778,8 @@ CATEGORY_SCHEMAS: dict[DeviceCategory, CategorySchema] = {
             required_capabilities=_caps(_C.SWITCH),
             optional_capabilities=_caps(_C.POWER_W, _C.ENERGY_IN_KWH),
             params={"rated_power_w": ParamSpec(float, label="Power while on (W)", minimum=0, exclusive_minimum=True,
-                                               description="Power drawn by the load while on (W)")},
+                                               description="What the load behind the switch draws while it is "
+                                                           "on, from its rating plate or a measurement")},
             connections=_METERED,
         ),
         CategorySchema(

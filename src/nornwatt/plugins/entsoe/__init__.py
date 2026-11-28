@@ -44,31 +44,37 @@ _EXPORT_TYPES = ("none", "spot", "fixed")
 
 _FORMULA = ParamSpec(dict, label="Price formula", fields={
     "markup_eur_per_kwh": ParamSpec(float, default=0.0, label="Supplier markup (€/kWh)",
-                                    description="Margin of the supplier, before VAT"),
+                                    description="What your supplier adds to every kWh, before "
+                                                "VAT. It is in your contract"),
     "grid_fee_eur_per_kwh": ParamSpec(float, default=0.0, label="Grid fee (€/kWh)",
-                                      description="Per-kWh grid charge, before VAT"),
+                                      description="Grid charge for every kWh, before VAT, from "
+                                                  "your bill"),
     "taxes_eur_per_kwh": ParamSpec(float, default=0.0, label="Taxes and levies (€/kWh)",
-                                   description="Electricity tax, levies, before VAT"),
+                                   description="Electricity tax and levies for every kWh, "
+                                               "before VAT, from your bill"),
     "vat": ParamSpec(float, default=0.0, minimum=0, maximum=1, label="VAT",
-                     description="As a fraction (0.19 = 19 %), applied to the spot price plus "
-                                 "all of the above"),
-}, description="Price = (spot + markup + grid fee + taxes) × (1 + VAT)")
+                     description="As a fraction (0.19 = 19 %). It is applied to the spot price "
+                                 "and the three amounts above"),
+}, description="What is added to the spot price: price = (spot + markup + grid fee + taxes) "
+               "× (1 + VAT)")
 
 _EXPORT = ParamSpec(dict, label="Feed-in", fields={
     "type": ParamSpec(str, choices=_EXPORT_TYPES, default="none", label="Feed-in payment",
                       choice_labels={"none": "None", "spot": "Spot price",
-                                     "fixed": "Fixed price"}),
+                                     "fixed": "Fixed price"},
+                      description="How the energy you feed in is paid"),
     "factor": ParamSpec(float, default=1.0, label="Share of the spot price",
                         when={"type": "spot"},
-                        description="Feed-in = spot × this + offset (1.0 = the full spot price)"),
+                        description="The feed-in price is the spot price times this, plus the "
+                                    "offset. 1.0 is the full spot price"),
     "offset_eur_per_kwh": ParamSpec(float, default=0.0, label="Offset (€/kWh)",
                                     when={"type": "spot"},
-                                    description="Added to the feed-in price, e.g. -0.01 "
-                                                "for a marketing fee"),
+                                    description="Added to the feed-in price. A fee is "
+                                                "negative, e.g. -0.01 for a marketing fee"),
     "price_eur_per_kwh": ParamSpec(float, default=0.0, minimum=0, label="Price (€/kWh)",
                                    when={"type": "fixed"},
-                                   description="Payment for energy fed in"),
-}, description="What you receive for energy fed in")
+                                   description="What you receive for every kWh fed in"),
+}, description="What you receive for the energy you feed in")
 
 
 def register(registry: PluginRegistry) -> None:
@@ -79,11 +85,13 @@ def register(registry: PluginRegistry) -> None:
                     "taxes and VAT. Works for any dynamic tariff in Europe.",
         settings={
             "zone": ParamSpec(str, required=True, choices=tuple(ZONES), label="Bidding zone",
-                              choice_labels={k: f"{name} ({k})" for k, (_, name) in ZONES.items()},
-                              description="Market area of your connection"),
+                              choice_labels={k: name if name.endswith(f"({k})") else f"{name} ({k})"
+                                             for k, (_, name) in ZONES.items()},
+                              description="The market area your grid connection is in"),
             "token": ParamSpec(str, required=True, secret=True, label="ENTSO-E API token",
-                               description="Free token from transparency.entsoe.eu "
-                                           "(ask for Restful API access)"),
+                               description="Free security token of your account at "
+                                           "transparency.entsoe.eu. Ask their support for "
+                                           "Restful API access first"),
             "formula": _FORMULA,
             "export": _EXPORT,
             "api_url": ParamSpec(str, advanced=True, label="ENTSO-E API URL",

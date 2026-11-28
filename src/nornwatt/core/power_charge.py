@@ -69,11 +69,13 @@ POWER_CHARGES_SPEC = ParamSpec(
     label="Power charges",
     item_label="power charge",
     advanced=True,
-    description="Charges on the power drawn (15-minute average at the grid connection), "
-                "e.g. Luxembourg's power reference or Flanders' capacity tariff. Only on "
-                "the default tariff.",
+    description="Charges on the power drawn, measured as the 15-minute average at the grid "
+                "connection, e.g. Luxembourg's power reference or Flanders' capacity tariff. "
+                "Only on the default tariff",
     items=ParamSpec(dict, summary="{type}", fields={
         "type": ParamSpec(str, required=True, label="Kind",
+                          description="What the charge is for: energy drawn above a threshold, "
+                                      "or the highest power of the month",
                           choices=(POWER_THRESHOLD, MONTHLY_PEAK),
                           choice_labels={
                               POWER_THRESHOLD: "Above a threshold",
@@ -81,21 +83,22 @@ POWER_CHARGES_SPEC = ParamSpec(
                           }),
         "threshold_kw": ParamSpec(float, required=True, label="Threshold (kW)", **_POSITIVE,
                                   when={"type": POWER_THRESHOLD},
-                                  description="Subscribed power; energy above it per "
-                                              "15 minutes costs extra"),
+                                  description="The power you subscribed to. What a 15-minute "
+                                              "interval draws above it costs extra"),
         "excess_eur_per_kwh": ParamSpec(float, required=True, minimum=0,
                                         label="Extra price (€/kWh)",
                                         when={"type": POWER_THRESHOLD},
-                                        description="Added to every kWh drawn above the "
-                                                    "threshold"),
+                                        description="Added to the price of every kWh drawn "
+                                                    "above the threshold"),
         "eur_per_kw_month": ParamSpec(float, required=True, minimum=0,
                                       label="Price (€/kW per month)",
                                       when={"type": MONTHLY_PEAK},
-                                      description="Per kW of the highest 15-minute average "
-                                                  "import of the month"),
+                                      description="Charged for every kW of the month's "
+                                                  "highest 15-minute average import"),
         "minimum_kw": ParamSpec(float, minimum=0, default=0.0, label="Minimum (kW)",
                                 when={"type": MONTHLY_PEAK},
-                                description="Billed peak is at least this"),
+                                description="The peak that is billed is never lower than "
+                                            "this, even in a month with less import"),
     }),
 )
 

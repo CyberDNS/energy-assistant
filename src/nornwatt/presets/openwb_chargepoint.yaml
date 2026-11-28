@@ -4,13 +4,14 @@ integration: openWB 2 (MQTT) for Home Assistant
 url: https://github.com/a-reinhard/openwb2mqtt
 verified: true
 description: >-
-  Charge modes of the openWB: it follows the PV surplus itself in PV Charging.
-  Entity names as created by a Home Assistant set to German; with another
-  language the object ids differ (check them under Settings → Entities).
-  Set params.default_vehicle and the cars' charger_ids as for openwb_mqtt.
+  Nornwatt switches the charge mode of the openWB. In PV Charging the openWB
+  follows the PV surplus itself. The entity ids are those of a Home Assistant
+  set to German. With another language they differ: check them in Home
+  Assistant under Settings → Entities. Set the Default vehicle of the charger
+  and, for every car, its ID in the charger system.
 variables:
   prefix:
-    label: Chargepoint entity prefix
+    label: Chargepoint prefix (the start of its entity ids)
     example: openwbbox_chargepoint_5
 device:
   type: homeassistant_charger

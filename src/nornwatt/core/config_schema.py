@@ -77,20 +77,37 @@ SECTION_SCHEMAS: dict[str, SectionSchema] = {
             "backends", "Connections",
             "Home Assistant and the MQTT broker, shared by all devices that use them.",
             {
-                "homeassistant": ParamSpec(dict, label="Home Assistant", fields={
-                    "url": ParamSpec(str, required=True, label="URL",
-                                     description="e.g. http://homeassistant.local:8123"),
-                    "token": ParamSpec(str, required=True, secret=True, label="Access token",
-                                       description="Long-lived access token"),
-                    "timeout_s": ParamSpec(float, default=10.0, advanced=True, **_POSITIVE,
-                                           description="Request timeout (s)"),
-                }),
-                "mqtt": ParamSpec(dict, label="MQTT broker", fields={
-                    "host": ParamSpec(str, required=True, description="Host name or IP address"),
-                    "port": ParamSpec(int, minimum=1, maximum=65535, default=1883),
-                    "username": ParamSpec(str),
-                    "password": ParamSpec(str, secret=True),
-                }),
+                "homeassistant": ParamSpec(
+                    dict, label="Home Assistant",
+                    description="Needed for every device read through Home Assistant, for "
+                                "learning and for the Energy dashboard import. The add-on is "
+                                "connected already",
+                    fields={
+                        "url": ParamSpec(str, required=True, label="URL",
+                                         description="Address of Home Assistant, e.g. "
+                                                     "http://homeassistant.local:8123"),
+                        "token": ParamSpec(str, required=True, secret=True, label="Access token",
+                                           description="Long-lived access token, created at the "
+                                                       "bottom of your Home Assistant profile "
+                                                       "under Security"),
+                        "timeout_s": ParamSpec(float, default=10.0, advanced=True, **_POSITIVE,
+                                               description="Seconds to wait for an answer from "
+                                                           "Home Assistant"),
+                    }),
+                "mqtt": ParamSpec(
+                    dict, label="MQTT broker",
+                    description="Needed for Nornwatt's own entities in Home Assistant, openWB "
+                                "over MQTT and Zendure with the local connection",
+                    fields={
+                        "host": ParamSpec(str, required=True,
+                                          description="Host name or IP address of the broker"),
+                        "port": ParamSpec(int, minimum=1, maximum=65535, default=1883,
+                                          description="Port of the broker"),
+                        "username": ParamSpec(str, description="Only if the broker asks for a "
+                                                               "login"),
+                        "password": ParamSpec(str, secret=True,
+                                              description="Only if the broker asks for a login"),
+                    }),
             },
         ),
         SectionSchema(
@@ -98,13 +115,16 @@ SECTION_SCHEMAS: dict[str, SectionSchema] = {
             {
                 "horizon_hours": ParamSpec(int, minimum=1, maximum=72, default=24,
                                            label="Planning horizon (h)",
-                                           description="How far ahead the plan reaches (h)"),
+                                           description="How far ahead the plan reaches"),
                 "step_minutes": ParamSpec(int, minimum=5, maximum=60, default=60,
                                           label="Slot length (min)",
-                                          description="Length of a plan slot (min)"),
+                                          description="Length of one step of the plan. Shorter "
+                                                      "slots follow quarter-hourly prices but "
+                                                      "take longer to compute"),
                 "precision": ParamSpec(float, minimum=0, default=0.5, label="Precision (%)",
-                                       description="Allowed gap to the optimum (%); smaller = "
-                                                   "slower"),
+                                       description="How close to the best possible plan the "
+                                                   "result must be. A smaller value takes "
+                                                   "longer to compute"),
                 "algorithm": ParamSpec(str, legacy=True, description="Only 'milp' exists; not used"),
             },
         ),
@@ -112,74 +132,93 @@ SECTION_SCHEMAS: dict[str, SectionSchema] = {
             "controller", "Controller", "Polling, planning and control loop.",
             {
                 "poll_interval_s": ParamSpec(float, label="Read devices every (s)", **_POSITIVE,
-                                             description="Seconds between device reads "
-                                                         "(default: the control interval)"),
+                                             description="Seconds between two reads of the "
+                                                         "devices. Left empty, they are read "
+                                                         "as often as they are controlled"),
                 "control_interval_s": ParamSpec(float, default=30, label="Control every (s)",
                                                 **_POSITIVE,
-                                                description="Seconds between setpoint updates"),
+                                                description="Seconds between two updates of the "
+                                                            "power sent to the devices"),
                 "plan_interval_s": ParamSpec(float, default=900, label="Plan every (s)", **_POSITIVE,
-                                             description="Seconds between planning runs"),
+                                             description="Seconds between two new plans"),
                 "plan_lead_s": ParamSpec(float, minimum=0, default=30, advanced=True,
                                          label="Planning lead (s)",
-                                         description="Start planning this long before a slot "
-                                                     "begins (s)"),
+                                         description="Planning starts this long before a slot "
+                                                     "begins, so the plan is ready in time"),
                 "dry_run": ParamSpec(bool, default=False,
-                                     description="Log control commands instead of sending them"),
+                                     description="Nornwatt plans and logs what it would send, "
+                                                 "but sends nothing to any device"),
                 "plan_stale_after_min": ParamSpec(float, advanced=True, **_POSITIVE,
                                                   label="Release after no plan for (min)",
                                                   description="Without a current plan for this "
-                                                              "long every device goes back to its "
-                                                              "own operation (default: 45 min, at "
-                                                              "least 3 planning intervals)"),
+                                                              "long, every device goes back to "
+                                                              "its own operation. Left empty: "
+                                                              "45 min, or 3 planning intervals "
+                                                              "if that is longer"),
                 "control_stuck_after_min": ParamSpec(float, advanced=True, **_POSITIVE,
                                                      label="Release after no control for (min)",
-                                                     description="Without a control tick for this "
-                                                                 "long every device goes back to "
-                                                                 "its own operation (default: 10 "
-                                                                 "min, at least 10 control "
-                                                                 "intervals)"),
+                                                     description="When the control loop has not "
+                                                                 "run for this long, every "
+                                                                 "device goes back to its own "
+                                                                 "operation. Left empty: 10 "
+                                                                 "min, or 10 control intervals "
+                                                                 "if that is longer"),
                 "ev_feasibility_margin": ParamSpec(float, minimum=1, default=1.2, advanced=True,
                                                    label="EV deadline reserve factor",
-                                                   description="Time reserve factor before an EV "
-                                                               "deadline counts as reachable"),
+                                                   description="A car's target counts as "
+                                                               "reachable when the time left is "
+                                                               "at least this many times the "
+                                                               "charging time needed"),
             },
         ),
         SectionSchema(
             "server", "Server", "Web UI and API.",
             {
-                "port": ParamSpec(int, minimum=1, maximum=65535, default=8088, restart=True),
+                "port": ParamSpec(int, minimum=1, maximum=65535, default=8088, restart=True,
+                                  description="Port of the web UI and the API"),
                 "api_token": ParamSpec(str, secret=True, restart=True, label="API token",
-                                       description="Bearer token for read-only access from "
-                                                   "outside Home Assistant"),
+                                       description="With a token, requests from outside "
+                                                   "Home Assistant must send it and can only "
+                                                   "read. Left empty, the API is not protected"),
                 "trusted_hosts": ParamSpec(list, items=ParamSpec(str), restart=True, advanced=True, item_label="address",
-                                           description="Addresses that need no token (default: "
-                                                       "HA ingress and localhost)"),
+                                           description="Addresses that keep full access "
+                                                       "without the token. Left empty: Home "
+                                                       "Assistant (ingress) and this machine"),
                 "history_retention_days": ParamSpec(float, default=8, label="Diagnostics kept (days)",
                                                     **_POSITIVE,
-                                                    description="Days of battery-ledger history, plan "
-                                                                "snapshots and execution records kept; "
-                                                                "device history has its own two tiers"),
+                                                    description="Days that past plans, the "
+                                                                "record of what was sent and the "
+                                                                "battery cost history are kept. "
+                                                                "The device history is kept "
+                                                                "separately"),
             },
         ),
         SectionSchema(
-            "logging", "Logging", "",
-            {"level": ParamSpec(str, default="INFO", description="Log level",
-                                choices=("DEBUG", "INFO", "WARNING", "ERROR"))},
+            "logging", "Logging", "How much Nornwatt writes to its log.",
+            {"level": ParamSpec(str, default="INFO",
+                                description="Messages of this level and above are logged. "
+                                            "Debug is for finding problems",
+                                choices=("DEBUG", "INFO", "WARNING", "ERROR"),
+                                choice_labels={"DEBUG": "Debug", "INFO": "Info",
+                                               "WARNING": "Warning", "ERROR": "Error"})},
         ),
         SectionSchema(
             "energy_dashboard", "Energy dashboard import",
             "Take the consumers of the Home Assistant Energy dashboard over as devices.",
             {
                 "import_consumers": ParamSpec(bool, default=False, label="Import consumers",
-                                              description="Import the dashboard's individual "
-                                                          "devices"),
+                                              description="Every individual device of the "
+                                                          "Energy dashboard becomes a consumer "
+                                                          "in Nornwatt"),
                 "exclude": ParamSpec(list, items=ParamSpec(str), when={"import_consumers": True}, item_label="entry",
-                                     description="Entries to leave out: energy or power sensor, "
-                                                 "name shown in HA, or device id"),
-                "tariff": ParamSpec(str, tariff=True, when={"import_consumers": True}, 
-                                    description="Tariff of the imported consumers"),
-                "learning": ParamSpec(object, widget="learning:consumer", when={"import_consumers": True}, 
-                                      description="Learned forecasts for the imported consumers"),
+                                     description="Devices of the dashboard to leave out: the "
+                                                 "energy or power sensor, the name shown in "
+                                                 "Home Assistant, or the ID in Nornwatt"),
+                "tariff": ParamSpec(str, tariff=True, when={"import_consumers": True},
+                                    description="Tariff the imported consumers are billed on"),
+                "learning": ParamSpec(object, widget="learning:consumer", when={"import_consumers": True},
+                                      description="Whether and how the forecasts of the "
+                                                  "imported consumers are learned"),
             },
         ),
     )
@@ -192,7 +231,8 @@ COLLECTIONS: dict[str, CollectionSchema] = {
             "tariffs", "Tariffs", "Price models; devices and meters refer to them by id.",
             plugin_kind="tariff",
             common={"default": ParamSpec(bool, default=False, label="Default tariff",
-                                         description="Used by everything that names no tariff"),
+                                         description="The tariff at the grid connection, used "
+                                                     "by every device that names no tariff"),
                     "power_charges": POWER_CHARGES_SPEC},
         ),
         CollectionSchema(
@@ -205,18 +245,26 @@ COLLECTIONS: dict[str, CollectionSchema] = {
 #: Options of a thermal load's ``learning:`` (``plugins/learned/thermal``).
 THERMAL_LEARNING = {
     "value_entity": ParamSpec(str, entity=True, label="Temperature sensor",
-                              description="Temperature sensor (default: the bound temperature_c)"),
+                              description="Sensor whose history shows the value. Left empty: "
+                                          "the entity chosen under Temperature"),
     "switch_entity": ParamSpec(str, entity=True, label="Switch entity",
-                               description="Switch whose history shows when it ran (default: the "
-                                           "controlling switch)"),
+                               description="Entity whose history shows when the device ran. "
+                                           "Left empty: the switch under Controlled by"),
     "modes": ParamSpec(dict, values=ParamSpec(str, entity=True), advanced=True,
-                       description="Instead of switch_entity for two-mode devices: mode → "
-                                   "entity that is on in that mode"),
-    "ambient_entity": ParamSpec(str, entity=True, label="Ambient temperature sensor", description="Ambient temperature sensor"),
+                       description="For a device with two modes, instead of the switch "
+                                   "entity: the name of each mode and the entity that is on "
+                                   "in that mode"),
+    "ambient_entity": ParamSpec(str, entity=True, label="Ambient temperature sensor",
+                                description="Temperature around the device, e.g. of the room "
+                                            "or outdoors. The drift depends on it"),
     "ambient_weather_entity": ParamSpec(str, entity=True, label="Weather forecast entity",
-                                        description="Weather entity for the ambient forecast"),
-    "history_days": ParamSpec(float, default=10, **_POSITIVE, description="Days of history used"),
-    "refit_interval_h": ParamSpec(float, default=6, **_POSITIVE, description="Hours between refits"),
+                                        description="Weather entity whose forecast gives the "
+                                                    "ambient temperature of the coming hours"),
+    "history_days": ParamSpec(float, default=10, **_POSITIVE,
+                              description="Days of history the model is learned from"),
+    "refit_interval_h": ParamSpec(float, default=6, **_POSITIVE,
+                                  description="Hours between two refits, when the model is "
+                                              "learned again from the history"),
 }
 
 #: Category → name of the ``learning:`` option set (``learning_options``).

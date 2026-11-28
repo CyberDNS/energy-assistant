@@ -39,9 +39,9 @@ import logging
 from typing import Any
 
 from ...core.config import MqttConfig
+from ...core.device_model import READ_EVERY_LABEL, UNAVAILABLE_AFTER_LABEL, ParamSpec
 from ...core.device_model import Capability as Cap
 from ...core.device_model import DeviceCategory as C
-from ...core.device_model import ParamSpec
 from ...core.plugin_registry import BuildContext, PluginRegistry, SharedPool
 from .bridge import BrokerParams, ZendureBridge
 from .cloud import cloud_login, decode_cloud_key
@@ -57,30 +57,46 @@ _bridges: SharedPool[tuple[Any, ...], ZendureBridge] = SharedPool(
 
 
 SETTINGS = {
-    "product_key": ParamSpec(str, description="Product key of the device"),
-    "device_key": ParamSpec(str, description="Device key (serial)"),
+    "product_key": ParamSpec(str,
+                             description="Key of the device's model: the first part of its "
+                                         "MQTT topics, /<product key>/<device key>/…"),
+    "device_key": ParamSpec(str,
+                            description="Key of your device: the second part of its MQTT "
+                                        "topics"),
     "hub_id": ParamSpec(str, legacy=True, description="Old name of product_key"),
     "device_serial": ParamSpec(str, legacy=True, description="Old name of device_key"),
     "connection": ParamSpec(str, choices=("cloud", "local"), default="cloud",
-                            description="Zendure cloud broker or the local MQTT backend"),
+                            choice_labels={"cloud": "Zendure cloud",
+                                           "local": "Your own MQTT broker"},
+                            description="Through the Zendure cloud, or through your own MQTT "
+                                        "broker (set up under Settings → Connections) when "
+                                        "the device already publishes to it"),
     "cloud_key": ParamSpec(str, secret=True, required=True, when={"connection": "cloud"},
-                           description="Authorization cloud key from the Zendure app (cloud mode)"),
+                           description="The authorization key for the Home Assistant "
+                                       "integration, created in the Zendure app under your "
+                                       "profile"),
     "maintenance_charge_w": ParamSpec(float, minimum=0, default=300.0,
                                       label="Maintenance charge power (W)",
-                                      description="Charge power while the device asks for a "
-                                                  "maintenance charge (W)"),
-    "smart_mode": ParamSpec(bool, advanced=True, default=False, description="Enable the device's smartMode on start-up, so limit "
-                                                 "writes do not wear its flash"),
-    "release_auto_model": ParamSpec(int, advanced=True, minimum=0, label="Own mode (autoModel)",
-                                    description="Mode the device returns to when Nornwatt "
-                                                "lets go of it (Zendure 'autoModel', "
-                                                "e.g. 8 = smart matching); default: the mode it "
-                                                "had before Nornwatt took over"),
+                                      description="Power the battery charges with while it "
+                                                  "asks for a maintenance charge"),
+    "smart_mode": ParamSpec(bool, advanced=True, default=False,
+                            description="Nornwatt turns on the device's smart mode when it "
+                                        "starts. The limits it sends are then not saved to "
+                                        "the device's permanent memory, which spares it"),
+    "release_auto_model": ParamSpec(int, advanced=True, minimum=0, label="Own mode when released",
+                                    description="Number of the mode the device goes back to "
+                                                "when Nornwatt stops or lets go of it "
+                                                "(Zendure calls it autoModel; 8 is smart "
+                                                "matching). Left empty: the mode it had before "
+                                                "Nornwatt took over"),
     "poll_interval_s": ParamSpec(float, advanced=True, minimum=0, exclusive_minimum=True, default=60.0,
-                                 description="Seconds between full reads"),
+                                 label=READ_EVERY_LABEL,
+                                 description="Seconds between two requests for a full report "
+                                             "of the device"),
     "stale_after_s": ParamSpec(float, advanced=True, minimum=0, exclusive_minimum=True, default=300.0,
-                               description="Seconds without a report until the device counts as "
-                                           "unavailable"),
+                               label=UNAVAILABLE_AFTER_LABEL,
+                               description="Without a report for this long, the device counts "
+                                           "as unavailable"),
 }
 
 

@@ -288,19 +288,23 @@ def binding_specs(capability: Capability, *,
     if kind is ValueKind.BOOL:
         return {
             "entity": ParamSpec(str, required=True, entity=True, domains=BOOL_DOMAINS,
-                                label="Entity", description="Entity whose state says on / off"),
+                                label="Entity",
+                                description="Entity whose state says yes or no, e.g. a binary "
+                                            "sensor"),
             "on": ParamSpec(list, advanced=True, items=ParamSpec(str), label="Counts as on", item_label="state",
-                            description="States that count as on (default: on, true, home, "
-                                        "connected, plugged, …)"),
+                            description="States of the entity that mean yes. Left empty: on, "
+                                        "true, home, connected, plugged and the like"),
             "attribute": ParamSpec(str, advanced=True, label="Attribute", attribute_of="entity",
-                                   description="Read this attribute instead of the state"),
+                                   description="Read this attribute of the entity instead of "
+                                               "its state"),
         }
     if capability is Capability.PHASE_POWER_W:
         return {
             "entities": ParamSpec(list, required=True, label="Power per phase", item_label="phase sensor",
                                   items=ParamSpec(str, entity=True, domains=NUMERIC_DOMAINS,
                                                   units=UNITS[ValueKind.POWER]),
-                                  description="One power sensor per phase (L1, L2, L3)"),
+                                  description="One power sensor per phase, in the order L1, "
+                                              "L2, L3"),
             "scale": _scale(),
         }
     fit = {"units": UNITS.get(kind, ()), "unit_free_domains": UNIT_FREE.get(kind, ())}
@@ -320,23 +324,24 @@ def binding_specs(capability: Capability, *,
             choice_labels={"single": "One entity (+ / −)",
                            "split": f"Separate {one} and {other}"},
             label="Read from",
-            description=(f"One {what} entity for both directions, or one entity for "
-                         f"{one} and one for {other}")),
+            description=(f"Whether Home Assistant has one {what} entity for both directions, "
+                         f"or one for {one} and one for {other}")),
         "entity": ParamSpec(str, required=True, entity=True, domains=NUMERIC_DOMAINS,
                             label="Entity", description=_KIND_HINT[kind], when=single, **fit),
     }
     if kind is ValueKind.POWER:
         specs["invert_sign"] = ParamSpec(
             bool, default=False, label="Invert sign", when=single,
-            description=f"The sensor counts {other} as positive (default: {one} positive)")
+            description=f"Turn on when the sensor shows {other} as positive. Nornwatt "
+                        f"expects {one} as positive")
     specs["import_entity"] = ParamSpec(
         str, required=True, entity=True, domains=NUMERIC_DOMAINS, when=split,
         label=f"{one.capitalize()} {what} entity",
-        description=f"{one.capitalize()} {what} sensor, ≥ 0", **fit)
+        description=f"Sensor of the {one} {what}, never negative", **fit)
     specs["export_entity"] = ParamSpec(
         str, required=True, entity=True, domains=NUMERIC_DOMAINS, when=split,
         label=f"{other.capitalize()} {what} entity",
-        description=f"{other.capitalize()} {what} sensor, ≥ 0", **fit)
+        description=f"Sensor of the {other} {what}, never negative", **fit)
     specs["attribute"] = _attribute(when=single)
     specs["scale"] = _scale()
     return specs
@@ -349,18 +354,19 @@ def _attribute(**kwargs: Any) -> ParamSpec:
 
 
 _KIND_HINT = {
-    ValueKind.POWER: "Power sensor (W or kW)",
-    ValueKind.ENERGY: "Energy counter (Wh or kWh)",
-    ValueKind.PERCENT: "Sensor in %",
-    ValueKind.DISTANCE: "Distance sensor (km, m or mi)",
-    ValueKind.TEMPERATURE: "Temperature sensor, or a climate entity with attribute "
+    ValueKind.POWER: "Power sensor, in W or kW",
+    ValueKind.ENERGY: "Energy sensor that only counts up, in Wh or kWh",
+    ValueKind.PERCENT: "Sensor with the SoC in %",
+    ValueKind.DISTANCE: "Sensor with the remaining range, in km, m or mi",
+    ValueKind.TEMPERATURE: "Temperature sensor, or a climate entity: then set Attribute to "
                            "current_temperature",
 }
 
 
 def _scale() -> ParamSpec:
     return ParamSpec(float, advanced=True, default=1.0, label="Scale",
-                     description="Multiply the value, e.g. 0.1 for a sensor in tenths")
+                     description="The value is multiplied by this, e.g. 0.1 for a sensor that "
+                                 "counts in tenths")
 
 
 def bindings_for(capabilities: set[Capability] | frozenset[Capability]

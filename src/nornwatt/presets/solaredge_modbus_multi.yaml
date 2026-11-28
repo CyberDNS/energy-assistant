@@ -4,15 +4,16 @@ integration: SolarEdge Modbus Multi (custom, WillCodeForCats)
 url: https://github.com/WillCodeForCats/solaredge-modbus-multi
 verified: false
 description: >-
-  Uses the inverter's Remote Control storage mode: every behaviour has a
-  storage command mode, with the charge / discharge limit as the power.
-  Enable "Storage Control" in the integration and set Storage Default Mode to
-  Maximize Self Consumption: a command times out after an hour without a
-  change (the safe direction if Nornwatt stops).  Check that the
-  battery's DC power is positive while charging (else set invert_sign).
+  Nornwatt uses the inverter's Remote Control storage mode: it sets a storage
+  command mode for what the battery should do, and the charge or discharge
+  limit as the power. Enable "Storage Control" in the integration and set
+  Storage Default Mode to Maximize Self Consumption. The inverter goes back to
+  that mode by itself an hour after the last command, so the battery is safe
+  if Nornwatt stops. Check that the battery's DC power is positive while it
+  charges, and turn on Invert sign if it is not.
 variables:
   prefix:
-    label: Entity prefix (the integration's name prefix)
+    label: Entity prefix (the name prefix set in the integration)
     example: solaredge
 device:
   type: homeassistant_battery

@@ -43,11 +43,13 @@ _MIN_REFRESH_MIN = 10.0
 
 _PLANE = {
     "declination": ParamSpec(float, required=True, minimum=0, maximum=90, label="Tilt (°)",
-                             description="Tilt in degrees: 0 = flat, 90 = vertical"),
+                             description="Tilt of the modules: 0 is flat, 90 is vertical"),
     "azimuth": ParamSpec(float, required=True, minimum=-180, maximum=180, label="Azimuth (°)",
-                         description="-180 = north, -90 = east, 0 = south, 90 = west"),
+                         description="Direction the modules face: -180 is north, -90 east, 0 "
+                                     "south, 90 west"),
     "kwp": ParamSpec(float, required=True, minimum=0, exclusive_minimum=True, label="Peak power (kWp)",
-                     description="Peak power (kWp)"),
+                     description="Rated power of the modules on this plane, from the data "
+                                 "sheet of your system"),
 }
 
 
@@ -58,22 +60,38 @@ def register(registry: PluginRegistry) -> None:
         description="PV generation forecast from forecast.solar.",
         scopes=("system",),
         settings={
-            "latitude": ParamSpec(float, required=True, minimum=-90, maximum=90),
-            "longitude": ParamSpec(float, required=True, minimum=-180, maximum=180),
+            "latitude": ParamSpec(float, required=True, minimum=-90, maximum=90,
+                                  description="Latitude of the PV system in degrees, e.g. "
+                                              "49.61. North is positive"),
+            "longitude": ParamSpec(float, required=True, minimum=-180, maximum=180,
+                                   description="Longitude of the PV system in degrees, e.g. "
+                                               "6.13. East is positive"),
             "planes": ParamSpec(list, label="Roof planes", item_label="roof plane",
-                                description="One row per plane; the forecasts are summed",
+                                description="One entry for every roof side or group of "
+                                            "modules that faces its own way. Their forecasts "
+                                            "are added up",
                                 items=ParamSpec(dict, fields=_PLANE)),
             # A single plane may be written at the top level instead of 'planes'.
             **{name: dataclasses.replace(spec, required=False, legacy=True,
                                          description=f"Single plane: {spec.description}")
                for name, spec in _PLANE.items()},
-            "damping_morning": ParamSpec(float, minimum=0, maximum=1, default=0, advanced=True),
-            "damping_evening": ParamSpec(float, minimum=0, maximum=1, default=0, advanced=True),
+            "damping_morning": ParamSpec(float, minimum=0, maximum=1, default=0, advanced=True,
+                                         label="Morning damping",
+                                         description="Lowers the forecast for the morning, "
+                                                     "e.g. when the modules are shaded then: 0 "
+                                                     "leaves it as it is, 1 damps it most"),
+            "damping_evening": ParamSpec(float, minimum=0, maximum=1, default=0, advanced=True,
+                                         label="Evening damping",
+                                         description="Lowers the forecast for the evening: 0 "
+                                                     "leaves it as it is, 1 damps it most"),
             "refresh_minutes": ParamSpec(float, minimum=_MIN_REFRESH_MIN, default=60, advanced=True,
-                                         description="Minutes between requests per plane "
-                                                     "(the free API allows 12 requests per hour)"),
+                                         label="Fetch every (min)",
+                                         description="Minutes between two requests for each "
+                                                     "plane. The free plan of Forecast.Solar "
+                                                     "allows 12 requests an hour"),
             "api_key": ParamSpec(str, secret=True, advanced=True,
-                                 description="API key of a paid plan (optional)"),
+                                 description="Only with a paid plan of Forecast.Solar: its API "
+                                             "key"),
             "api_url": ParamSpec(str, advanced=True, description="Tests only"),
         },
     )

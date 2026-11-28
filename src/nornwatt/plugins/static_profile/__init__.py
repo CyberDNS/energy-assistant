@@ -35,8 +35,9 @@ def register(registry: PluginRegistry) -> None:
         scopes=("device",),
         settings={
             "profile": ParamSpec(object, required=True, widget="load_profile", label="Load profile",
-                                 description="kWh consumed from each hour until the next entry, "
-                                             "per day type"),
+                                 description="The consumption for weekdays and for weekends: "
+                                             "every entry gives an hour and the kWh consumed "
+                                             "in total from then until the next entry"),
         },
     )
 

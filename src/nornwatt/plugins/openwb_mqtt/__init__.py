@@ -30,33 +30,53 @@ from ...core.device_model import ParamSpec
 from ...core.plugin_registry import PluginRegistry
 from .device import RELEASE_MODES, OpenWBMqttDevice, get_bridge
 
+_OTHER_NAME = "Change it only if your openWB uses another name"
+
 
 def register(registry: PluginRegistry) -> None:
     registry.register_device(
         "openwb_mqtt", _build,
         title="openWB (MQTT)",
-        description="openWB chargepoint over its MQTT API (needs the MQTT connection).",
+        description="openWB chargepoint over its MQTT API. Needs the MQTT broker under "
+                    "Settings → Connections.",
         categories={C.CHARGER},
         provides={Cap.POWER_W, Cap.PLUGGED, Cap.POWER_SETPOINT},
         settings={
             "chargepoint_id": ParamSpec(int, required=True, minimum=0, label="Chargepoint number",
-                                        description="openWB chargepoint number"),
-            "root_topic": ParamSpec(str, default="openWB", label="MQTT root topic", description="MQTT root topic of openWB"),
+                                        description="Number of the chargepoint in openWB: the "
+                                                    "number in its MQTT topics, "
+                                                    "openWB/chargepoint/<number>/…"),
+            "root_topic": ParamSpec(str, default="openWB", label="MQTT root topic",
+                                    description="First part of openWB's MQTT topics. Change it "
+                                                "only if your openWB uses another one"),
             "phases": ParamSpec(int, minimum=1, maximum=3, default=3,
-                                description="Phases the chargepoint charges with"),
-            "voltage_v": ParamSpec(float, advanced=True, minimum=0, exclusive_minimum=True, default=230.0),
-            "min_current_a": ParamSpec(float, advanced=True, minimum=0, default=6),
-            "max_current_a": ParamSpec(float, advanced=True, minimum=0, exclusive_minimum=True, default=16),
-            "mode_instant": ParamSpec(str, advanced=True, default="instant", description="openWB mode name"),
-            "mode_pv": ParamSpec(str, advanced=True, default="pv", description="openWB mode name"),
-            "mode_stop": ParamSpec(str, advanced=True, default="stop", description="openWB mode name"),
+                                description="Number of phases the chargepoint charges with. "
+                                            "Used to convert between current and power"),
+            "voltage_v": ParamSpec(float, advanced=True, minimum=0, exclusive_minimum=True, default=230.0,
+                                   description="Voltage of one phase. Used to convert between "
+                                               "current and power"),
+            "min_current_a": ParamSpec(float, advanced=True, minimum=0, default=6,
+                                       label="Lowest current (A)",
+                                       description="Lowest current a car charges with. Below "
+                                                   "it, Nornwatt stops charging"),
+            "max_current_a": ParamSpec(float, advanced=True, minimum=0, exclusive_minimum=True, default=16,
+                                       label="Highest current (A)",
+                                       description="Highest current Nornwatt sets on the "
+                                                   "chargepoint"),
+            "mode_instant": ParamSpec(str, advanced=True, default="instant",
+                                      label="Name of instant charging",
+                                      description=f"What openWB calls its instant charging mode. {_OTHER_NAME}"),
+            "mode_pv": ParamSpec(str, advanced=True, default="pv", label="Name of PV charging",
+                                 description=f"What openWB calls its PV charging mode. {_OTHER_NAME}"),
+            "mode_stop": ParamSpec(str, advanced=True, default="stop", label="Name of stop",
+                                   description=f"What openWB calls its stop mode. {_OTHER_NAME}"),
             "release_mode": ParamSpec(
                 str, choices=RELEASE_MODES, default="pv", label="When released",
                 choice_labels={"pv": "PV charging", "instant": "Instant charging",
                                "stop": "Stop", "leave": "Leave as is"},
                 description="Charge mode set when Nornwatt stops or lets go of the "
-                            "chargepoint; the instant current and SoC limit it changed are "
-                            "put back too"),
+                            "chargepoint. The current and the SoC limit of instant charging "
+                            "that Nornwatt changed are put back too"),
         },
     )
 

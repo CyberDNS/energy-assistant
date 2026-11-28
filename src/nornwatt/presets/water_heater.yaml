@@ -4,14 +4,14 @@ integration: any water_heater entity (Home Assistant core)
 url: https://www.home-assistant.io/integrations/water_heater/
 verified: false
 description: >-
-  Nornwatt heats the tank to the top threshold in cheap or PV hours
-  and lets it drift down to the bottom one otherwise; the normal target is
-  put back when it stops.  Running is taken from the last command (water
-  heaters report no hvac_action): bind power_w to the heater's power sensor
-  if there is one.
+  Nornwatt heats the tank to the upper threshold in cheap or sunny hours and
+  lets it cool down to the lower threshold otherwise. It puts back your normal
+  target when it stops controlling. A water heater does not report whether it
+  is heating, so Nornwatt assumes it follows the last command. If the heater
+  has a power sensor, choose it under Power.
 variables:
   heater:
-    label: Water heater entity (without "water_heater.")
+    label: Water heater (the entity id without "water_heater.")
     example: heat_pump
 device:
   type: homeassistant_thermostat

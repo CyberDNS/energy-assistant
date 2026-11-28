@@ -67,16 +67,19 @@ def _when(*controls: str) -> dict[str, Any]:
 
 _MODE_ENTRY = ParamSpec(dict, fields={
     "option": ParamSpec(str, required=True, label="Option", options_from=("mode", "options"), 
-                        description="Option of the mode select"),
+                        description="Option of the mode select for this behaviour"),
     "current": ParamSpec(str, entity=True, domains=NUMBER_DOMAINS, units=_CURRENT,
                          label="Current number",
-                         description="Gets the commanded power as charging current (A)"),
+                         description="Number entity that takes the charging current in this "
+                                     "mode, in A"),
     "power": ParamSpec(str, entity=True, domains=NUMBER_DOMAINS, units=_POWER,
                        label="Power number",
-                       description="Gets the commanded power (W or kW)"),
+                       description="Number entity that takes the charging power in this "
+                                   "mode, in W or kW"),
     "set": ParamSpec(dict, values=ParamSpec(object), label="Also set",
                      keys=ParamSpec(str, entity=True, domains=NUMBER_DOMAINS + SELECT_DOMAINS),
-                     description="Fixed values written with the mode: {entity: value}"),
+                     description="Other entities set together with the mode, each with a "
+                                 "fixed value"),
 })
 
 #: Keys of the ``power_setpoint`` binding (validation and config UI).
@@ -86,45 +89,56 @@ POWER_SETPOINT_BINDING: dict[str, ParamSpec] = {
                          description="How Nornwatt tells the charger what to do"),
     "current": ParamSpec(str, required=True, entity=True, domains=NUMBER_DOMAINS,
                          units=_CURRENT, label="Current number", when=_when("current"),
-                         description="Charging current (A)"),
+                         description="Number entity that takes the charging current, in A"),
     "power": ParamSpec(str, required=True, entity=True, domains=NUMBER_DOMAINS,
                        units=_POWER, label="Power number", when=_when("power"),
-                       description="Charging power (W or kW)"),
+                       description="Number entity that takes the charging power, in W or kW"),
     "enable": ParamSpec(str, entity=True, domains=SWITCH_DOMAINS, label="Charging switch",
                         when=_when("current", "power"),
-                        description="Switch that starts and stops charging (without it the "
-                                    "number is set to 0 to stop)"),
+                        description="Switch that starts and stops charging. Without it, "
+                                    "Nornwatt sets the number to 0 to stop"),
     "action": ParamSpec(str, required=True, label="Action", when=_when("action"),
-                        description="Script or action called with the power, e.g. "
-                                    "script.set_wallbox_power (0 = stop)"),
+                        description="Script or action Nornwatt calls with the charging power "
+                                    "in W, e.g. script.set_wallbox_power. A power of 0 stops "
+                                    "charging"),
     "data": ParamSpec(dict, values=ParamSpec(object), advanced=True, label="Extra data",
-                      when=_when("action"), description="More data for the action"),
+                      when=_when("action"),
+                      description="Other fields sent with every call of the action"),
     "power_key": ParamSpec(str, default="power_w", advanced=True, label="Power variable",
-                           when=_when("action"), description="Data key that gets the power in W"),
+                           when=_when("action"),
+                           description="Name of the field in which the action gets the "
+                                       "power"),
     "mode": ParamSpec(str, required=True, entity=True, domains=SELECT_DOMAINS,
                       label="Mode select", when=_when("modes"),
-                      description="Select entity of the charge mode"),
+                      description="Select entity that sets the charger's charge mode"),
     "modes": ParamSpec(dict, required=True, label="Modes", when=_when("modes"),
                        values=_MODE_ENTRY,
                        keys=ParamSpec(str, choices=_BEHAVIOURS, choice_labels=_MODE_LABELS),
-                       description="Per behaviour (charge, absorb_surplus, stop): option, "
-                                   "current or power, set"),
+                       description="For every behaviour the charger has a mode for: the "
+                                   "option of the mode select and, where needed, a current or "
+                                   "power number and other values to set"),
     "release": ParamSpec(str, label="When released", choices=_BEHAVIOURS,
                          choice_labels=_MODE_LABELS, when=_when("modes"),
-                         description="Mode set when Nornwatt stops or lets go of the "
-                                     "charger (default: the PV surplus mode, if configured)"),
+                         description="Behaviour set when Nornwatt stops or lets go of the "
+                                     "charger. Left empty: PV surplus only, when the charger "
+                                     "has a mode for it"),
     "soc_limit": ParamSpec(str, entity=True, domains=NUMBER_DOMAINS, units=_PERCENT,
                            label="SoC limit number",
-                           description="Gets the target SoC when charging is commanded"),
+                           description="Number entity of the charger's SoC limit. Nornwatt "
+                                       "writes the car's target SoC to it whenever it tells "
+                                       "the charger to charge"),
     "min_current_a": ParamSpec(float, default=6.0, minimum=0, advanced=True,
                                label="Lowest current (A)",
-                               description="Below this the charger is stopped"),
+                               description="Lowest current a car charges with. Below it, "
+                                           "Nornwatt stops charging"),
     "max_current_a": ParamSpec(float, default=16.0, minimum=0, exclusive_minimum=True,
-                               advanced=True, label="Highest current (A)"),
+                               advanced=True, label="Highest current (A)",
+                               description="Highest current Nornwatt sets on the charger"),
     "stop_delay_s": ParamSpec(float, default=60.0, minimum=0, advanced=True,
                               label="Stop delay (s)",
-                              description="Following the surplus: keep the lowest current "
-                                          "this long before stopping"),
+                              description="While following the PV surplus, the charger keeps "
+                                          "the lowest current this long before it stops, so a "
+                                          "passing cloud does not interrupt charging"),
 }
 
 

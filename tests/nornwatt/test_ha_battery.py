@@ -177,7 +177,7 @@ def test_c_mode_power_one_or_two_numbers() -> None:
     assert [e for e in errors({**base, "charge_power": "number.c"})
             if "required" in e] == [(
         "device 'bat': capabilities.power_setpoint: key 'discharge_power' is required "
-        "(Power while discharging (no sign))")]
+        "(Number entity that takes the power while discharging, in W or kW, always positive)")]
 
 
 async def test_d_action_with_data_deadband_and_refresh() -> None:
@@ -273,7 +273,7 @@ def test_validation_of_the_power_setpoint() -> None:
     )]
     assert errors({"control": "charge_discharge", "charge": "number.c"}) == [(
         "device 'bat': capabilities.power_setpoint: key 'discharge' is required "
-        "(Discharge power (W or kW))"
+        "(Number entity that takes the discharge power, in W or kW)"
     )]
     assert "must be one of" in errors({"control": "magic"})[0]
 
